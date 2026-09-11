@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/agent",
+  "version": "0.1.0",
+  "description": "Lcode 骨架层：Agent 契约、活体注册表、创建/恢复工厂接缝（文档 20 §5.4）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/scope": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

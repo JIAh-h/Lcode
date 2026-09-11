@@ -1,0 +1,10 @@
+{
+  "name": "@lcode/lsp",
+  "version": "0.1.0",
+  "description": "Lcode 能力层接口：语言服务（服务崩溃不得杀死会话，ctx.lsp）",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": { "@lcode/context": "workspace:*", "@lcode/util": "workspace:*" },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

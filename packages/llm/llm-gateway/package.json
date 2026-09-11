@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/llm-gateway",
+  "version": "0.1.0",
+  "description": "统一网关适配器",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/llm": "workspace:*",
+    "@lcode/settings": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

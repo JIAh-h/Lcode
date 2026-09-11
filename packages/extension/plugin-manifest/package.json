@@ -1,0 +1,10 @@
+{
+  "name": "@lcode/plugin-manifest",
+  "version": "0.1.0",
+  "description": "Lcode 扩展层：插件清单（lcode.json schema，文档 13）",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": { "@lcode/util": "workspace:*" },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

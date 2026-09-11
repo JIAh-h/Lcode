@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/compaction-summary",
+  "version": "0.1.0",
+  "description": "压缩-摘要（最后手段）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/compaction": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

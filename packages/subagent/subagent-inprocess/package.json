@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/subagent-inprocess",
+  "version": "0.1.0",
+  "description": "子代理进程内实现（能力只可收窄）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/subagent": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

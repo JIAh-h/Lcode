@@ -1,0 +1,13 @@
+{
+  "name": "@lcode/skill",
+  "version": "0.1.0",
+  "description": "Lcode 能力层接口：技能（两段式加载，文档 20 §6.1 skill 族，ctx.skills）",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

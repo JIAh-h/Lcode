@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/system-prompt",
+  "version": "0.1.0",
+  "description": "Lcode 骨架层：把“要告诉模型的一切”装配成一次请求的 system 内容与工具 schema（文档 20 §5.2）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/scope": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

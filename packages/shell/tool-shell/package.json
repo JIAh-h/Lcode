@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/tool-shell",
+  "version": "0.1.0",
+  "description": "shell 工具消费包（21 §3.6）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/shell": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/tool-subagent",
+  "version": "0.1.0",
+  "description": "子代理工具消费包",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/subagent": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

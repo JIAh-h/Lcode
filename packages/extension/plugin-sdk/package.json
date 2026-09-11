@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/plugin-sdk",
+  "version": "0.1.0",
+  "description": "插件 SDK（apply/ctx/type-rpc）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/plugin-manifest": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

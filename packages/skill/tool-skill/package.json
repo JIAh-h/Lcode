@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/tool-skill",
+  "version": "0.1.0",
+  "description": "技能工具消费包",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/skill": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@lcode/cli",
+  "version": "0.1.0",
+  "description": "Lcode headless CLI（另一个前端，不是简化版，文档 10 §8 / 20 §7.2）",
+  "type": "module",
+  "private": true,
+  "bin": { "lcode": "./dist/index.js" },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/web-fetch",
+  "version": "0.1.0",
+  "description": "网页抓取实现（内容包裹转义，12 §8）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/web": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

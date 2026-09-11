@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/shell-local",
+  "version": "0.1.0",
+  "description": "本机 shell 实现（批次⑤）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/shell": "workspace:*",
+    "@lcode/subprocess": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

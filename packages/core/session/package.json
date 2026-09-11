@@ -1,0 +1,20 @@
+{
+  "name": "@lcode/session",
+  "version": "0.1.0",
+  "description": "Lcode 骨架层核心：append-only 事件日志 + 派生投影（文档 06 / 20 §5.1）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/scope": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

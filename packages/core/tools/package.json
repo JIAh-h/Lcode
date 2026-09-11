@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/tools",
+  "version": "0.1.0",
+  "description": "Lcode 骨架层：作用域工具注册表 + 受守卫的执行流水线（文档 08 / 20 §5.3）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/scope": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

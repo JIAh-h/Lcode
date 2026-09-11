@@ -1,0 +1,13 @@
+{
+  "name": "@lcode/terminal",
+  "version": "0.1.0",
+  "description": "Lcode 能力层接口：PTY 终端（文档 20 §6.1 terminal 族，ctx.terminals）",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

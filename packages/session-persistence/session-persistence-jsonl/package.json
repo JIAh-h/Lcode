@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/session-persistence-jsonl",
+  "version": "0.1.0",
+  "description": "Lcode 持久化实现：JSONL 帧编解码 + 连续 chunk 打包（文档 22 §4，权威归档）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/session": "workspace:*",
+    "@lcode/session-persistence": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

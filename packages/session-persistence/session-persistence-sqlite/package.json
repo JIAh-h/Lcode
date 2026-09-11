@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/session-persistence-sqlite",
+  "version": "0.1.0",
+  "description": "Lcode 持久化实现：15 张表可执行 DDL + 索引写入（文档 22 §3，SQLite 索引层）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/session": "workspace:*",
+    "@lcode/session-persistence": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

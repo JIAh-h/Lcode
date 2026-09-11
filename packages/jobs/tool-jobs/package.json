@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/tool-jobs",
+  "version": "0.1.0",
+  "description": "作业工具消费包",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/jobs": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

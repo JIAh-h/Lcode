@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/sandbox-win32",
+  "version": "0.1.0",
+  "description": "Windows 沙箱（AppContainer + Job Object）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/sandbox": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

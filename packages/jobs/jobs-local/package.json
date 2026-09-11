@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/jobs-local",
+  "version": "0.1.0",
+  "description": "后台作业本地实现（输出有界缓冲）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/jobs": "workspace:*",
+    "@lcode/subprocess": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

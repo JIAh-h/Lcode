@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/llm-replay",
+  "version": "0.1.0",
+  "description": "Lcode llm 实现包：从录制的事件流回放（无密钥可跑，快照重放的地基，文档 23 §14 批次③）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/llm": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

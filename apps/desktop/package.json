@@ -1,0 +1,26 @@
+{
+  "name": "@lcode/desktop",
+  "version": "0.1.0",
+  "description": "Lcode 桌面应用：Electron main / preload / renderer（文档 10、20 §7.1；桌面端 CJS——Electron 33 ESM 主进程加载器有兼容问题）",
+  "private": true,
+  "main": "dist/main.js",
+  "scripts": {
+    "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch --outDir dist\" \"wait-on http://localhost:5173 tcp:5173 && electron .\"",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "start": "electron .",
+    "typecheck": "tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@lcode/session": "workspace:*",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "react-router-dom": "^6.28.0"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0",
+    "electron": "^33.2.0",
+    "wait-on": "^8.0.1"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/subprocess-local",
+  "version": "0.1.0",
+  "description": "本机子进程实现（进程树可整体终止）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/subprocess": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

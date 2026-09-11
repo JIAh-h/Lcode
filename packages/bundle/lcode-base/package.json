@@ -1,0 +1,19 @@
+{
+  "name": "@lcode/lcode-base",
+  "version": "0.1.0",
+  "description": "基础集束（仅装配声明，无逻辑代码）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

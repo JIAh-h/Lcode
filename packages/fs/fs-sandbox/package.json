@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/fs-sandbox",
+  "version": "0.1.0",
+  "description": "受沙箱约束的文件系统实现",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/fs": "workspace:*",
+    "@lcode/sandbox": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "name": "@lcode/session-persistence",
+  "version": "0.1.0",
+  "description": "Lcode 能力层接口：会话持久化（SQLite 索引 + JSONL 权威归档，文档 22）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/session": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

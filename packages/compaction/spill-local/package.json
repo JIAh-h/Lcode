@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/spill-local",
+  "version": "0.1.0",
+  "description": "超大工具结果落盘 + locator（溢出存储）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/util": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/context": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/plugin-host",
+  "version": "0.1.0",
+  "description": "插件宿主（独立 utility process，类型化 RPC）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/plugin-manifest": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

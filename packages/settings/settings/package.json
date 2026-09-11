@@ -1,0 +1,13 @@
+{
+  "name": "@lcode/settings",
+  "version": "0.1.0",
+  "description": "Lcode 能力层接口：设置（六层配置模型 D19，ctx.settings）",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

@@ -1,0 +1,88 @@
+/* Lcode 设计令牌（文档 10 §6 设计系统；严格取自原型 lcode-mvp-prototype.html 的 CSS 变量）。
+   校验脚本（docs/tools/check.py）保证规格外色值 = 0——不要在这里引入令牌之外的新色值。 */
+
+:root {
+  --font-ui: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  /* 浅色（默认） */
+  --bg-canvas: #ffffff;
+  --bg-panel: #f7f7f8;
+  --bg-elevated: #ffffff;
+  --bg-inset: #f1f1f3;
+  --border-subtle: #e7e7ea;
+  --border-strong: #d9d9de;
+  --text-primary: #1b1b1f;
+  --text-secondary: #5a5a62;
+  --text-muted: #9a9aa2;
+  --accent: #2563eb;
+  --accent-weak: #eef4fe;
+  --accent-fg: #ffffff;
+  --ink: #1b1b1f;
+  --ink-fg: #ffffff;
+  --state-running: #2563eb;
+  --state-success: #16a34a;
+  --state-error: #dc2626;
+  --state-waiting: #d97706;
+  --state-idle: #8b8b93;
+  --diff-add-bg: #e7f6ec;
+  --diff-add-fg: #15803d;
+  --diff-del-bg: #fdecec;
+  --diff-del-fg: #b91c1c;
+  --diff-context-fg: #5a5a62;
+
+  /* 间距 / 圆角 / 阴影 */
+  --s1: 2px; --s2: 4px; --s3: 6px; --s4: 8px; --s5: 12px; --s6: 16px; --s7: 24px; --s8: 32px;
+  --r1: 6px; --r2: 8px; --r3: 10px; --r4: 14px; --r5: 18px;
+  --sh-1: 0 1px 2px rgba(16, 16, 20, 0.05);
+  --sh-2: 0 4px 16px rgba(16, 16, 20, 0.08);
+  --sh-modal: 0 16px 48px rgba(16, 16, 20, 0.16);
+}
+
+html[data-theme='dark'] {
+  --bg-canvas: #101012;
+  --bg-panel: #161618;
+  --bg-elevated: #1c1c1f;
+  --bg-inset: #131315;
+  --border-subtle: #26262b;
+  --border-strong: #37373e;
+  --text-primary: #f2f2f4;
+  --text-secondary: #a6a6ae;
+  --text-muted: #6e6e76;
+  --accent: #60a5fa;
+  --accent-weak: #16233b;
+  --accent-fg: #101012;
+  --ink: #f2f2f4;
+  --ink-fg: #101012;
+  --state-running: #60a5fa;
+  --state-success: #4ade80;
+  --state-error: #f87171;
+  --state-waiting: #fbbf24;
+  --state-idle: #6e6e76;
+  --diff-add-bg: #10291a;
+  --diff-add-fg: #6ee7a0;
+  --diff-del-bg: #2b1416;
+  --diff-del-fg: #fca5a5;
+  --diff-context-fg: #a6a6ae;
+  --sh-1: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --sh-2: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --sh-modal: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+/* 色盲友好（cb）：diff 蓝/橙替代红/绿 */
+html[data-cb='on'] {
+  --diff-add-fg: #1d4ed8;
+  --diff-del-fg: #c2410c;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font: 13.5px/21px var(--font-ui);
+  background: var(--bg-canvas);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+button { font-family: var(--font-ui); cursor: pointer; color: inherit; background: none; border: none; }
+input, textarea { font-family: var(--font-ui); color: var(--text-primary); }
+a { color: var(--accent); text-decoration: none; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }

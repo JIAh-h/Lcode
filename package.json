@@ -1,0 +1,44 @@
+{
+  "name": "lcode",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Lcode — 可插拔内核 + 全链路可重放的桌面级 AI 编程工作台",
+  "type": "module",
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "packageManager": "pnpm@9.12.0",
+  "scripts": {
+    "build": "pnpm -r --if-present run build",
+    "dev:desktop": "pnpm --filter @lcode/desktop dev",
+    "start:desktop": "node scripts/start-desktop.mjs",
+    "dev:cli": "pnpm --filter @lcode/cli dev",
+    "typecheck": "tsc -p tsconfig.host.json --noEmit && tsc -p tsconfig.client.json --noEmit",
+    "lint": "eslint . --max-warnings 0",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:replay": "vitest run --config vitest.replay.config.ts",
+    "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "check:invariants": "node scripts/check-invariants.mjs",
+    "check:deps": "node scripts/check-deps.mjs",
+    "check:docs": "python docs/tools/check.py",
+    "check:size": "node scripts/check-size.mjs",
+    "clean": "pnpm -r --if-present run clean && rm -rf node_modules/.cache",
+    "bench": "node scripts/bench.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^9.17.0",
+    "prettier": "^3.4.2",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.0",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  }
+}

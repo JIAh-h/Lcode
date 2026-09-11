@@ -1,0 +1,22 @@
+{
+  "name": "@lcode/terminal-pty",
+  "version": "0.1.0",
+  "description": "PTY 终端实现",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/terminal": "workspace:*",
+    "@lcode/subprocess": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

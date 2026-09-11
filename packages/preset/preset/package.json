@@ -1,0 +1,10 @@
+{
+  "name": "@lcode/preset",
+  "version": "0.1.0",
+  "description": "Lcode 能力层接口：预设（agent 会话级插件组合，ctx.presets）",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": { "@lcode/context": "workspace:*", "@lcode/util": "workspace:*" },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

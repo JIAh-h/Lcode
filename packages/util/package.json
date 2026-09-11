@@ -1,0 +1,16 @@
+{
+  "name": "@lcode/util",
+  "version": "0.1.0",
+  "description": "Lcode 零依赖基础工具：品牌类型、LcodeError、无损 JSON、disposer、id、超时与重试",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}
