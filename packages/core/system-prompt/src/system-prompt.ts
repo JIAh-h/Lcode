@@ -22,7 +22,8 @@ export interface SystemPromptService {
 
 export interface AssembleCtx {
   readonly variables: Readonly<Record<string, string>>
-  readonly sessionId?: string
+  /** 变量求值时可用的会话上下文；未绑定会话时确实没有，故显式写 `| undefined` */
+  readonly sessionId?: string | undefined
 }
 
 export interface AssembleInput {
@@ -151,4 +152,11 @@ export class InMemorySystemPromptService implements SystemPromptService {
 
 export function createSystemPromptService(toolsRegistry: ToolRegistry): SystemPromptService {
   return new InMemorySystemPromptService(toolsRegistry)
+}
+
+/** ctx key（文档 20 §5.2）：单数 = 一个装配器 */
+declare module '@lcode/context' {
+  interface Services {
+    systemPrompt: SystemPromptService
+  }
 }

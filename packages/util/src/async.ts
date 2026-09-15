@@ -34,21 +34,33 @@ export class TimeoutError extends Error {
 
 export async function withTimeout<T>(fn: (signal: AbortSignal) => Promise<T>, ms: number, opts: TimeoutOptions = {}): Promise<T> {
   const ac = new AbortController()
-  const timer = setTimeout(() => {
-    ac.abort()
-    opts.onTimeout?.()
-  }, ms)
+  let timedOut = false
+  let timer: ReturnType<typeof setTimeout> | undefined
+
+  // 竞速分支。**必须有它**：只 `ac.abort()` 是不够的——被调方完全可能不理会 signal
+  // （比如一个永不 resolve 的 Promise），那样调用方会被无限挂住，超时形同虚设。
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true
+      ac.abort()
+      opts.onTimeout?.()
+      reject(new TimeoutError())
+    }, ms)
+  })
+
   const onOuterAbort = () => ac.abort()
   opts.signal?.addEventListener('abort', onOuterAbort, { once: true })
   try {
-    return await fn(ac.signal)
+    return await Promise.race([fn(ac.signal), timeout])
   } catch (err) {
-    if (ac.signal.aborted && !(err instanceof TimeoutError)) {
-      throw opts.signal?.aborted ? err : new TimeoutError()
+    // 因**我们**超时而失败时统一成 TimeoutError（被调方可能抛的是 AbortError）；
+    // 外层主动取消导致的不改写，保留原始原因（调用方要能区分"我取消了"与"超时了"）
+    if (timedOut && !(err instanceof TimeoutError) && opts.signal?.aborted !== true) {
+      throw new TimeoutError()
     }
     throw err
   } finally {
-    clearTimeout(timer)
+    if (timer !== undefined) clearTimeout(timer)
     opts.signal?.removeEventListener('abort', onOuterAbort)
   }
 }

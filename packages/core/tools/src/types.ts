@@ -38,8 +38,34 @@ export interface ToolDefinition<TIn = JsonValue, TOut = JsonValue> {
   readonly card?: CardType
   /** 超时预算（毫秒）；超时 → ET-TIMEOUT */
   readonly timeoutMs?: number
+  /**
+   * **申报这次调用的动作意图**（审批与权限判定的输入，12 §5.4 / §9.3）。
+   *
+   * 为什么由**工具**申报而不是让策略去解析 `arguments`：只有工具知道自己的参数
+   * 里哪个字段是"要写的路径"、哪个是"要跑的命令"。让策略去猜 JSON 结构，
+   * 会在每个工具加参数时静默失效——而那正是**该问的没问**这一类事故的形态。
+   *
+   * 省略 = 这个工具不产生外部副作用（如纯计算的 `todo_write`），策略直接放行。
+   */
+  describeAction?(parsed: TIn): ToolActionIntent
   /** 执行体：收到"原始串 + 解析值"，返回规范值或抛 LcodeError */
   execute(call: ToolCall & { readonly parsed: TIn }, opts: ExecuteOpts): Promise<TOut> | TOut
+}
+
+/**
+ * 工具申报的"我要干什么"。
+ *
+ * 字段与 `permission-presets` 的 `ActionIntent` 结构兼容——但**类型摆在 core/tools**
+ * 是因为这是工具契约的一部分，而 `core/tools` 不能反向依赖策略包（20 §3 的依赖方向）。
+ */
+export interface ToolActionIntent {
+  /** 一句话摘要（给用户看，不是 JSON dump） */
+  readonly summary: string
+  readonly paths?: readonly { readonly path: string; readonly mode: 'read' | 'write' }[] | undefined
+  readonly argv?: readonly string[] | undefined
+  readonly domains?: readonly string[] | undefined
+  /** 环境变量**名**（只给名字不给值，I7） */
+  readonly env?: readonly string[] | undefined
 }
 
 export interface ExecuteOpts {
@@ -79,9 +105,25 @@ export interface GuardCtx {
 /** 事件声明（合并进 @lcode/context） */
 declare module '@lcode/context' {
   interface Events {
-    /** 执行前（waterfall：可 allow/deny/ask；D10） */
-    'tools/pre-execute': { call: ToolCall; deny?: string }
+    /**
+     * 执行前（waterfall）。
+     *
+     * 处理器可以：`deny` 一条理由（拒掉）、或什么都不做（放行）。`intent` 是
+     * **已经被解析过的**动作申报——策略层不需要、也不该去解析 `call.arguments` 的 JSON。
+     */
+    'tools/pre-execute': {
+      call: ToolCall
+      /** 工具申报的动作意图（工具没申报则为 undefined） */
+      intent?: ToolActionIntent
+      /** 引擎传下来的执行 scope（会话身份）——策略层拿它定位工作区与落盘会话 */
+      scope?: unknown
+      deny?: string
+    }
     'tools/execute': { call: ToolCall; result: ToolResult }
     'tools/post-execute': { call: ToolCall; result: ToolResult }
+  }
+  /** ctx key（文档 20 §5.3）：注册表 */
+  interface Services {
+    tools: import('./registry.ts').ToolRegistry
   }
 }

@@ -1,7 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { ComposerBar } from '../components/ComposerBar.tsx'
 import { toast } from '../components/toast.ts'
+import { t } from '../i18n/index.ts'
 
 /**
  * P1 首页（文档 19 §3.1，布局对齐 Codex）。
@@ -29,10 +31,54 @@ export function HomePage() {
   const [proj, setProj] = useState<Proj | null>(null)
   const [pickOpen, setPickOpen] = useState(false)
   const [dragOver, setDragOver] = useState(false)
+  const pickRef = useRef<HTMLSpanElement | null>(null)
 
-  const submit = () => {
-    if (text.trim().length === 0) return
-    navigate('/sessions/demo-1')
+  /* 点击「选择项目」弹窗外部、或按 Esc 时收起（与 AppShell 菜单栏同一套交互） */
+  useEffect(() => {
+    const close = (e: MouseEvent) => {
+      if (pickRef.current && !pickRef.current.contains(e.target as Node)) setPickOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setPickOpen(false)
+    }
+    document.addEventListener('click', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('click', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [])
+
+  /**
+   * 提交任务：**真的建一个会话**，然后进工作台。
+   *
+   * 之前这里是 `navigate('/sessions/demo-1')`——一个写死的会话 id，
+   * 于是无论说什么都进同一个空壳（工作台里显示的还是一张与输入无关的假总结卡）。
+   */
+  const submit = async () => {
+    const value = text.trim()
+    if (value.length === 0) return
+    const api = (globalThis as unknown as {
+      lcode?: {
+        session?: { create(i: unknown): Promise<{ session_id: string }> }
+        agent?: { send(i: unknown): Promise<unknown> }
+      }
+    }).lcode
+    if (api?.session === undefined || api.agent === undefined) {
+      toast(t('当前环境没有主进程桥，无法新建对话'))
+      return
+    }
+    try {
+      // 标题取首行前若干字（列表里要能认出这是哪次对话）；真正的命名/重命名是后续的事
+      const title = value.split('\n')[0]!.slice(0, 40)
+      const cwd = proj?.path ?? ''
+      const created = await api.session.create({ cwd, title })
+      // 首句**在这里就发出去**：用户已经表达完了意图，没必要进去再发一次
+      await api.agent.send({ session_id: created.session_id, text: value })
+      navigate(`/sessions/${created.session_id}`)
+    } catch (err) {
+      toast(err instanceof Error ? err.message : t('新建对话失败'))
+    }
   }
 
   const pickExisting = (name: string) => {
@@ -42,11 +88,11 @@ export function HomePage() {
 
   const pickFolder = async () => {
     setPickOpen(false)
-    const path = await window.lcode.chooseFolder()
+    const path = await window.lcode.chooseFolder(t('选择项目文件夹'))
     if (!path) return
     const name = path.split(/[\\/]/).filter(Boolean).pop() || path
     setProj({ name, path })
-    toast(`已选择项目：${name}`)
+    toast(t('已选择项目：{name}', { name }))
   }
 
   const onDrop = async (e: DragEvent) => {
@@ -61,12 +107,12 @@ export function HomePage() {
       path = ''
     }
     if (!path) {
-      toast('未能识别拖入内容的路径，请改为点击「选择项目」')
+      toast(t('未能识别拖入内容的路径，请改为点击「选择项目」'))
       return
     }
     const name = path.split(/[\\/]/).filter(Boolean).pop() || path
     setProj({ name, path })
-    toast(`已选择项目：${name}`)
+    toast(t('已选择项目：{name}', { name }))
   }
 
   return (
@@ -87,10 +133,10 @@ export function HomePage() {
       <h1>
         {proj ? (
           <>
-            我们应该在 <em>{proj.name}</em> 中做些什么？
+            {t('我们应该在')} <em>{proj.name}</em>{t('中做些什么？')}
           </>
         ) : (
-          '我们要构建什么？'
+          t('我们要构建什么？')
         )}
       </h1>
       <div className="hcards">
@@ -98,12 +144,12 @@ export function HomePage() {
           <div
             key={c.title}
             className="hcard"
-            title="点击填入示例任务"
-            onClick={() => setText(c.preset)}
+            title={t('点击填入示例任务')}
+            onClick={() => setText(t(c.preset))}
           >
             <div className="ic">{c.ic}</div>
-            <h3>{c.title}</h3>
-            <p>{c.desc}</p>
+            <h3>{t(c.title)}</h3>
+            <p>{t(c.desc)}</p>
           </div>
         ))}
       </div>
@@ -115,7 +161,7 @@ export function HomePage() {
                 📁 {proj.name}
                 <button
                   className="projx"
-                  title="取消选择，重新选择项目"
+                  title={t('取消选择，重新选择项目')}
                   onClick={() => {
                     setProj(null)
                     setPickOpen(false)
@@ -127,7 +173,7 @@ export function HomePage() {
                 </button>
               </span>
             ) : (
-              <span className="pickwrap">
+              <span className="pickwrap" ref={pickRef}>
                 <button className="proj pick" onClick={() => setPickOpen(!pickOpen)}>
                   <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                     <path
@@ -136,11 +182,11 @@ export function HomePage() {
                       strokeWidth="1.2"
                     />
                   </svg>
-                  选择项目
+                  {t('选择项目')}
                 </button>
                 {pickOpen && (
                   <div className="pickmenu">
-                    <div className="picklab">已有项目</div>
+                    <div className="picklab">{t('已有项目')}</div>
                     {EXISTING_PROJECTS.map((n) => (
                       <a key={n} onClick={() => pickExisting(n)}>
                         <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
@@ -162,33 +208,23 @@ export function HomePage() {
                       <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                         <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                       </svg>
-                      新建项目（选择文件夹…）
+                      {t('新建项目（选择文件夹…）')}
                     </a>
-                    <div className="pickhint">也可以把文件夹直接拖进窗口</div>
+                    <div className="pickhint">{t('也可以把文件夹直接拖进窗口')}</div>
                   </div>
                 )}
               </span>
             )}
           </div>
-          <textarea
-            placeholder={proj ? '描述一个任务，或直接问个问题…' : '描述一个任务，或先在上方选择项目…'}
+          <ComposerBar
             value={text}
-            onChange={(e) => setText(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) submit()
-            }}
+            onChange={setText}
+            onSend={submit}
+            placeholder={proj ? t('描述一个任务，或直接问个问题…') : t('描述一个任务，或先在上方选择项目…')}
           />
-          <div className="cinbar">
-            <button className="tbtn">＋</button>
-            <button className="tbtn">权限：标准 ▾</button>
-            <button className="tbtn">Deepseek-V4.1 ▾</button>
-            <button className="send" title="发送" onClick={submit}>
-              ↑
-            </button>
-          </div>
         </div>
       </div>
-      {dragOver && <div className="dropmask">松开以打开该文件夹</div>}
+      {dragOver && <div className="dropmask">{t('松开以打开该文件夹')}</div>}
     </main>
   )
 }

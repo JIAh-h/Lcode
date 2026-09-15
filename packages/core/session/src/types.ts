@@ -25,10 +25,56 @@ export type AgentStatus = 'idle' | 'running' | 'waiting-approval' | 'cancelled'
 /** 请求快照原因（06 待补充完整集合，骨架先列已知值） */
 export type RequestHeaderReason = 'new-epoch' | 'continuation' | 'model-switch'
 
-/** 审批展示的影响面（12 §5.4） */
-export interface Impact {
-  readonly kind: 'write' | 'exec' | 'network' | 'other'
+/** 被审批的**动作**（12 §5.4：意图化摘要，不是 JSON dump） */
+export interface ApprovalAction {
+  readonly tool: string
+  /** 一句人能看懂的话（"把 > 写到 /Users/you/other/.env"），不是参数原文 */
   readonly summary: string
+  readonly argv?: readonly string[] | undefined
+  readonly cwd?: string | undefined
+}
+
+/**
+ * 这条请求**凭什么被提出来**（12 §5.4）。
+ *
+ * 四选一，因为"为什么问你"本身是用户判断要不要放行的关键信息：
+ * 是预设规定的？是某条策略加的？还是守卫要求的？
+ */
+export interface ApprovalBasis {
+  readonly source: 'preset' | 'waterfall' | 'guard' | 'delegation'
+  readonly reason: string
+  /** `source === 'preset'` 时给出档位名（如「标准」） */
+  readonly presetName?: string | undefined
+}
+
+/** 一处受影响的文件 */
+export interface ApprovalPathImpact {
+  readonly path: string
+  readonly mode: 'read' | 'write'
+  /**
+   * **是否在工作区之外**。
+   *
+   * 这个字段是 T1 的最后一道防线：UI **必须**把它显著标出来（21 §6.2 的
+   * `EP-OUTSIDE_WORKSPACE` 要求"弹出询问框并显著标出工作区外"）。
+   */
+  readonly outsideWorkspace: boolean
+}
+
+/**
+ * 审批展示的影响面（12 §5.4）。
+ *
+ * 三段（action / basis / impact）**缺一不可**（`SEC-APPROVAL-003`）：
+ * 用户要在**不点开工具参数**的情况下看懂"它要干什么、为什么要问、会碰到什么"。
+ */
+export interface Impact {
+  readonly paths?: readonly ApprovalPathImpact[] | undefined
+  /** 出站的域名（不是 URL——用户判断的是"要不要让数据去这个站"） */
+  readonly network?: { readonly domains: readonly string[] } | undefined
+  /** 涉及的**环境变量名**（**只给名字不给值**——值可能含凭据，I7） */
+  readonly env?: readonly string[] | undefined
+  /** 沙箱档位变化（放宽档位本身是需要审批的动作之一，12 §9.3 ⑤） */
+  readonly sandboxChange?: { readonly from: string; readonly to: string } | undefined
+  readonly processScope?: string | undefined
 }
 
 // ─────────── 消息与内容块 ───────────
@@ -162,13 +208,31 @@ export interface SessionEventMap {
   'todo/write': { readonly todos: readonly TodoItem[] }
   /** 计划模式：整值替换 */
   'plan/mode': { readonly active: boolean }
+  /**
+   * 提了一个审批问题（12 §5.5）。
+   *
+   * **落盘**：审批是时间轴上的一等事实——中止后重新打开，用户要能看到
+   * "当时问过什么、怎么答的"（21 §4 索引）。
+   */
   'approval/asked': {
     readonly callId: string
-    readonly action: string
-    readonly basis: string
+    readonly action: ApprovalAction
+    readonly basis: ApprovalBasis
     readonly impact: Impact
+    readonly askedAt: number
   }
-  'approval/decided': { readonly callId: string; readonly result: ApprovalResult }
+  'approval/decided': {
+    readonly callId: string
+    readonly result: ApprovalResult
+    /**
+     * 谁定的。
+     *
+     * `auto-denied` 与 `human` 必须能区分：前者是"没有应答者"，后者是"人点了拒绝"。
+     * 混在一起会让事后复盘把"没人问"读成"用户拒绝了"（12 §5.5）。
+     */
+    readonly decidedBy: 'human' | 'auto-denied' | 'cancelled'
+    readonly decidedAt: number
+  }
   'compaction/start': { readonly compactionId: string }
   'compaction/summary': { readonly compactionId: string; readonly summary: string }
   'compaction/end': { readonly compactionId: string }
@@ -197,7 +261,21 @@ export interface SessionEventEnvelope<K extends SessionEventType = SessionEventT
   readonly ignorable?: true
 }
 
-export type SessionEvent<K extends SessionEventType = SessionEventType> = SessionEventEnvelope<K>
+/**
+ * 日志中的事件。
+ *
+ * ⚠️ 这里**必须是按 K 分配的映射联合**（`{[P in K]: …}[K]`），不能直接写成
+ * `SessionEventEnvelope<K>`：后者是**一个**对象类型，`type` 与 `data` 是彼此独立的
+ * 属性，于是 `if (e.type === 'turn/start') e.data.turn` 窄化不了 `data`
+ * （TS 会说「Property 'turn' does not exist on UserMessage | …」）。
+ * 写成映射联合后 `type` 成为**判别式**，`switch (e.type)` / `e.type === x` 都能正确收窄。
+ *
+ * 因为 `SessionEventMap` 是开放接口（插件可声明合并新增事件），映射联合会**自动**
+ * 把插件新增的事件纳入进来，不需要改这里——这也是 06 §2.2 想要的开放语义。
+ */
+export type SessionEvent<K extends SessionEventType = SessionEventType> = {
+  [P in K]: SessionEventEnvelope<P>
+}[K]
 
 /** 追加事件时的输入（seq 由 session 模块分配，调用方不得传入） */
 export type EventInput<K extends SessionEventType = SessionEventType> = Omit<

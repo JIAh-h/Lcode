@@ -58,6 +58,8 @@ export class InMemoryAgentStore implements AgentService {
   }
 
   async withInitiator<T>(initiator: InitiatorRef, fn: () => Promise<T>): Promise<T> {
+    // 骨架阶段不做发起者归属（批次⑥ 的审批链会用到）；显式 void 表明"故意未使用"
+    void initiator
     return fn()
   }
 
@@ -148,7 +150,13 @@ class AgentHandleImpl implements AgentHandle {
 
   private setStatus(status: AgentStatus, reason?: string): void {
     this._status = status
-    void this.ctx.emit('agent/status', { agentId: this.id, status, reason })
+    // `exactOptionalPropertyTypes` 下 `reason?: string` 不接受显式 undefined，
+    // 因此"有值才带上这个字段"（而不是传一个 undefined 进去）
+    void this.ctx.emit('agent/status', {
+      agentId: this.id,
+      status,
+      ...(reason !== undefined ? { reason } : {}),
+    })
   }
 
   private assertAlive(): void {

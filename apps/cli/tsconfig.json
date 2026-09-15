@@ -1,9 +1,16 @@
 {
+  // 与全仓一致：**源码即产物**（各包 exports 指向 src/*.ts），由 tsx / 打包器解析，
+  // 所以这里也是 noEmit + allowImportingTsExtensions。
+  //
+  // ⚠️ 为什么不能像 Electron 主进程那样真的 emit：`tsc` 编译 CLI 时会把
+  // `@lcode/*` 依赖的 **.ts 源码**一并编译（它们没有编译产物），而源码里是
+  // `import './x.ts'` 的写法 —— 与 allowImportingTsExtensions=false 直接冲突。
+  // 因此 CLI 的**可分发构建**（bundle 成单个 JS）属于批次⑦「前端」的活，
+  // 当前 `build` 只做类型检查；日常运行走 `pnpm --filter @lcode/cli dev`（tsx）。
   "extends": "../../tsconfig.host.json",
   "compilerOptions": {
-    "rootDir": "src",
-    "outDir": "dist",
-    "noEmit": false
+    "allowImportingTsExtensions": true,
+    "noEmit": true
   },
   "include": ["src"]
 }

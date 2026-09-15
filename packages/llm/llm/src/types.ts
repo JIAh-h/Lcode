@@ -1,5 +1,7 @@
 import type { StreamChunk } from '@lcode/session'
-import type { ModelSelection } from '@lcode/agent-default-model'
+import type { ModelSelection, SamplingParams } from '@lcode/agent-default-model'
+
+export type { SamplingParams }
 
 /** 供应商信息（能力探测的输入） */
 export interface ProviderInfo {
@@ -23,6 +25,15 @@ export interface ModelInfo {
 export interface PreparedCall {
   readonly provider: string
   readonly model: string
+  /**
+   * 采样参数（`maxTokens` / `temperature` / `reasoningEffort`）。
+   *
+   * **必须挂在 call 上，不能只留在 `ModelSelection` 里**：`agent-loop` 会用
+   * `withBody()` 把 `request.body` 换成从日志派生的内部形状，而 `stream()` 拿到的
+   * 只有这个 `PreparedCall`——参数若不在上面，适配器就再也读不到它们了。
+   * （`ModelSelection` 在 `prepareCall` 返回后就不在调用链上了。）
+   */
+  readonly params?: SamplingParams | undefined
   /** 已物化请求（含凭据解析后的端点 / headers 引用；**值不进日志**，I7） */
   readonly request: {
     readonly endpoint: string

@@ -12,11 +12,19 @@
   },
   "dependencies": {
     "@lcode/agent": "workspace:*",
+    "@lcode/agent-default-model": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/llm": "workspace:*",
     "@lcode/scope": "workspace:*",
     "@lcode/session": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
+    "@lcode/tools": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@lcode/llm-replay": "workspace:*"
   }
 }

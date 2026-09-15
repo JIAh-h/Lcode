@@ -1,1 +1,7 @@
-export type { SandboxStatus, SandboxService } from './sandbox.ts'
+export type {
+  ResolvedSandboxPolicy,
+  SandboxMode,
+  SandboxService,
+  SandboxStatus,
+  SandboxWrapResult,
+} from './sandbox.ts'

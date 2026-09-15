@@ -11,9 +11,37 @@
     }
   },
   "dependencies": {
+    "@lcode/agent": "workspace:*",
+    "@lcode/agent-default-model": "workspace:*",
+    "@lcode/agent-loop": "workspace:*",
+    "@lcode/agents-api": "workspace:*",
+    "@lcode/approval": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/credentials": "workspace:*",
+    "@lcode/credentials-local": "workspace:*",
+    "@lcode/fs-local": "workspace:*",
+    "@lcode/llm": "workspace:*",
+    "@lcode/llm-openai-compatible": "workspace:*",
+    "@lcode/model-api": "workspace:*",
+    "@lcode/permission-presets": "workspace:*",
+    "@lcode/sandbox": "workspace:*",
+    "@lcode/sandbox-local": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/session-api": "workspace:*",
+    "@lcode/session-persistence-jsonl": "workspace:*",
+    "@lcode/session-persistence-sqlite": "workspace:*",
+    "@lcode/settings-file": "workspace:*",
+    "@lcode/shell-local": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
+    "@lcode/tool-fs": "workspace:*",
+    "@lcode/tool-shell": "workspace:*",
+    "@lcode/tools": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@lcode/llm-replay": "workspace:*"
   }
 }

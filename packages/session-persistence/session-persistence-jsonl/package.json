@@ -13,9 +13,11 @@
   "dependencies": {
     "@lcode/session": "workspace:*",
     "@lcode/session-persistence": "workspace:*",
-    "@lcode/util": "workspace:*"
+    "@lcode/util": "workspace:*",
+    "@bokuweb/zstd-wasm": "^0.0.27"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json --noEmit",
+    "probe:zstd": "node scripts/probe-zstd.mjs"
   }
 }

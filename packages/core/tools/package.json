@@ -13,6 +13,7 @@
   "dependencies": {
     "@lcode/context": "workspace:*",
     "@lcode/scope": "workspace:*",
+    "@lcode/session": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {

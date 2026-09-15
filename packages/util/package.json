@@ -8,6 +8,10 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./fs-atomic": {
+      "types": "./src/fs-atomic.ts",
+      "default": "./src/fs-atomic.ts"
     }
   },
   "scripts": {

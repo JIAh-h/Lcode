@@ -13,6 +13,20 @@
   "dependencies": {
     "@lcode/util": "workspace:*"
   },
+  "devDependencies": {
+    "@lcode/agent": "workspace:*",
+    "@lcode/agent-default-model": "workspace:*",
+    "@lcode/agent-loop": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/llm": "workspace:*",
+    "@lcode/llm-replay": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/session-api": "workspace:*",
+    "@lcode/session-persistence-jsonl": "workspace:*",
+    "@lcode/session-persistence-sqlite": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
+    "@lcode/tools": "workspace:*"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit"
   }

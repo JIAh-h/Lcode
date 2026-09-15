@@ -94,7 +94,7 @@ lcode/
 | 路由 | 页面 | 规格锚点 |
 |---|---|---|
 | `/` | 首页（问候 + 能力卡 + 输入框） | 19 §3.1 P1 |
-| `/sessions/:id` | 工作台（会话流 + **常驻时间轴脊柱** + 输入区） | 19 §3.2 P2 |
+| `/sessions/:id` | 工作台（会话流 + 输入区） | 19 §3.2 P2 |
 | `/sessions/:id/replay` | 回放（三快照：system/工具/消息） | 19 §3.3 P3 |
 | `/sessions/:id/ask` | 询问弹窗（四结果） | 19 §3.4 P4 |
 | `/settings` | 设置（左分类右内容，模型配置在此） | 19 §3.5 P5 |
@@ -106,10 +106,12 @@ lcode/
 
 ### 2.5 通用组件与设计令牌
 
-- 组件：`AppShell`（菜单栏+侧栏+底部设置入口）、`TimelineSpine`（**签名元素**常驻时间轴脊柱，UX-VISUAL-002）、
+- 组件：`AppShell`（菜单栏+侧栏+底部设置入口）、
   `SessionStream`/`ProcessFlow`（过程流折叠，UX-FOLD-001）/`SummaryCard`（最终总结不可折叠，UX-SUMMARY-001）/
   `ArtifactEntry`（产物入口，UX-ARTIFACT-001）/`Composer`（输入区只属于中间会话栏，UX-INPUT-002）、
   `ApprovalModal`/`ErrorBanner`/`Button`。
+- 注：签名元素原为四个，其中「常驻时间轴脊柱」已于 2026-09-14 作废（见 [ADR-0106](./docs/17-架构决策记录ADR.md#adr-0106)），
+  对应组件 `TimelineSpine.tsx` 一并删除。当前签名元素为三个：过程流 / 最终总结 / 产物入口。
 - 令牌：`styles/theme.css` 严格取自原型 CSS 变量（浅/深/**色盲友好**三态），规格外色值 = 0。
 - 文案纪律：界面不出现内部术语（UX-COPY-001 黑名单）；错误条按「人话公式」呈现。
 

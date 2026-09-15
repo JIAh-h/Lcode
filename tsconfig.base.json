@@ -1,4 +1,16 @@
 {
+  // 全仓共享的严格度与模块制式。
+  //
+  // **本仓库是「源码即产物」**：各包 package.json 的 exports 直接指向 src/*.ts，
+  // 由打包器（Vite）/ 测试器（vitest）/ 运行器（tsx）解析，不存在编译中间产物。
+  // 因此：
+  //   - allowImportingTsExtensions：源码里普遍 `import './x.ts'`，必须允许；
+  //   - noEmit：该选项要求二者之一（noEmit / emitDeclarationOnly），选 noEmit。
+  // 需要**真实编译产出**的只剩一处，它在自己的 tsconfig 里显式覆盖：
+  //   - apps/desktop/tsconfig.electron.json（Electron 主进程 / preload → CJS 进 dist/）
+  // 那个配置会把 allowImportingTsExtensions 关掉（与 noEmit:false 不能共存，TS5096）。
+  // apps/cli 之所以不再 emit：tsc 编译它时会连带编译 `@lcode/*` 的 .ts 源码，
+  // 与 allowImportingTsExtensions=false 冲突；它的可分发 bundle 归批次⑦。
   "compilerOptions": {
     "target": "ES2023",
     "module": "NodeNext",
@@ -12,13 +24,11 @@
     "isolatedModules": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "declaration": true,
-    "declarationMap": true,
-    "sourceMap": true,
-    "noEmitOnError": true,
     "forceConsistentCasingInFileNames": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "noEmit": true
   }
 }

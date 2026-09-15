@@ -1,0 +1,30 @@
+{
+  "name": "@lcode/agents-api",
+  "version": "0.1.0",
+  "description": "内部方法契约落地层：docs/21 §2.2 agents.*（9 个方法）。把 @lcode/agent-loop 的运行时句柄包装成方法契约",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/agent": "workspace:*",
+    "@lcode/agent-loop": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "devDependencies": {
+    "@lcode/agent-default-model": "workspace:*",
+    "@lcode/llm": "workspace:*",
+    "@lcode/llm-replay": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
+    "@lcode/tools": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

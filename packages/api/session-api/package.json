@@ -1,0 +1,23 @@
+{
+  "name": "@lcode/session-api",
+  "version": "0.1.0",
+  "description": "内部方法契约落地层：docs/21 §2.1 sessions.*（9 个方法）。装配 core/session + JSONL 日志 + SQLite 索引",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/agent-default-model": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/session-persistence-jsonl": "workspace:*",
+    "@lcode/session-persistence-sqlite": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

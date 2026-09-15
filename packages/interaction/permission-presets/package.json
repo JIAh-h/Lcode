@@ -13,6 +13,10 @@
   "dependencies": {
     "@lcode/approval": "workspace:*",
     "@lcode/context": "workspace:*",
+    "@lcode/fs": "workspace:*",
+    "@lcode/sandbox": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/tools": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {

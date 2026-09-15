@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [master, develop]
+  pull_request:
+
+# 门禁表见 docs/23 §8.1。这里落地的是「不需要密钥、不需要 Electron」的六项。
+#
+# 注意：会话日志 / 索引层的测试依赖 better-sqlite3 原生模块，CI 上由 pnpm install
+# 触发 prebuild-install 拉取预编译产物（根 package.json 的 onlyBuiltDependencies 已放行）。
+# 若产物缺失，这些测试**会失败**（不是跳过）——这是刻意的：宁可 CI 红，也不静默跳过数据层验收。
+# Electron 侧的 ABI 130 双构建（docs/24 §7.1）不在 CI 内，属本地/发布流程。
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      # 原生模块体检：先跑一次自检，失败时给出明确原因（而不是让后面的测试报一堆缺模块的错）。
+      # 自检本身**不**决定成败——真正的判据是下面的 pnpm test。
+      - name: 原生模块体检
+        run: pnpm --filter @lcode/session-persistence-sqlite probe
+        continue-on-error: true
+
+      # zstd 体检：会话日志的压缩归档依赖 WASM（不是原生模块），本应在任何平台都能跑。
+      # 所以这一步**决定成败**——它失败意味着压缩归档在这条 CI 上不可用，那是真问题。
+      - name: zstd 体检（WASM）
+        run: pnpm --filter @lcode/session-persistence-jsonl probe:zstd
+
+      - name: 类型检查（23 §8.1）
+        run: pnpm typecheck
+
+      # 主进程产物由 esbuild 打包（不是 tsc）——它必须能打出来，否则桌面端起不来。
+      - name: 打包桌面主进程
+        run: pnpm --filter @lcode/desktop build:main
+
+      # preload 必须在 sandbox 下真的把桥暴露出来：一旦它 require 了沙箱不允许的模块，
+      # 整个 preload 会**静默不执行**（终端无提示），UI 上只是没有主进程桥。
+      - name: preload 桥自检
+        run: pnpm --filter @lcode/desktop probe:preload
+        continue-on-error: true
+
+      - name: 单元测试与不变量（I1–I5 / I7）
+        run: pnpm test
+
+      - name: 依赖方向检查
+        run: pnpm check:deps
+
+      - name: 核心循环纯度检查（I6）
+        run: pnpm check:invariants
+
+      - name: 文档集校验
+        run: pnpm check:docs
+
+      - name: 源码体积基线
+        run: pnpm check:size

@@ -1,1 +1,7 @@
-export type { ShellResult, ShellRunOpts, ShellService } from './shell.ts'
+export type {
+  ShellBackgroundResult,
+  ShellForegroundResult,
+  ShellResult,
+  ShellRunOpts,
+  ShellService,
+} from './shell.ts'

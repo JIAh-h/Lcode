@@ -4,10 +4,18 @@
   "description": "Lcode 能力层接口：Shell 命令执行（文档 20 §6.1 shell 族，ctx.shell）",
   "type": "module",
   "private": true,
-  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
   "dependencies": {
     "@lcode/context": "workspace:*",
+    "@lcode/sandbox": "workspace:*",
     "@lcode/util": "workspace:*"
   },
-  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
 }

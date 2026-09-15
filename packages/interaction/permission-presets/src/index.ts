@@ -1,8 +1,19 @@
-/**
- * @lcode/permission-presets —— 骨架占位壳。
- * 权限预设（两条权限轴）
- * 真实实现按文档 23 §14 批次推进；当前导出空注册占位。
- */
-export function register(): () => void {
-  return () => {}
-}
+export {
+  DEFAULT_PRESET,
+  InMemoryPermissionPresets,
+  PERMISSION_PRESETS,
+  PRESET_HINT,
+  PRESET_KNOBS,
+  isPermissionPreset,
+  knobsOf,
+} from './permission-presets.ts'
+export type {
+  ApprovalPolicy,
+  PermissionPreset,
+  PermissionPresetService,
+  PresetKnobs,
+} from './permission-presets.ts'
+export { evaluate } from './policy.ts'
+export type { ActionIntent, PolicyContext, Verdict } from './policy.ts'
+export { installPolicyHook, sessionIdOf } from './hook.ts'
+export type { PolicyHookOptions, ToolExecutionScope } from './hook.ts'

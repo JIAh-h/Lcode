@@ -1,12 +1,34 @@
 {
+  // Electron 主进程 / preload：产物是 **CJS**（Electron 33 的 ESM 主进程加载器有兼容问题）。
+  //
+  // ⚠️ 产物由 **esbuild 打包**（scripts/build-main.mjs），本配置**只做类型检查**。
+  // 原因：主进程要 import 那些 `@lcode/` 开头的内部包，而它们只导出 TS 源码——
+  // `tsc` 编出的 require 在运行期会解析到 .ts 文件并直接 SyntaxError。
+  // esbuild 会把源码内联进单个 CJS 文件，从而绕开这条（见 PROJECT-SKELETON §3 记的偏差）。
+  //
+  // 所以 noEmit 必须是 true；allowImportingTsExtensions 也就能保持关闭
+  //（二者不能共存：TS5096 要求 allowImportingTsExtensions 配 noEmit 或 emitDeclarationOnly）。
+  // 相对导入一律不带扩展名（只 import 'electron' / 'node:fs' 这类裸模块）。
   "extends": "../../tsconfig.host.json",
   "compilerOptions": {
     "rootDir": "electron",
     "outDir": "dist",
-    "noEmit": false,
-    "module": "commonjs",
-    "moduleResolution": "node10",
+    "noEmit": true,
+    // 内部包在**源码里**是 `import './x.ts'` 的写法（全仓约定），所以类型检查要看懂它。
+    // 这在 `noEmit: true` 下是允许的——这正是本配置改成只做类型检查换来的好处：
+    // 以前要出产物时必须关掉它，现在不必了。
+    "allowImportingTsExtensions": true,
+    // **类型检查与产物形态解耦**：本配置 noEmit，只管类型；真正的 CJS 转换由
+    // esbuild（scripts/build-main.mjs）完成。所以这里可以按"源码怎么写就怎么解析"来配：
+    // `module: esnext` + `moduleResolution: bundler` —— 这样才认 `@lcode/` 内部包的
+    // `exports` 字段（`node10` 不认 exports，会报"找不到模块"）。
+    // 曾经这里写 `commonjs + node10`，那是因为当时 tsc 还要出产物；现在不必了。
+    "module": "esnext",
+    "moduleResolution": "bundler",
     "verbatimModuleSyntax": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": true,
     "types": ["node"]
   },
   "include": ["electron/**/*.ts"]

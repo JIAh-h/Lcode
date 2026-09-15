@@ -1,7 +1,7 @@
 import { Context } from '@lcode/context'
 import type { Disposer } from '@lcode/util'
 import { ERROR_CODES, LcodeErrorImpl, isJsonValue } from '@lcode/util'
-import type { ToolCall, ToolDefinition, ToolGuard, ToolResult, ToolSchema } from './types.ts'
+import type { ToolActionIntent, ToolCall, ToolDefinition, ToolGuard, ToolResult, ToolSchema } from './types.ts'
 
 /**
  * ToolRegistry —— 作用域工具注册表 + 受守卫的执行流水线（文档 20 §5.3）。
@@ -75,23 +75,7 @@ export class InMemoryToolRegistry implements ToolRegistry {
       return this.fail(call, ERROR_CODES.ET_UNKNOWN_TOOL, 'tool not visible in current scope')
     }
 
-    // 2. 守卫链（T2：只有 deny / abstain；任一 deny 即拦截）
-    for (const guard of this.guards) {
-      if (!guard) continue
-      const verdict = await guard(call, { scope: opts.scope })
-      if (verdict === 'deny') {
-        return this.fail(call, ERROR_CODES.ET_DENIED, 'denied by guard')
-      }
-    }
-
-    // 3. 审批接缝（pre-execute waterfall：策略可 ask / deny；骨架默认放行）
-    const pre: { call: ToolCall; deny?: string } = { call }
-    await this.ctx.waterfall<'tools/pre-execute', typeof pre, typeof pre>('tools/pre-execute', pre, undefined, async () => pre)
-    if (pre.deny !== undefined) {
-      return this.fail(call, ERROR_CODES.ET_DENIED, pre.deny)
-    }
-
-    // 4. 参数解析（D9：不改写，只解析）
+    // 2. 参数解析（D9：不改写，只解析）
     let parsed: unknown
     try {
       parsed = JSON.parse(call.arguments)
@@ -101,6 +85,35 @@ export class InMemoryToolRegistry implements ToolRegistry {
     const invalid = validateInput(tool.inputSchema, parsed)
     if (invalid) {
       return this.fail(call, ERROR_CODES.ET_INVALID_ARGS, invalid)
+    }
+
+    /*
+     * 3. 审批接缝（`tools/pre-execute` waterfall）。
+     *
+     * **必须在参数解析之后**：策略层要看的 `intent` 是从解析后的值算出来的，
+     * 拿原始 JSON 串去判定会退化成"策略自己解析参数"——那正是我们要避免的。
+     *
+     * 顺序纪律（12 §6.4 / 14 §3.5）：审批在**守卫之前**。先问人、后过红线；
+     * 反过来会让"用户批准了"变成绕过守卫的通行证。
+     */
+    const intent = tool.describeAction === undefined ? undefined : tool.describeAction(parsed)
+    const pre: { call: ToolCall; intent?: ToolActionIntent; scope?: unknown; deny?: string } = {
+      call,
+      ...(intent === undefined ? {} : { intent }),
+      ...(opts.scope === undefined ? {} : { scope: opts.scope }),
+    }
+    await this.ctx.waterfall<'tools/pre-execute', typeof pre, typeof pre>('tools/pre-execute', pre, undefined, async () => pre)
+    if (pre.deny !== undefined) {
+      return this.fail(call, ERROR_CODES.ET_DENIED, pre.deny)
+    }
+
+    // 4. 守卫链（T2：只有 deny / abstain；任一 deny 即拦截）
+    for (const guard of this.guards) {
+      if (!guard) continue
+      const verdict = await guard(call, { scope: opts.scope })
+      if (verdict === 'deny') {
+        return this.fail(call, ERROR_CODES.ET_DENIED, 'denied by guard')
+      }
     }
 
     // 5. 执行

@@ -1,4 +1,4 @@
-import type { SessionEvent, SessionEventType } from '@lcode/session'
+import type { SessionEvent } from '@lcode/session'
 import type { Disposer, SessionId } from '@lcode/util'
 
 /**
@@ -40,5 +40,3 @@ export const FRAME_KIND_HEADER = 'file-header' as const
 export const FRAME_KIND_EVENT = 'event' as const
 
 export const SCHEMA_VERSION = 1 as const
-
-export type { SessionEvent, SessionEventType }

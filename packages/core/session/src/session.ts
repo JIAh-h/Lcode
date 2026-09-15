@@ -2,6 +2,7 @@ import type { SessionId } from '@lcode/util'
 import { ERROR_CODES, LcodeErrorImpl, asSeq, freezeLossless, nowEpochMs } from '@lcode/util'
 import type { Disposer } from '@lcode/util'
 import { deriveMessages } from './surface.ts'
+import { isSurfaceEventType } from './types.ts'
 import type { AppendedEvent, EventInput, SessionEvent, SessionEventType } from './types.ts'
 
 /**
@@ -39,10 +40,25 @@ export class InMemorySessionStore implements SessionService {
   private log: SessionEvent[] = []
   private seeded = false
   private listeners = new Set<(event: SessionEvent) => void>()
+  /** 已提交的**表面项**数量。维护它是为了让 I4 校验在 `append()` 时就是 O(1) */
+  private surfaceCount = 0
+  /**
+   * 观察者抛错的上报口（可选）。
+   *
+   * 观察者失败必须被**包含**（06 §5.3）——不能让某个订阅者的异常变成 `append()` 的失败，
+   * 也不能掐断其余订阅者。所以这里吞掉异常；但吞掉不等于假装没发生：
+   * 传了这个回调就把异常交给它（装配层接 `console.error` / 应用日志 / 遥测）。
+   *
+   * 为什么是回调而不是"重抛到 `unhandledRejection`"：后者会让每一次订阅者抖动
+   * 都污染全局错误处理器（在 vitest 里直接表现为一条失败记录），
+   * 与 `SessionWriteBehind` 对定时器路径失败的处理方式（不抛、留给显式路径暴露）也不一致。
+   */
+  private readonly onObserverError: ((err: unknown, event: SessionEvent) => void) | undefined
   readonly id: SessionId
 
-  constructor(id: SessionId) {
+  constructor(id: SessionId, opts?: { readonly onObserverError?: (err: unknown, event: SessionEvent) => void }) {
     this.id = id
+    this.onObserverError = opts?.onObserverError
   }
 
   get length(): number {
@@ -51,8 +67,8 @@ export class InMemorySessionStore implements SessionService {
 
   append<K extends SessionEventType>(input: EventInput<K>): AppendedEvent<K> {
     const event = this.materialize(input, this.log.length)
-    this.log.push(event)
-    this.broadcast(event)
+    assertSurfaceOpInRange(event as unknown as SessionEvent, this.surfaceCount)
+    this.commit(event as unknown as SessionEvent)
     return event
   }
 
@@ -60,14 +76,22 @@ export class InMemorySessionStore implements SessionService {
     if (inputs.length === 0) return []
     // 原子性（S1）：先全部校验 + 物化，再统一入列；任一条失败则整体不提交
     const materialized = inputs.map((input, i) => this.materialize(input, this.log.length + i))
+    let surfaceCount = this.surfaceCount
     for (const ev of materialized) {
-      this.log.push(ev as SessionEvent)
+      assertSurfaceOpInRange(ev as unknown as SessionEvent, surfaceCount)
+      if (isSurfaceEventType(ev.type)) surfaceCount += 1
     }
-    // 广播（批量事件逐个广播，UI 逐条消费）
+    this.surfaceCount = surfaceCount
     for (const ev of materialized) {
-      this.broadcast(ev as SessionEvent)
+      this.commit(ev as unknown as SessionEvent)
     }
     return materialized
+  }
+
+  private commit(event: SessionEvent): void {
+    this.log.push(event)
+    if (isSurfaceEventType(event.type)) this.surfaceCount += 1
+    this.broadcast(event)
   }
 
   events(range?: { readonly from?: number; readonly to?: number }): readonly SessionEvent[] {
@@ -129,10 +153,41 @@ export class InMemorySessionStore implements SessionService {
     return event
   }
 
+  /**
+   * 同步通知观察者，**逐个包含失败**（06 §5.1 步骤⑤ / §5.3）。
+   *
+   * 一个观察者抛错既不影响 `append()` 的返回值，也不影响其它观察者看到同一事件。
+   * 这不是防御性编程的洁癖：`onEvent` 正是桌面端 UI 事件流的挂载点，
+   * 让"某个订阅者出错"升级成"写日志失败"，等于把渲染层的问题变成数据层的损坏。
+   */
   private broadcast(event: SessionEvent): void {
     for (const listener of this.listeners) {
-      listener(event)
+      try {
+        listener(event)
+      } catch (err) {
+        this.onObserverError?.(err, event)
+      }
     }
+  }
+}
+
+/**
+ * I4：`surfaceOp.replace` 的区间必须落在**当前表面范围内**（[start, end)，左闭右开）。
+ *
+ * 为什么要在 `append()` 时校验而不是等到派生：不变量若只在读取侧检查，等于允许写入
+ * 一条**自己都派生不出来**的日志——那正是 11 §6.1「不猜」要避免的局面，而且
+ * `index rebuild` 会把整个会话判成损坏。校验成本是 O(1)（维护 `surfaceCount` 计数）。
+ */
+function assertSurfaceOpInRange(event: SessionEvent, surfaceBefore: number): void {
+  const op = event.surfaceOp
+  if (op === undefined || op === 'append') return
+  // 表面事件会先入表面、再应用 replace，所以当前这条若是表面事件要算进去
+  const surfaceLength = surfaceBefore + (isSurfaceEventType(event.type) ? 1 : 0)
+  const { start, end } = op
+  if (start < 0 || end > surfaceLength || start >= end) {
+    throw new RangeError(
+      `surface replace 区间越界：start=${start} end=${end} surface 长度=${surfaceLength}（不变量 I4 违规）`,
+    )
   }
 }
 

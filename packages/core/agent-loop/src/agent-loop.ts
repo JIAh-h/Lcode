@@ -1,23 +1,78 @@
 import type { AgentHandle, AgentRef, AgentSpec } from '@lcode/agent'
+import type { PreparedCall } from '@lcode/llm'
+import { TurnEngine } from './engine.ts'
+import type { AgentLoopDeps, LoopHandle } from './engine.ts'
 
 /**
  * AgentLoop —— 全仓库唯一的具体循环（文档 20 §5.6）。
  * ctx key: `ctx.agentLoop`。
  *
- * ⚠️ 实现纪律（产品宪法第三条 / 不变量 L1）：
+ * ⚠️ 实现纪律（产品宪法第三条 / 不变量 L1=I6）：
  * 本接口的任何实现中，`if` 所判断的内容不得涉及任何具体能力。
- * 协作点（压缩 / 审批 / 上下文注入 / 模型替换）一律通过事件（见 README 协作点表）。
+ * 协作点（压缩 / 上下文注入 / 策略替换）一律通过事件（见 engine.ts 协作点表）。
  */
 export interface AgentLoop {
   create(spec: AgentSpec): Promise<AgentHandle>
   resume(ref: AgentRef): Promise<AgentHandle>
 }
 
-// 骨架占位：批次 ③（23 §14）与 llm-replay 一起落地真实循环。
-// 届时实现必须满足：① I6 静态检查（AST 关键词黑名单）；② 无密钥可跑通一次循环。
-export function createAgentLoop(): AgentLoop {
-  throw new Error(
-    'agent-loop 未实现：按文档 23 §14 批次 ③ 落地（llm-replay 驱动、无密钥可跑）。' +
-      '实现时遵守 I6：不出现针对具体能力的 if。',
-  )
+/**
+ * 循环的运行时形态：句柄带 `enqueue`（agents.* API 的 followup 底层）。
+ * `Services.agentLoop` 仍声明为 `AgentLoop`（冻结契约）；装配层把本接口的实现
+ * 注册进去，边界层 API 用 `AgentLoopRuntime` 消费。
+ */
+export interface AgentLoopRuntime extends AgentLoop {
+  create(spec: AgentSpec): Promise<LoopHandle>
+  resume(ref: AgentRef): Promise<LoopHandle>
+}
+
+export type { AgentLoopDeps, CapturedRequest } from './engine.ts'
+export type { EnqueueResult, LoopHandle } from './engine.ts'
+
+/** 具体循环：把注册表身份（@lcode/agent）与轮引擎组装成一个可用的句柄 */
+class ConcreteAgentLoop implements AgentLoopRuntime {
+  private readonly engines = new Map<string, TurnEngine>()
+
+  constructor(private readonly deps: AgentLoopDeps) {}
+
+  async create(spec: AgentSpec): Promise<LoopHandle> {
+    const inner = await this.deps.ctx.get('agents').create(spec)
+    return this.attach(inner)
+  }
+
+  async resume(ref: AgentRef): Promise<LoopHandle> {
+    const inner = await this.deps.ctx.get('agents').resume(ref)
+    return this.attach(inner)
+  }
+
+  /** 同一 agent 只挂一个引擎（resume 幂等） */
+  private attach(inner: AgentHandle): LoopHandle {
+    const existing = this.engines.get(inner.id)
+    if (existing !== undefined) return existing.handle
+    const engine = new TurnEngine(this.deps, inner)
+    this.engines.set(inner.id, engine)
+    return engine.handle
+  }
+}
+
+/** 装配入口（批次③里程碑：无密钥也能跑通一次循环——用 @lcode/llm-replay 驱动） */
+export function createAgentLoop(deps: AgentLoopDeps): AgentLoopRuntime {
+  return new ConcreteAgentLoop(deps)
+}
+
+/**
+ * 循环自有协作点（文档 20 §5.6 协作点表）：
+ * - `agent/pre-step`：构建请求前（emit；压缩 / 上下文注入 / 守卫订阅它）
+ * - `agent/request`：请求配置可用（waterfall；处理器**原地替换 `args.call`** 后调 `next()`，
+ *   直接 return 则短路。只可替换调用配置——system / messages 属于日志派生，不在其内，I1）
+ */
+declare module '@lcode/context' {
+  interface Events {
+    'agent/pre-step': { agentId: string; turn: number; nextStep: number }
+    'agent/request': { call: PreparedCall }
+  }
+  /** ctx key（文档 20 §5.6）：单数 = 一个引擎 */
+  interface Services {
+    agentLoop: AgentLoop
+  }
 }

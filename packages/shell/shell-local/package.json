@@ -11,9 +11,10 @@
     }
   },
   "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/sandbox": "workspace:*",
     "@lcode/shell": "workspace:*",
     "@lcode/subprocess": "workspace:*",
-    "@lcode/context": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {

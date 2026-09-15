@@ -4,7 +4,18 @@
   "description": "Lcode 能力层接口：审批（一次性、fail-closed，不允许永久允许，ctx.approval）",
   "type": "module",
   "private": true,
-  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
-  "dependencies": { "@lcode/context": "workspace:*", "@lcode/util": "workspace:*" },
-  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/context": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
 }

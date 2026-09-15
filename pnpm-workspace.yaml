@@ -2,3 +2,10 @@ packages:
   - "packages/**"
   - "apps/*"
   - "examples/*"
+
+# pnpm 10+ 默认拦截依赖的构建脚本（安全默认）。
+# better-sqlite3 是原生模块，必须显式放行，否则装完没有 .node 二进制。
+# 决策见 docs/24-数据层与接口实施计划.md §7.1（方案 A：better-sqlite3 统一）。
+onlyBuiltDependencies:
+  - better-sqlite3
+  - electron

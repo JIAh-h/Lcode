@@ -1,4 +1,5 @@
 import type { ReactNode } from 'react'
+import { t } from '../i18n/index.ts'
 
 /** 通用按钮（原型的 .send / .tbtn 语义） */
 export function Button({
@@ -44,19 +45,19 @@ export function ApprovalModal({
   return (
     <div className="modal-mask">
       <div className="modal">
-        <h3>确认这一步</h3>
-        <p className="m-action">{action}</p>
-        <p className="m-basis">依据：{basis}</p>
-        <p className="m-impact">影响：{impact}</p>
+        <h3>{t('确认这一步')}</h3>
+        <p className="m-action">{t(action)}</p>
+        <p className="m-basis">{t('依据：')}{t(basis)}</p>
+        <p className="m-impact">{t('影响：')}{t(impact)}</p>
         <div className="m-actions">
           <button className="btn" onClick={() => onResult('cancelled')}>
-            取消
+            {t('取消')}
           </button>
           <button className="btn danger" onClick={() => onResult('rejected')}>
-            拒绝
+            {t('拒绝')}
           </button>
           <button className="btn primary" onClick={() => onResult('allowed-once')}>
-            允许这一次
+            {t('允许这一次')}
           </button>
         </div>
       </div>

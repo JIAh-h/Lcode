@@ -11,12 +11,15 @@
     }
   },
   "dependencies": {
+    "@lcode/context": "workspace:*",
     "@lcode/shell": "workspace:*",
     "@lcode/tools": "workspace:*",
-    "@lcode/context": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@lcode/shell-local": "workspace:*"
   }
 }

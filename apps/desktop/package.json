@@ -5,15 +5,21 @@
   "private": true,
   "main": "dist/main.js",
   "scripts": {
-    "dev": "concurrently -k \"vite\" \"tsc -p tsconfig.electron.json --watch --outDir dist\" \"wait-on http://localhost:5173 tcp:5173 && electron .\"",
-    "build:renderer": "vite build",
-    "build:electron": "tsc -p tsconfig.electron.json",
+    "dev": "concurrently -k \"vite\" \"node scripts/build-main.mjs --watch\" \"wait-on http://localhost:5173 tcp:5173 && node scripts/dev-electron.mjs\"",
+    "build:electron": "node scripts/build-main.mjs",
     "build": "npm run build:renderer && npm run build:electron",
     "start": "electron .",
-    "typecheck": "tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.json --noEmit",
+    "build:main": "node scripts/build-main.mjs",
+    "probe:preload": "electron scripts/probe-preload.cjs",
+    "build:renderer": "vite build"
   },
   "dependencies": {
+    "@lcode/approval": "workspace:*",
+    "@lcode/lcode-desktop": "workspace:*",
     "@lcode/session": "workspace:*",
+    "@lcode/session-persistence-sqlite": "workspace:*",
+    "better-sqlite3": "^11.10.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0"
@@ -21,6 +27,7 @@
   "devDependencies": {
     "concurrently": "^9.1.0",
     "electron": "^33.2.0",
-    "wait-on": "^8.0.1"
+    "wait-on": "^8.0.1",
+    "esbuild": "^0.25.12"
   }
 }

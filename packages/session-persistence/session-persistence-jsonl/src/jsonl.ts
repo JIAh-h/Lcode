@@ -1,4 +1,5 @@
 import type { StreamChunk } from '@lcode/session'
+import type { JsonValue } from '@lcode/util'
 import { assertLosslessJson, serializeLossless } from '@lcode/util'
 
 /**
@@ -12,10 +13,12 @@ export interface FileHeaderFrame {
   readonly formatVersion: number
   readonly sessionId: string
   readonly createdAt: number
-  readonly cwd: string
+  /** 工作区根（无 cwd 的会话为 null，落 `_unknown/` 桶，22 §2.1） */
+  readonly cwd: string | null
   readonly parentSession: string | null
   readonly seedLength: number
-  readonly codec: 'json' | 'zstd'
+  /** 与 `sessions.log_codec` 的 CHECK 对齐（22 §3.1 / §3.13） */
+  readonly codec: 'none' | 'zstd'
   readonly keyId: string | null
 }
 
@@ -104,17 +107,39 @@ export function packFrames(header: FileHeaderFrame, events: readonly EventFrame[
   return out
 }
 
+/**
+ * 帧类型判定。
+ * `LogFrame` 是联合，但**无法用单个字段辨识**：头部帧按 22 §4.1 用 `kind`，
+ * 而事件帧 / 批帧用 `type`。因此提供两个显式守卫，避免调用处到处写断言。
+ */
+export function isHeaderFrame(frame: LogFrame): frame is FileHeaderFrame {
+  return (frame as { kind?: string }).kind === 'file-header'
+}
+
+export function isChunkBatchFrame(frame: LogFrame): frame is ChunkBatchFrame {
+  return (frame as { type?: string }).type === 'assistant/chunk/batch'
+}
+
 /** 解包：把批帧还原为逐条事件帧（纯函数，seq 重新连续） */
 export function unpackFrames(frames: readonly LogFrame[]): { header: FileHeaderFrame; events: EventFrame[] } {
   const header = frames[0]
-  if (!header || header.kind !== 'file-header') {
+  if (!header || !isHeaderFrame(header)) {
     throw new Error('JSONL 首帧必须是 file-header（22 §4.1）')
   }
   const events: EventFrame[] = []
   for (let f = 1; f < frames.length; f++) {
     const frame = frames[f]!
-    if (frame.type === 'assistant/chunk/batch') {
-      const batch = frame as ChunkBatchFrame
+    if (isChunkBatchFrame(frame)) {
+      const batch = frame
+      // 批帧必须自洽：seqLast 是 seqFirst + 条数 - 1。
+      // 少了这一条校验，"批帧声称覆盖 0..9 但只剩 3 条"（尾部被截断）会被静默解包成
+      // 一个 seq 恰好连续的短序列——损坏被吞掉，正是 22 §4.4 禁止的"猜"。
+      const expectedLast = batch.seqFirst + batch.data.chunks.length - 1
+      if (batch.seqLast !== expectedLast) {
+        throw new Error(
+          `chunk 批帧跨度与条数不符：声称 ${batch.seqFirst}..${batch.seqLast}，实际只有 ${batch.data.chunks.length} 条（编码损坏）`,
+        )
+      }
       let seq = batch.seqFirst
       for (const item of batch.data.chunks) {
         events.push({
@@ -156,7 +181,14 @@ export function decodeJsonl(text: string): LogFrame[] {
   })
 }
 
-function assertFrame(frame: LogFrame): LogFrame {
-  assertLosslessJson(frame)
-  return frame
+/**
+ * 写入前的无损校验收口。
+ * 断言成 `JsonValue` 是**边界转换**：`LogFrame` 的成员都是 interface，
+ * 而 TS 的 interface 不带隐式索引签名，无法直接赋给 `JsonValue`。
+ * 真正的运行时保障是紧随其后的 `assertLosslessJson`（拒绝 BigInt/NaN/循环引用，I5）。
+ */
+function assertFrame(frame: LogFrame): JsonValue {
+  const value = frame as unknown as JsonValue
+  assertLosslessJson(value)
+  return value
 }

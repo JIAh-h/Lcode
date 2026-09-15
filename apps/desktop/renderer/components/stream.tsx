@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { t } from '../i18n/index.ts'
 
 /**
  * 会话流组件（文档 19 §3.2 P2 / UX-FOLD-001 / UX-SUMMARY-001 / UX-ARTIFACT-001）。
@@ -36,29 +37,29 @@ export function ProcessFlow({ collapsed, running }: { collapsed: boolean; runnin
     return (
       <button className="process-closed" onClick={() => setOpen(true)}>
         <i className="st" style={{ background: 'var(--state-idle)' }} />
-        过程记录 · 12 步 <span className="cnt">展开</span>
+        {t('过程记录 · {n} 步', { n: 12 })} <span className="cnt">{t('展开')}</span>
       </button>
     )
   }
   return (
     <div className={`process ${running ? 'running' : ''}`}>
       <button className="process-head" onClick={() => setOpen(!open)}>
-        {running ? <span className="live">● 运行中</span> : '过程'}
-        <span className="cnt">{open ? '收起' : '展开'}</span>
+        {running ? <span className="live">● {t('运行中')}</span> : t('过程')}
+        <span className="cnt">{open ? t('收起') : t('展开')}</span>
       </button>
       {open && (
         <ol className="process-steps">
           <li>
             <span className="step-name">读取 src/parse.ts</span>
-            <span className="step-state ok">完成</span>
+            <span className="step-state ok">{t('完成')}</span>
           </li>
           <li>
             <span className="step-name">搜索所有调用点</span>
-            <span className="step-state ok">完成</span>
+            <span className="step-state ok">{t('完成')}</span>
           </li>
           <li>
             <span className="step-name">改写为结构化解析</span>
-            <span className="step-state ok">完成</span>
+            <span className="step-state ok">{t('完成')}</span>
           </li>
         </ol>
       )}
@@ -72,13 +73,13 @@ export function SummaryCard({ done, seconds, onToggle }: { done: boolean; second
     <div className="summary" onClick={onToggle}>
       <div className="summary-head">
         <span className="tick">{done ? '✓' : '…'}</span>
-        <b>{done ? `任务完成 · 用时 ${seconds}s` : '正在完成…'}</b>
+        <b>{done ? t('任务完成 · 用时 {n}s', { n: seconds }) : t('正在完成…')}</b>
       </div>
       {done && (
         <div className="summary-body">
-          <div>做了什么：把 parse.ts 从逐行正则替换为 schema 驱动的结构化解析</div>
-          <div>验证：新增 6 个用例，全部通过</div>
-          <div>需要你知道的：函数签名不变，导出名保持一致</div>
+          <div>{t('做了什么：把 parse.ts 从逐行正则替换为 schema 驱动的结构化解析')}</div>
+          <div>{t('验证：新增 6 个用例，全部通过')}</div>
+          <div>{t('需要你知道的：函数签名不变，导出名保持一致')}</div>
           <div className="summary-foot mono">2.4k tokens · Deepseek-V4.1</div>
         </div>
       )}
@@ -90,7 +91,7 @@ export function SummaryCard({ done, seconds, onToggle }: { done: boolean; second
 export function ArtifactEntry({ label }: { label: string }) {
   return (
     <button className="artifact">
-      <span>📦</span> {label} <span className="cnt">6</span>
+      <span>📦</span> {t(label)} <span className="cnt">6</span>
     </button>
   )
 }

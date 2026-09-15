@@ -6,6 +6,8 @@ dist/
 lib/
 *.tsbuildinfo
 coverage/
+# 原生模块的 ABI 专用二进制（由 pnpm native:build 产出，见 docs/24 §7.1）
+packages/session-persistence/session-persistence-sqlite/native/
 
 # 环境与凭据（文档 00 §第二条：凭据值永不进仓库）
 .env
@@ -15,9 +17,11 @@ coverage/
 # 本地运行数据
 lcode-data/
 logs/
+apps/desktop/log/
 
 # 工作区本地数据（会话记忆等，仅本机）
 .workbuddy/
+.workbuddy-ai/
 
 # 编辑器 / OS
 .DS_Store
@@ -30,3 +34,7 @@ Thumbs.db
 out/
 release/
 *.log
+
+# Vite/Vitest 运行时临时产物（每次跑测试自动重新生成，不该进版本库）
+vitest.config.ts.timestamp-*.mjs
+_tmp_*

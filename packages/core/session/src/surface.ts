@@ -34,7 +34,11 @@ export function deriveSurfaceItems(log: readonly SessionEvent[]): SurfaceItem[] 
         sourceSeq: event.seq,
         hidden: false,
       })
-    } else if (isReplace(event.surfaceOp)) {
+    }
+    // 注意：这里**不能**写成 `else if`。压缩摘要是「user/message + surfaceOp:{op:'replace'}」
+    // 的形态（06 §3.3），它既是表面事件、又携带 replace——用 else if 会让替换区间被整段忽略，
+    // 于是 `hidden` 永远为 false、I4 越界也永远查不出来。
+    if (isReplace(event.surfaceOp)) {
       // 校验区间（I4）：必须在当前 surface 范围内
       const { start, end } = event.surfaceOp
       if (start < 0 || end > items.length || start >= end) {

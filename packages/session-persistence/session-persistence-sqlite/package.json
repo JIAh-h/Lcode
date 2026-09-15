@@ -8,14 +8,25 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./native": {
+      "types": "./src/native.ts",
+      "default": "./src/native.ts"
     }
   },
   "dependencies": {
     "@lcode/session": "workspace:*",
     "@lcode/session-persistence": "workspace:*",
-    "@lcode/util": "workspace:*"
+    "@lcode/session-persistence-jsonl": "workspace:*",
+    "@lcode/util": "workspace:*",
+    "better-sqlite3": "^11.10.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json --noEmit"
+    "build": "tsc -p tsconfig.json --noEmit",
+    "probe": "node scripts/probe-sqlite.mjs",
+    "native:build": "node scripts/build-native.mjs"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0"
   }
 }

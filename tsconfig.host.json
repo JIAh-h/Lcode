@@ -1,14 +1,24 @@
 {
+  // 类型检查门禁（host 侧：packages + CLI + 脚本）。**只做检查、不产出**。
+  // 为什么必须 allowImportingTsExtensions：本仓库是**源码即产物**的约定——
+  // 各包 package.json 的 exports 直接指向 src/*.ts，源码里普遍 `import './x.ts'`，
+  // 由打包器（Vite）/ 测试器（vitest）解析，因此不存在编译中间产物。
+  // 该选项要求 noEmit（或 emitDeclarationOnly），二者在下面一并给出。
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "lib": ["ES2023"],
-    "types": ["node"]
+    "types": ["node"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
   },
   "include": [
     "packages/**/src/**/*.ts",
-    "apps/cli/**/*.ts",
-    "apps/desktop/electron/**/*.ts",
-    "scripts/**/*.mjs"
+    "apps/cli/**/*.ts"
   ],
+  // apps/desktop/electron/** 走 CJS，模块制式与本配置相反，由
+  // apps/desktop/tsconfig.electron.json 单独检查（根 typecheck 脚本会带上它）。
   "exclude": ["**/node_modules", "**/dist", "**/lib"]
 }

@@ -1,7 +1,6 @@
 import type { ScopeKey } from '@lcode/scope'
 import { collectScopeChain } from '@lcode/scope'
 import type { Disposer } from '@lcode/util'
-import { composeDisposers } from '@lcode/util'
 
 /**
  * 事件处理器。
@@ -87,7 +86,9 @@ export class EventBus {
     const dispatch = async (): Promise<R> => {
       const entry = entries[i++]
       if (!entry) return noop()
-      const handler = entry.handler as WaterfallHandler<A, R>
+      // 处理器按名字注册时只约束成 EmitHandler<unknown>；waterfall 的参数/返回类型
+      // 由调用方声明，这里必须经 unknown 中转（直接断言会被 TS 判为"类型不重叠"）
+      const handler = entry.handler as unknown as WaterfallHandler<A, R>
       return handler(args, dispatch)
     }
     return dispatch()

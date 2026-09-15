@@ -1,0 +1,7 @@
+const wasm = await import('@bokuweb/zstd-wasm')
+await wasm.init()
+const text = '把 parse.ts 换成结构化解析\n'.repeat(50)
+const packed = wasm.compress(new TextEncoder().encode(text))
+const back = new TextDecoder().decode(wasm.decompress(packed))
+console.log('node', process.version, 'ABI', process.versions.modules)
+console.log('  compress', text.length, '->', packed.length, '| roundtrip', back === text)

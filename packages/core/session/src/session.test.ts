@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { asSessionId, ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 import { InMemorySessionStore } from './session.ts'
-import { deriveMessages, deriveSurfaceItems } from './surface.ts'
+import { deriveSurfaceItems } from './surface.ts'
 import type { SessionEvent } from './types.ts'
 
 function makeStore() {
@@ -32,7 +32,9 @@ describe('session 不变量 S4：事件 data 无损 JSON（I5）', () => {
   it('拒绝 NaN 载荷', () => {
     const store = makeStore()
     expect(() =>
-      store.append({ type: 'user/message', data: { role: 'user', content: 'x' as unknown as number } as never }),
+      // 之前这里传的是字符串（`'x' as unknown as number`），压根没有 NaN，等于没测到；
+      // 真正要验的是「数值型 data 里的 NaN 会被无损 JSON 校验拒绝」
+      store.append({ type: 'user/message', data: { role: 'user', content: Number.NaN as unknown as string } } as never),
     ).toThrow()
   })
 
@@ -158,6 +160,34 @@ describe('onEvent 订阅（UI 数据源）', () => {
     dispose()
     store.append({ type: 'turn/start', data: { turn: 1 } })
     expect(count).toBe(0)
+  })
+
+  it('观察者的异常交给 onObserverError，不当成 append 失败也不静默消失', () => {
+    const reported: unknown[] = []
+    const store = new InMemorySessionStore(asSessionId('s-observer'), {
+      onObserverError: (err) => reported.push(err),
+    })
+    const seen: string[] = []
+    store.onEvent(() => {
+      throw new Error('订阅者炸了')
+    })
+    store.onEvent(() => seen.push('second'))
+
+    const event = store.append({ type: 'turn/start', data: { turn: 1 } })
+    expect(event.seq).toBe(0)
+    expect(seen).toEqual(['second'])
+    expect(store.length).toBe(1)
+    expect(reported).toHaveLength(1)
+    expect(reported[0]).toBeInstanceOf(Error)
+  })
+
+  it('没有传 onObserverError 时，异常被静默吞掉（但 append 仍然成功）', () => {
+    const store = makeStore()
+    store.onEvent(() => {
+      throw new Error('没人接')
+    })
+    expect(() => store.append({ type: 'turn/start', data: { turn: 1 } })).not.toThrow()
+    expect(store.length).toBe(1)
   })
 })
 

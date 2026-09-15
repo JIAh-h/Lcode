@@ -52,3 +52,10 @@ export class InMemoryAgentDefaultModelService implements AgentDefaultModelServic
     }
   }
 }
+
+/** ctx key（文档 20 §5.5）：单数 = 一个引擎 */
+declare module '@lcode/context' {
+  interface Services {
+    agentDefaultModel: AgentDefaultModelService
+  }
+}

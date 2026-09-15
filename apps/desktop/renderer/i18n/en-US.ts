@@ -1,0 +1,474 @@
+/**
+ * 英文词典。**键 = 中文原文**（见 `./index.ts` 的设计说明）。
+ *
+ * 未收录的键会回落中文原文，因此漏译只会表现为「还是中文」，不会渲染报错。
+ * 新增文案时同步在此补一条；`scripts/check-i18n.mjs` 可校验覆盖率。
+ *
+ * 分组仅为便于维护，查找一律按「中文原文」精确匹配。
+ * 约定：语言自称不翻译（中文（简体）/ English 各自显示原文）。
+ */
+export const EN: Readonly<Record<string, string>> = {
+  /* ── 通用动词 / 按钮 ── */
+  保存: 'Save',
+  已保存: 'Saved',
+  '已保存（mock）': 'Saved (mock)',
+  取消: 'Cancel',
+  关闭: 'Close',
+  编辑: 'Edit',
+  删除: 'Delete',
+  移除: 'Remove',
+  修改: 'Change',
+  清理: 'Clean up',
+  重试: 'Retry',
+  重新加载: 'Reload',
+  回到首页: 'Back to home',
+  返回工作台: 'Back to workspace',
+  '导出…': 'Export…',
+  添加模型: 'Add model',
+  添加文件夹: 'Add folder',
+  测试连接: 'Test connection',
+  '在文件夹中显示': 'Show in folder',
+  复制: 'Copy',
+  默认: 'Default',
+  当前: 'Current',
+
+  /* ── 菜单栏（应用内自绘） ── */
+  文件: 'File',
+  视图: 'View',
+  帮助: 'Help',
+  新对话: 'New chat',
+  新建临时对话: 'New temporary chat',
+  新建窗口: 'New window',
+  '打开文件夹…': 'Open folder…',
+  关闭会话: 'Close session',
+  退出: 'Quit',
+  撤销: 'Undo',
+  重做: 'Redo',
+  剪切: 'Cut',
+  粘贴: 'Paste',
+  全选: 'Select all',
+  '设置…': 'Settings…',
+  切换侧边栏: 'Toggle sidebar',
+  '切换变更/文件面板': 'Toggle changes/files panel',
+  工作台: 'Workspace',
+  回放时间轴: 'Replay timeline',
+  '切换深色/浅色主题': 'Toggle dark/light theme',
+  放大: 'Zoom in',
+  缩小: 'Zoom out',
+  实际大小: 'Actual size',
+  切换全屏: 'Toggle fullscreen',
+  状态与异常: 'Status & errors',
+  '崩溃恢复（演示入口）': 'Crash recovery (demo)',
+  文档: 'Documentation',
+  显示键盘快捷键: 'Show keyboard shortcuts',
+  故障排除: 'Troubleshoot',
+  '反馈…': 'Send feedback…',
+  '检查更新…': 'Check for updates…',
+  '关于 Lcode': 'About Lcode',
+
+  /* ── 侧栏 ── */
+  '收起/显示左侧栏': 'Show/hide sidebar',
+  工作区: 'Workspace',
+  '演示：打开文件夹': 'Demo: open folder',
+  本地用户: 'Local user',
+  '设置（Ctrl+,）': 'Settings (Ctrl+,)',
+  '14 步': '14 steps',
+  已完成: 'Done',
+  中断: 'Interrupted',
+
+  /* ── 轻提示（toast） ── */
+  '已开启临时对话——关闭后不会保留在历史里（mock）':
+    'Temporary chat started — it won’t be kept in history once closed (mock)',
+  '演示：新建窗口': 'Demo: new window',
+  '演示：打开文件夹（桌面版弹出系统选择框）': 'Demo: open folder (the desktop app shows the system picker)',
+  '已关闭当前会话（mock）': 'Session closed (mock)',
+  '已执行「{name}」': 'Ran “{name}”',
+  当前没有可编辑的目标: 'Nothing to edit right now',
+  已切换到深色主题: 'Switched to dark theme',
+  已切换到浅色主题: 'Switched to light theme',
+  '缩放 {n}%': 'Zoom {n}%',
+  侧边栏已隐藏: 'Sidebar hidden',
+  侧边栏已显示: 'Sidebar shown',
+  '工作台右侧面板开关在标题栏（演示）': 'The workspace panel toggle lives in the title bar (demo)',
+  '演示：打开 Lcode 文档（桌面版跳转官网）':
+    'Demo: open the Lcode docs (the desktop app opens the website)',
+  'doctor 检查完成：运行环境正常 · 3 项全部通过（mock）':
+    'doctor finished: environment healthy · 3 of 3 checks passed (mock)',
+  '感谢反馈！演示版暂不收集反馈内容': 'Thanks! The demo doesn’t collect feedback yet',
+  '当前已是最新版本 v1.0.0（mock）': 'You’re on the latest version v1.0.0 (mock)',
+  'Lcode v1.0.0 · 本地优先的 AI 编码工作台': 'Lcode v1.0.0 · a local-first AI coding workspace',
+
+  /* ── 首页 ── */
+  '我们要构建什么？': 'What should we build?',
+  我们应该在: 'What should we do in ',
+  '中做些什么？': '?',
+  探索并理解代码: 'Explore and understand code',
+  '只读，不会改动任何文件': 'Read-only, changes nothing',
+  '帮我梳理这个项目的结构和主要功能': 'Walk me through this project’s structure and main features',
+  构建新功能或工具: 'Build a new feature or tool',
+  '读取、编辑、运行，改动前先给你看': 'Reads, edits and runs — shows you changes first',
+  '我想构建一个新功能：': 'I want to build a new feature:',
+  审查代码并提出建议: 'Review code and suggest improvements',
+  '找出问题与隐患，给出修改建议': 'Finds bugs and risks, suggests fixes',
+  '审查一下最近的改动，指出问题与风险': 'Review the recent changes and flag problems and risks',
+  修复问题与失败: 'Fix problems and failures',
+  '跑测试、看日志、定位并修掉': 'Runs tests, reads logs, finds and fixes',
+  '现在有报错/测试不过，帮我定位原因': 'Something’s failing — help me find the cause',
+  点击填入示例任务: 'Click to fill in an example task',
+  选择项目: 'Select project',
+  已有项目: 'Existing projects',
+  '新建项目（选择文件夹…）': 'New project (choose a folder…)',
+  也可以把文件夹直接拖进窗口: 'You can also drag a folder into the window',
+  '取消选择，重新选择项目': 'Clear and pick another project',
+  '描述一个任务，或直接问个问题…': 'Describe a task, or just ask a question…',
+  '描述一个任务，或先在上方选择项目…': 'Describe a task, or pick a project above…',
+  松开以打开该文件夹: 'Drop to open this folder',
+  '已选择项目：{name}': 'Project selected: {name}',
+  '未能识别拖入内容的路径，请改为点击「选择项目」':
+    'Couldn’t resolve the dropped item’s path — use “Select project” instead',
+  选择项目文件夹: 'Choose project folder',
+  选择要附加的文件: 'Choose files to attach',
+
+  /* ── 输入区（composer） ── */
+  '添加文件…': 'Add file…',
+  '作为附件引用，不内联内容': 'Referenced as an attachment, contents not inlined',
+  '添加文件夹…': 'Add folder…',
+  整个目录作为上下文来源: 'The whole directory as context',
+  添加附件: 'Add attachment',
+  权限预设: 'Permission presets',
+  它什么时候需要问你: 'When should it ask you',
+  权限: 'Permissions',
+  模型: 'Model',
+  选择模型: 'Select a model',
+  '还没有内容。在下面输入一句话开始。': 'Nothing here yet — type a message below to start.',
+  '（没有输出）': '(no output)',
+  超时: 'Timed out',
+  已中止: 'Aborted',
+  '这一轮没能跑起来。请检查模型配置（密钥、接口地址、模型名）。':
+    'This turn couldn’t run. Check the model configuration — API key, endpoint, and model name.',
+  你: 'You',
+  过程记录: 'Process log',
+  '当前环境没有主进程桥，无法新建对话': 'No main-process bridge — cannot start a conversation',
+  新建对话失败: 'Failed to start a conversation',
+  补充要求: 'Add a requirement',
+  '当前环境没有主进程桥，无法发送': 'No main-process bridge — cannot send',
+  发送失败: 'Send failed',
+  '还没有配置任何模型，请先到「设置 → 模型」添加':
+    'No models configured yet — add one in Settings → Model',
+  这次对话用哪个模型: 'Which model for this chat',
+  '换默认模型请到「设置 → 模型」': 'Change the default in Settings → Model',
+  发送: 'Send',
+  '已附加文件夹：{name}': 'Attached folder: {name}',
+  '已附加文件：{name}': 'Attached file: {name}',
+  '当前不在桌面应用内，无法打开系统选择框':
+    'Not running in the desktop app — the system picker is unavailable',
+  这个功能需要重启应用后生效: 'Restart the app for this to take effect',
+  '已切换模型：{name}': 'Switched model: {name}',
+  请选择: 'Select',
+
+  /* ── 权限预设（产品层字面量，写死自文档 12 §3.3） ── */
+  只读: 'Read-only',
+  标准: 'Standard',
+  自动: 'Auto',
+  完全访问: 'Full access',
+  无人值守: 'Unattended',
+  '它只能看，不能改': 'It can only look, never change',
+  '能改我的项目，动手前问我': 'Can change my project, asks first',
+  '工作区内自己干，不打扰我': 'Works inside the workspace without interrupting me',
+  '工作区内自己干，不打扰你': 'Works inside the workspace without interrupting you',
+  '哪里都能碰，但动手前问我': 'Can touch anything, but asks first',
+  '哪里都能碰，但动手前问你': 'Can touch anything, but asks first',
+  '用于自动化，不打扰我': 'For automation, doesn’t interrupt me',
+
+  /* ── 会话流（stream 组件） ── */
+  '过程记录 · {n} 步': 'Process log · {n} steps',
+  展开: 'Expand',
+  收起: 'Collapse',
+  运行中: 'Running',
+  过程: 'Process',
+  完成: 'Done',
+  '任务完成 · 用时 {n}s': 'Task complete · {n}s',
+  '正在完成…': 'Finishing…',
+  '做了什么：把 parse.ts 从逐行正则替换为 schema 驱动的结构化解析':
+    'What changed: parse.ts now uses schema-driven parsing instead of line-by-line regex',
+  '验证：新增 6 个用例，全部通过': 'Verified: 6 new cases, all passing',
+  '需要你知道的：函数签名不变，导出名保持一致':
+    'Worth knowing: signatures and export names are unchanged',
+  '查看本轮所有产物/变更': 'See all artifacts/changes from this turn',
+
+  /* ── 工作台 ── */
+  搜索会话: 'Search chats',
+  '显示/隐藏面板': 'Show/hide panel',
+  '演示：搜索会话': 'Demo: search chats',
+  '继续交代任务，或补充新的要求…（运行中也可以输入，会在下一步生效）':
+    'Keep going, or add a new requirement… (you can type while it runs — it applies at the next step)',
+  '新文件 · 22 行': 'New file · 22 lines',
+  '共 22 行新增': '22 lines added',
+  变更: 'Changes',
+  '本轮 · 第 2 轮': 'This turn · round 2',
+  '4 个文件改动': '4 files changed',
+  '演示：打开文件': 'Demo: open file',
+
+  /* ── P3 回放 ── */
+  '回放 · 第 {n} 步': 'Replay · step {n}',
+  '第 {n} 步': 'Step {n}',
+  '系统提示（当时的确切内容）': 'System prompt (exactly as it was)',
+  '… 该步装配后的 system 快照 …': '… the assembled system snapshot at this step …',
+  工具调用: 'Tool calls',
+  模型可见消息: 'Messages visible to the model',
+  '从第 {n} 步重新开始': 'Restart from step {n}',
+
+  /* ── P7 从某一步重新开始 ── */
+  '从第 12 步重新开始': 'Restart from step 12',
+  从哪开始: 'Starting point',
+  '第 12 步 · 改写完成': 'Step 12 · rewrite complete',
+  会带过去: 'Carried over',
+  '第 1–12 步的完整记录（当时模型看到的原样）':
+    'The full record of steps 1–12 (exactly what the model saw)',
+  不会带过去: 'Not carried over',
+  '第 13 步之后的全部内容，以及那之后对文件做的改动':
+    'Everything after step 13, plus any file changes made after it',
+  新对话的名字: 'New chat name',
+  '把 parse.ts 换成结构化解析（副本）': 'Switch parse.ts to structured parsing (copy)',
+  '原来的对话不会被改动，可以随时回来查看。':
+    'The original chat stays untouched — you can come back to it anytime.',
+  从这里重新开始: 'Restart from here',
+
+  /* ── P6 恢复 ── */
+  上次没有正常退出: 'Lcode didn’t exit cleanly last time',
+  '已经帮你恢复到最后一个完整的状态。恢复时补记了 2 条收尾记录，在时间轴上以补记样式标注。':
+    'We restored the last complete state. Two closing records were backfilled and are marked as backfilled on the timeline.',
+  '丢弃的撕裂记录：1 条（文件末尾不完整）': 'Discarded torn records: 1 (incomplete at end of file)',
+  '补记的合成事件：2 条（step/end + turn/end）': 'Backfilled synthetic events: 2 (step/end + turn/end)',
+  继续这个对话: 'Continue this chat',
+
+  /* ── P8 异常 + 错误边界 ── */
+  出问题了: 'Something went wrong',
+  '这个对话的记录损坏了，没法完整还原。可以试试导出已有的部分。':
+    'This chat’s record is damaged and can’t be fully restored. You can try exporting what’s there.',
+  'ES-CORRUPTED · 第 42 行记录不可解析（诊断信息，仅此可见）':
+    'ES-CORRUPTED · line 42 is unparseable (diagnostic info, visible only here)',
+  导出已有部分: 'Export what’s available',
+  返回首页: 'Back to home',
+  这个页面没能显示出来: 'This page couldn’t be displayed',
+  '界面在渲染时出了点问题。你可以回到首页重新开始，或者重新加载一次。':
+    'Something went wrong while rendering. You can go back to the home screen or reload.',
+
+  /* ── P4 询问弹窗 ── */
+  确认这一步: 'Confirm this step',
+  它想改动这个项目之外的文件: 'It wants to change a file outside this project',
+  '工作区外写入，需要你确认': 'Writing outside the workspace needs your confirmation',
+  它要把数据发到这些站点: 'It wants to send data to these sites',
+  '会拿到这些环境变量：': 'It will receive these environment variables: ',
+  '依据：': 'Basis: ',
+  '影响：': 'Impact: ',
+  拒绝: 'Reject',
+  允许这一次: 'Allow this once',
+
+  /* ── 设置：常规 ── */
+  常规: 'General',
+  '基础行为。改动即时生效。': 'Basic behaviour. Changes apply immediately.',
+  界面语言: 'Interface language',
+  语言: 'Language',
+  '切换后立即生效，不影响对话内容。':
+    'Applies immediately; chat content is unaffected.',
+  启动: 'Startup',
+  启动时: 'On startup',
+  打开上次的工作区: 'Open the last workspace',
+  进入首页: 'Go to home',
+  '打开指定文件夹…': 'Open a specific folder…',
+  自动检查更新: 'Check for updates automatically',
+  '每周在后台检查新版本，仅提示，不自动安装':
+    'Checks weekly in the background — notifies only, never installs',
+  崩溃后自动恢复: 'Recover automatically after a crash',
+  下次启动时恢复中断的对话并显著标注补记:
+    'Restores interrupted chats on next launch, with backfilled records clearly marked',
+  隐私: 'Privacy',
+  匿名使用统计: 'Anonymous usage stats',
+  '只上报功能使用计数，不含任何代码与对话内容':
+    'Counts feature usage only — never code or chat content',
+
+  /* ── 设置：外观 ── */
+  外观: 'Appearance',
+  '主题与显示。此处的改动与菜单「视图 → 切换主题」联动。':
+    'Theme and display. Linked to View → Toggle theme in the menu.',
+  主题: 'Theme',
+  浅色: 'Light',
+  深色: 'Dark',
+  跟随系统: 'Follow system',
+  强调色: 'Accent color',
+  '用于链接、选中态与运行状态指示。':
+    'Used for links, selection and running-state indicators.',
+  '色盲友好 diff': 'Color-blind-friendly diffs',
+  '增删行改用蓝/橙区分（对红绿色盲更友好）':
+    'Added and removed lines use blue/orange instead of red/green',
+  显示: 'Display',
+  界面字号: 'Interface font size',
+  小: 'Small',
+  大: 'Large',
+  等宽字体: 'Monospace font',
+  系统默认: 'System default',
+  '强调色已切换（演示，重启后还原）': 'Accent changed (demo; reverts on restart)',
+
+  /* ── 设置：键盘快捷键 ── */
+  键盘快捷键: 'Keyboard shortcuts',
+  '演示版暂不支持改键，点击「修改」会给出提示。':
+    'Rebinding isn’t supported in this demo — clicking Change shows a notice.',
+  全局: 'Global',
+  打开设置: 'Open settings',
+  进入回放: 'Open replay',
+  发送消息: 'Send message',
+  换行: 'New line',
+  '演示版：暂不支持自定义快捷键': 'Demo: custom shortcuts aren’t supported yet',
+
+  /* ── 设置：账户 ── */
+  账户: 'Account',
+  'Lcode 默认使用本地账户，数据不出本机。':
+    'Lcode uses a local account by default; your data never leaves this machine.',
+  资料: 'Profile',
+  头像与名称: 'Avatar and name',
+  登录方式: 'Sign-in',
+  '本地账户 · 无需登录。': 'Local account · no sign-in needed.',
+  接入团队版: 'Join the team plan',
+  '后可同步设置与会话（未接入）。': 'to sync settings and chats (not connected yet).',
+  数据位置: 'Data locations',
+  '会话、设置与回放数据': 'Chats, settings and replay data',
+  'JSONL 会话日志': 'JSONL chat logs',
+  '已在文件夹中显示（模拟）': 'Revealed in folder (simulated)',
+  退出本地账户: 'Sign out of local account',
+  '已退出本地账户（模拟）——演示环境不会真的清除数据':
+    'Signed out (simulated) — the demo doesn’t actually clear data',
+
+  /* ── 设置：模型 ── */
+  '新对话默认使用的模型，以及你自己添加的自定义模型。改动即时生效，不影响已经开着的对话。':
+    'The model new chats use by default, plus any custom models you add. Changes apply immediately and don’t affect open chats.',
+  默认模型: 'Default model',
+  新对话使用: 'New chats use',
+  '会话里也可以临时切换，只影响那个对话。':
+    'You can also switch temporarily inside a chat — that affects only that chat.',
+  自定义模型: 'Custom models',
+  '配置一份 OpenAI 兼容的接口即可。配置存在本地 ':
+    'Just configure an OpenAI-compatible endpoint. It’s stored locally in ',
+  '，API Key 存在凭据存储里（两者都只在本机，不会上传）。':
+    '. The API key goes into the credential store — both stay on this machine and are never uploaded.',
+  '还没有自定义模型。点右上「＋ 添加模型」，填一份接口地址和 API Key 就能用。':
+    'No custom models yet. Click “+ Add model”, fill in an endpoint and an API key, and you’re set.',
+  '模型配置暂不可用：': 'Model configuration is unavailable: ',
+  '当前环境没有主进程桥（开发预览或浏览器里打开时会这样）':
+    'No main-process bridge here (this happens in dev preview or when opened in a browser)',
+  '当前环境没有主进程桥，无法保存': 'No main-process bridge here — cannot save',
+  编辑模型: 'Edit model',
+  探测失败: 'Probe failed',
+  保存失败: 'Save failed',
+  删除失败: 'Delete failed',
+  '已删除「{name}」': 'Deleted “{name}”',
+  '（已配置，留空则不修改）': '(configured — leave blank to keep)',
+  '（尚未配置）': '(not configured)',
+  '（留空则不修改）': '(leave blank to keep)',
+  留空则不修改: 'Leave blank to keep',
+  // 六类归因（18 §8.2 / 19 §6.4）：每类独立文案，不合并成一句"失败"
+  '已连接 · 发现 {n} 个可用模型': 'Connected · {n} models available',
+  'API Key 被拒绝了，请检查是否过期或权限不足': 'The API key was rejected — check if it expired or lacks permissions',
+  '连不上这个地址，请检查接口地址或代理设置': 'Cannot reach this endpoint — check the address or proxy settings',
+  '服务端没有这个模型，请检查模型名': 'The server has no such model — check the model name',
+  '连接超时，可能是网络或代理问题': 'Connection timed out — possibly a network or proxy issue',
+  '本地模型服务没有启动': 'The local model service is not running',
+  '还没有配置凭据，请填写 API Key': 'No credential configured yet — fill in an API key',
+  供应商: 'Provider',
+  '（仅支持 OpenAI 兼容协议）': '(OpenAI-compatible APIs only)',
+  自定义: 'Custom',
+  'Ollama（本地）': 'Ollama (local)',
+  接口地址: 'Endpoint',
+  '输入你的 API Key': 'Enter your API key',
+  显示密钥: 'Show key',
+  隐藏密钥: 'Hide key',
+  '本地模型不需要密钥。若没连上，多半是服务没启动':
+    'Local models need no API key. If it won’t connect, the service probably isn’t running',
+  模型名称: 'Model name',
+  '（接口文档里那个，例如 deepseek-chat）': '(the one from your API docs, e.g. deepseek-chat)',
+  显示名称: 'Display name',
+  '（列表和模型菜单里显示的名字，可留空）': '(shown in the list and model menu — optional)',
+  '例如 主力模型': 'e.g. Main model',
+  '请填写要调用的模型名': 'Enter the model name to call',
+  输入: 'Input',
+  输出: 'Output',
+  '（不选则使用该模型默认值）': '(uses the model default if unset)',
+  请先填写模型名称: 'Enter a model name first',
+  自定义供应商需要填写接口地址: 'Custom providers need an endpoint',
+  '请填写 API Key': 'Enter an API key',
+  '例如 gpt-4o 或 openai/gpt-4o': 'e.g. gpt-4o or openai/gpt-4o',
+  '例如 deepseek-flash 或 deepseek-v4-pro': 'e.g. deepseek-flash or deepseek-v4-pro',
+  '例如 gpt-4o': 'e.g. gpt-4o',
+  '例如 qwen3-coder': 'e.g. qwen3-coder',
+
+  /* ── 设置：权限预设 ── */
+  '决定 Lcode 什么时候需要问你。改动即时生效。':
+    'Decides when Lcode needs to ask you. Changes apply immediately.',
+  预设: 'Presets',
+  '不会改动任何文件，适合先让它看代码': 'Changes nothing — good for having it read code first',
+  '工作区内自动执行；改工作区外、跑有风险的命令前先问':
+    'Runs freely inside the workspace; asks before touching files outside it or running risky commands',
+  '用于自动化，不打扰你；建议配合最严守卫':
+    'For automation; pairs best with the strictest guards',
+  细则: 'Details',
+  工作区外文件每次都问: 'Always ask for files outside the workspace',
+  '没有「记住选择」；一次确认只管一次':
+    'No “remember my choice” — one approval covers one action',
+  危险命令额外确认: 'Extra confirmation for dangerous commands',
+  'rm -rf、git push --force 等始终二次确认':
+    'rm -rf, git push --force and similar are always double-confirmed',
+  始终要求确认的命令: 'Commands that always need confirmation',
+
+  /* ── 设置：工作区信任 ── */
+  工作区信任: 'Workspace trust',
+  '受信任的文件夹会记住权限设定；不信任的文件夹以只读打开。':
+    'Trusted folders remember their permission settings; untrusted ones open read-only.',
+  已信任的文件夹: 'Trusted folders',
+  '演示：选择文件夹': 'Demo: choose a folder',
+  '已移除信任（mock）': 'Trust removed (mock)',
+  '1,284 个文件': '1,284 files',
+  '862 个文件': '862 files',
+  '2026-08-02 信任': 'Trusted 2026-08-02',
+  '2026-07-18 信任': 'Trusted 2026-07-18',
+  提示: 'Note',
+  '打开不受信任的文件夹时，Lcode 会以只读模式启动，明确确认后才会获得写权限。':
+    'Untrusted folders open in read-only mode; write access requires explicit confirmation.',
+
+  /* ── 设置：历史与保留 ── */
+  '历史与保留': 'History & retention',
+  '会话记录与回放数据都保存在本机，可随时清理。':
+    'Chats and replay data are stored locally and can be cleaned up anytime.',
+  保留策略: 'Retention',
+  会话记录: 'Chats',
+  永久保留: 'Keep forever',
+  '保留 1 年': 'Keep 1 year',
+  '保留 90 天': 'Keep 90 days',
+  '保留 30 天': 'Keep 30 days',
+  回放快照: 'Replay snapshots',
+  跟随会话: 'Follow the chat',
+  '保留 7 天': 'Keep 7 days',
+  空间占用: 'Disk usage',
+  模型响应缓存: 'Model response cache',
+  日志: 'Logs',
+  '已清理「{name}」（mock）': 'Cleared “{name}” (mock)',
+
+  /* ── 设置：导出 ── */
+  导出: 'Export',
+  '把会话导出为通用格式，便于归档或在其他工具里分析。':
+    'Export chats in a portable format for archiving or analysis elsewhere.',
+  导出设置: 'Export settings',
+  格式: 'Format',
+  'JSONL 保留全部事件（含过程与回放）；Markdown/HTML 只含对话正文。':
+    'JSONL keeps every event (including process and replay); Markdown/HTML include only the conversation.',
+  范围: 'Scope',
+  当前会话: 'Current chat',
+  当前工作区的全部会话: 'All chats in the current workspace',
+  全部会话: 'All chats',
+  '已导出到 ~/Downloads/lcode-export.jsonl（模拟）':
+    'Exported to ~/Downloads/lcode-export.jsonl (simulated)',
+
+  /* ── 设置：导航 ── */
+  '搜索设置…': 'Search settings…',
+  个人: 'Personal',
+  '记忆与历史': 'Memory & history',
+}

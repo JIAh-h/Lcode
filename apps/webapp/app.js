@@ -534,7 +534,10 @@ function renderModelList(){
       +'</span></div>';
   }).join('');
 }
-function openModelModal(){var m=$('#modelModal');if(m){m.style.display='grid';$$('.tokchips').forEach(function(b){$$('button',b).forEach(function(c){c.classList.toggle('on',c.dataset.tok==='')})});var k=$('#mmKey');if(k)k.type='password';var eye=$('#mmEye');if(eye){eye.classList.remove('off');eye.title='显示'}var n=$('#mmName');if(n)n.focus()}}
+/* 供应商预设：内置供应商的接口地址来自适配器默认值，用户不用填 → 该字段只在「自定义」时出现 */
+var MM_PRESETS={'自定义':null,'DeepSeek':'https://api.deepseek.com','OpenAI':'https://api.openai.com/v1','Ollama（本地）':'http://127.0.0.1:11434'};
+function syncProviderFields(){var p=$('#mmProvider'),row=$('#mmBaseRow');if(!p||!row)return;var custom=MM_PRESETS[p.value]===null;row.style.display=custom?'flex':'none';if(custom)$('#mmBase').value=''}
+function openModelModal(){var m=$('#modelModal');if(m){m.style.display='grid';$$('.tokchips').forEach(function(b){$$('button',b).forEach(function(c){c.classList.toggle('on',c.dataset.tok==='')})});var k=$('#mmKey');if(k)k.type='password';var eye=$('#mmEye');if(eye){eye.classList.remove('off');eye.title='显示'}var pv=$('#mmProvider');if(pv)pv.value='自定义';syncProviderFields();var n=$('#mmName');if(n)n.focus()}}
 function closeModelModal(){var m=$('#modelModal');if(m)m.style.display='none'}
 document.addEventListener('click',function(e){
   var t=e.target;
@@ -578,6 +581,9 @@ if(mmEye)mmEye.addEventListener('click',function(){
   mmEye.classList.toggle('off',show);
   mmEye.title=show?'隐藏':'显示';
 });
+/* 供应商切换：非「自定义」时不出现接口地址字段 */
+var mmProvider=$('#mmProvider');
+if(mmProvider)mmProvider.addEventListener('change',syncProviderFields);
 renderModelList();
 
 /* 首次进入设置时同步一次外观控件状态 */

@@ -1,4 +1,5 @@
 import type { AgentId, SessionId } from '@lcode/util'
+import type { ContentBlock } from '@lcode/session'
 
 /**
  * Agent 契约（文档 20 §5.4）。
@@ -16,11 +17,20 @@ export interface AgentSpec {
   readonly presetRef?: string
 }
 
-export type UserInput = { readonly kind: 'text'; readonly text: string }
+/**
+ * 用户输入（两形态）：
+ * - `text`：纯文本（常用捷径）
+ * - `content`：完整 ContentBlock[]（与 `sessions.append` 的 user/message 同构，docs/21 §2.2）
+ */
+export type UserInput = { readonly kind: 'text'; readonly text: string } | { readonly kind: 'content'; readonly content: readonly ContentBlock[] }
 
 export type InjectedContext = { readonly content: string; readonly source: string }
 
-export type CancelReason = 'user' | 'error' | 'dispose' | 'max-steps'
+/**
+ * 取消原因：对齐 docs/21 §2.0 的 `CancellationCause`（user/parent/hook/dispose），
+ * 并保留循环内部使用的 error / max-steps。
+ */
+export type CancelReason = 'user' | 'parent' | 'hook' | 'dispose' | 'error' | 'max-steps'
 
 /** AgentHandle：disposer 就是能力——销毁即回滚（A4） */
 export interface AgentHandle {
@@ -62,5 +72,9 @@ declare module '@lcode/context' {
     'agent/status': { agentId: string; status: AgentStatus; reason?: string }
     'agent/inbox': { agentId: string; kind: 'followup' | 'steer' | 'inject' }
     'agent/disposed': { agentId: string }
+  }
+  /** ctx key（文档 20 §5.4）：复数 = 注册表 */
+  interface Services {
+    agents: AgentService
   }
 }

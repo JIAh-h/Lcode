@@ -1,0 +1,27 @@
+{
+  "name": "@lcode/llm-openai-compatible",
+  "version": "0.1.0",
+  "description": "OpenAI 兼容协议适配器：一个实现覆盖自定义端点 / DeepSeek / Ollama /v1 等（批次④首个真实适配器）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/agent-default-model": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/credentials": "workspace:*",
+    "@lcode/llm": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@lcode/credentials": "workspace:*"
+  }
+}

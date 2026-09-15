@@ -1,0 +1,25 @@
+{
+  "name": "@lcode/model-api",
+  "version": "0.1.0",
+  "description": "内部方法契约落地层：docs/21 §2.7 model.*（6 个方法）。选择入口 = ctx.agentDefaultModel，执行入口 = ctx.llm（18 §3.1 两个入口不混用；不做自动路由 D21）",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/agent-default-model": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/llm": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "devDependencies": {
+    "@lcode/llm-replay": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

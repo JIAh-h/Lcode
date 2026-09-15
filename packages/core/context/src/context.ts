@@ -104,6 +104,8 @@ export class Context {
 
   /** 副作用：注册即返回撤销器（disposer 模式的内核入口） */
   effect(fn: (ctx: Context) => Disposer, scope?: ScopeKey): Disposer {
+    // 骨架阶段副作用不做作用域归属（批次⑥ 的守卫链会用到）；显式 void 表明"故意未使用"
+    void scope
     return fn(this)
   }
 }

@@ -19,5 +19,30 @@ export { noopDisposer, composeDisposers, once } from './disposer.ts'
 
 export { nowEpochMs, isEpochMs } from './time.ts'
 
+export {
+  LCODE_HOME_ENV,
+  WORKSPACE_BUCKET_UNKNOWN,
+  SESSIONS_DIR,
+  INDEX_DB_FILE,
+  LOG_EXT,
+  LOG_EXT_ZST,
+  TRASH_DIR,
+  EXPORTS_DIR,
+  CACHE_DIR,
+  SPILL_DIR,
+  normalizePath,
+  resolveLcodeHome,
+  fnv1a64Hex,
+  workspaceBucket,
+  sessionsRoot,
+  indexDbPath,
+  trashRoot,
+  exportsRoot,
+  spillRoot,
+  sessionLogRelPath,
+  absFromHome,
+  relativeToHome,
+} from './lcode-home.ts'
+
 export type { Deferred, TimeoutOptions, RetryOptions } from './async.ts'
 export { deferred, withTimeout, TimeoutError, retry, sleep } from './async.ts'

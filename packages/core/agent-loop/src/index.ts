@@ -1,2 +1,5 @@
-export type { AgentLoop } from './agent-loop.ts'
+export type { AgentLoop, AgentLoopDeps, AgentLoopRuntime, CapturedRequest } from './agent-loop.ts'
 export { createAgentLoop } from './agent-loop.ts'
+export type { EnqueueResult, LoopHandle } from './engine.ts'
+export { TurnEngine } from './engine.ts'
+export { fingerprintOf, toolsFingerprintOf, headerReason, buildRequestBody } from './request.ts'

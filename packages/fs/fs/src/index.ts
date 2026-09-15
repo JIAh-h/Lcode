@@ -1,2 +1,18 @@
-export type { FsReadResult, FsWriteResult, FsStat, WriteOpts, FsService } from './fs.ts'
-export { normalizePath, isInsideWorkspace } from './fs.ts'
+export type {
+  FsEditHunk,
+  FsEditInput,
+  FsEditResult,
+  FsGlobOpts,
+  FsGlobResult,
+  FsGrepMatch,
+  FsGrepOpts,
+  FsGrepResult,
+  FsLine,
+  FsReadOpts,
+  FsReadResult,
+  FsService,
+  FsStat,
+  FsWriteOpts,
+  FsWriteResult,
+} from './fs.ts'
+export { isInsideWorkspace, normalizePath } from './fs.ts'
