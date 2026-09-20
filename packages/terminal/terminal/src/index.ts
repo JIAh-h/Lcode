@@ -1,1 +1,1 @@
-export type { TerminalOutput, TerminalHandle, TerminalService } from './terminal.ts'
+export type { TerminalInfo, TerminalOpenInput, TerminalReadResult, TerminalService } from './terminal.ts'

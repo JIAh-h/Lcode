@@ -50,6 +50,16 @@ export function createShellTool(deps: ToolShellDeps): ToolDefinition {
       '**退出码非 0 不代表工具失败** —— 那只是命令的结果（比如 grep 没匹配到会返回 1）。\n' +
       '需要长时间运行的服务用 runInBackground。',
     card: 'terminal',
+    presentationMeta: (args, value) => {
+      const p = args as { command: string; description: string; workdir?: string }
+      const result = value as Record<string, unknown>
+      return {
+        command: p.command,
+        description: p.description,
+        ...(p.workdir === undefined ? {} : { workdir: p.workdir }),
+        ...result,
+      }
+    },
     timeoutMs: defaultTimeoutMs + 5_000, // 比命令自己的预算略宽，让命令先超时（它给的诊断更好）
     inputSchema: {
       type: 'object',
@@ -86,7 +96,10 @@ export function createShellTool(deps: ToolShellDeps): ToolDefinition {
         cwd: p.workdir ?? workspaceOfCall(opts.scope) ?? workspaceRoot,
         timeoutMs: p.timeoutMs ?? defaultTimeoutMs,
         signal: opts.signal,
+        ...(agentIdOf(opts.scope) === undefined ? {} : { ownerAgentId: agentIdOf(opts.scope) }),
         ...(p.runInBackground === undefined ? {} : { runInBackground: p.runInBackground }),
+        // 与实际 cwd 同一个根交给沙箱，避免多工作区会话错误复用进程级 cwd。
+        sandboxPolicy: { mode: 'workspace-write', workspaceRoot: p.workdir ?? workspaceOfCall(opts.scope) ?? workspaceRoot },
       })
       return result as never
     },
@@ -100,6 +113,12 @@ export function createShellTool(deps: ToolShellDeps): ToolDefinition {
     const root = deps.workspaceOf?.(sessionId)
     return root === undefined || root === '' ? undefined : root
   }
+}
+
+function agentIdOf(scope: unknown): string | undefined {
+  if (typeof scope !== 'object' || scope === null) return undefined
+  const agentId = (scope as { agentId?: unknown }).agentId
+  return typeof agentId === 'string' && agentId !== '' ? agentId : undefined
 }
 
 /** 本机 shell 的 argv 前缀。与 `shell-local` 的 `defaultShell` 同口径。 */

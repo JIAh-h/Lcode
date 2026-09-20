@@ -13,6 +13,7 @@
   "dependencies": {
     "@lcode/terminal": "workspace:*",
     "@lcode/subprocess": "workspace:*",
+    "@lcode/subprocess-local": "workspace:*",
     "@lcode/context": "workspace:*",
     "@lcode/util": "workspace:*"
   },

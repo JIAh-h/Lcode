@@ -4,7 +4,7 @@ import type { AgentLoopRuntime, LoopHandle } from '@lcode/agent-loop'
 import type { ContentBlock, SessionService } from '@lcode/session'
 import { ERROR_CODES, LcodeErrorImpl, asAgentId, asSessionId, nowEpochMs } from '@lcode/util'
 import { AgentStatusStream, assertContentBlocks } from './types.ts'
-import type { AgentOptions, AgentStatusEvent, CancellationCause, EnqueueReceipt } from './types.ts'
+import type { AgentOptions, AgentStatusEvent, CancellationCause, EnqueueReceipt, QueuedMessage } from './types.ts'
 
 /**
  * LocalAgentsApi —— docs/21 §2.2 `agents.*` 的边界层落地。
@@ -86,8 +86,8 @@ export class LocalAgentsApi {
     const handle = this.requireHandle(input.agent_id)
     assertContentBlocks(input.content)
     this.assertModelConfigured()
-    const { seq } = handle.enqueue({ kind: 'content', content: input.content })
-    return { accepted: true, session_id: handle.sessionId, seq, enqueued_at: this.now() }
+    const { seq, queueId } = handle.enqueue({ kind: 'content', content: input.content })
+    return { accepted: true, session_id: handle.sessionId, seq, queue_id: queueId, enqueued_at: this.now() }
   }
 
   /** `agents.steer`：当前轮的下一个步边界生效；未在运行 → EC-NOT_RUNNING */
@@ -96,6 +96,35 @@ export class LocalAgentsApi {
     assertContentBlocks(input.content)
     await handle.steer({ kind: 'content', content: input.content })
     return { accepted: true, seq: this.deps.getSession(handle.sessionId).length }
+  }
+
+  /** 当前活体 agent 尚未开始的消息。队列不落盘，进程重启后不存在。 */
+  async queued(input: { readonly agent_id: string }): Promise<{ readonly items: readonly QueuedMessage[] }> {
+    const handle = this.requireHandle(input.agent_id)
+    return {
+      items: handle.queued().map(({ queueId, input }) => ({
+        queue_id: queueId,
+        content: input.kind === 'content' ? input.content : [{ type: 'text', text: input.text }],
+      })),
+    }
+  }
+
+  async editQueued(input: { readonly agent_id: string; readonly queue_id: string; readonly content: readonly ContentBlock[] }): Promise<{ readonly updated: boolean }> {
+    const handle = this.requireHandle(input.agent_id)
+    assertContentBlocks(input.content)
+    return { updated: handle.editQueued(input.queue_id, { kind: 'content', content: input.content }) }
+  }
+
+  async removeQueued(input: { readonly agent_id: string; readonly queue_id: string }): Promise<{ readonly removed: boolean }> {
+    return { removed: this.requireHandle(input.agent_id).removeQueued(input.queue_id) }
+  }
+
+  async clearQueued(input: { readonly agent_id: string }): Promise<{ readonly removed: number }> {
+    return { removed: this.requireHandle(input.agent_id).clearQueued() }
+  }
+
+  async guideQueued(input: { readonly agent_id: string; readonly queue_id: string }): Promise<{ readonly guided: boolean }> {
+    return { guided: this.requireHandle(input.agent_id).guideQueued(input.queue_id) }
   }
 
   /** `agents.inject`：幂等（按 dedupe_key）；不改对话可见内容 */
@@ -128,6 +157,12 @@ export class LocalAgentsApi {
     const handle = this.requireHandle(input.agent_id)
     await handle.cancel(input.cause)
     return { cancelled: true }
+  }
+
+  /** 恢复最近一次由用户暂停的回合；不是恢复已中断的网络流，而是基于日志续跑。 */
+  async resumeTurn(input: { readonly agent_id: string }): Promise<{ readonly resumed: boolean }> {
+    const handle = this.requireHandle(input.agent_id)
+    return { resumed: await handle.resumeTurn() }
   }
 
   /** `agents.watch`：幂等重订阅——每次调用返回新的独立状态流 */

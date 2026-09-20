@@ -1,4 +1,5 @@
 import { createServer } from 'node:http'
+import { setTimeout as delay } from 'node:timers/promises'
 
 /**
  * 冒烟用的假模型服务端。
@@ -32,6 +33,8 @@ const finalText = process.env.FAKE_FINAL ?? '读到了'
 const mode = process.env.FAKE_MODE ?? 'tool'
 /** 纯文本模式下回的文本 */
 const scriptedText = process.env.FAKE_TEXT ?? '你好，我是一条真实的流式回复。'
+/** 每个文本片段的延迟；默认 0，暂停/续跑冒烟用小延迟制造真实的活动流。 */
+const delayMs = Number(process.env.FAKE_DELAY_MS ?? 0)
 const port = Number(process.env.FAKE_PORT ?? 8898)
 
 createServer((req, res) => {
@@ -45,7 +48,7 @@ createServer((req, res) => {
   req.on('data', (chunk) => {
     body += chunk
   })
-  req.on('end', () => {
+  req.on('end', async () => {
     const parsed = JSON.parse(body === '' ? '{}' : body)
     const messages = parsed.messages ?? []
     const hasToolResult = messages.some((m) => m.role === 'tool')
@@ -55,7 +58,10 @@ createServer((req, res) => {
 
     if (mode === 'text') {
       // 逐字发，这样流式渲染与 chunk 合帧也一并被验到
-      for (const piece of scriptedText) send({ choices: [{ delta: { content: piece } }], usage: null })
+      for (const piece of scriptedText) {
+        send({ choices: [{ delta: { content: piece } }], usage: null })
+        if (delayMs > 0) await delay(delayMs)
+      }
       send({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 5 } })
     } else if (!hasToolResult) {
       send({

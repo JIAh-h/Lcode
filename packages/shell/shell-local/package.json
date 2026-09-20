@@ -12,12 +12,17 @@
   },
   "dependencies": {
     "@lcode/context": "workspace:*",
+    "@lcode/jobs": "workspace:*",
     "@lcode/sandbox": "workspace:*",
     "@lcode/shell": "workspace:*",
     "@lcode/subprocess": "workspace:*",
+    "@lcode/subprocess-local": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@lcode/jobs-local": "workspace:*"
   }
 }

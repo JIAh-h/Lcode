@@ -2,12 +2,13 @@
  * CLI 入口（文档 20 §7.2 / 23 §5）。
  *
  * 已接线：数据层的会话日常操作（`sessions` / `export` / `delete` / `restore` /
- * `purge` / `trash`）与 `doctor`（含 `--index` 索引体检、`--storage` 存储维护）。
- * 其余子命令（`index rebuild` 的独立入口、`migrate`、`--dump-config` 的真实装配）
- * 随批次 ⑦ 落地。
+ * `purge` / `trash`）、`index rebuild` 与 `doctor`（含 `--index` 索引体检、
+ * `--storage` 存储维护）。`migrate`、`--dump-config` 的真实装配随批次 ⑦ 落地。
  */
 import { runDoctor, type DoctorMode } from './doctor.ts'
-import { runSessionsCommand } from './sessions.ts'
+import { runIndexCommand, runSessionsCommand } from './sessions.ts'
+import { runTaskCommand } from './run.ts'
+import { runJobsCommand } from './jobs.ts'
 
 /**
  * 解析结果。这里**不用 `readonly`**：`parseArgs` 是逐参数增量构造它的，
@@ -20,6 +21,12 @@ export interface CliOptions {
   doctor?: DoctorMode | undefined
   /** 会话类命令的子参数（原样转发给 runSessionsCommand） */
   sessionsArgv?: string[] | undefined
+  /** 派生索引维护子命令（当前只支持 `index rebuild`） */
+  indexArgv?: string[] | undefined
+  /** 无 GUI 完整任务入口的子参数 */
+  runArgv?: string[] | undefined
+  /** 内存作业查询入口；不跨进程恢复。 */
+  jobsArgv?: string[] | undefined
 }
 
 /** 走 `sessions` 实现的顶层命令（第一条参数即命令名） */
@@ -35,6 +42,18 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   // 否则子命令解析会把 'sessions' 当成命令名。
   if (first !== undefined && SESSION_COMMANDS.has(first)) {
     opts.sessionsArgv = first === 'sessions' ? [...argv.slice(1)] : [...argv]
+    return opts
+  }
+  if (first === 'index') {
+    opts.indexArgv = [...argv.slice(1)]
+    return opts
+  }
+  if (first === 'run') {
+    opts.runArgv = [...argv.slice(1)]
+    return opts
+  }
+  if (first === 'jobs') {
+    opts.jobsArgv = [...argv.slice(1)]
     return opts
   }
 
@@ -81,6 +100,13 @@ const USAGE = `Lcode CLI — 可用命令：
   lcode purge <id> --exported      硬删（先导出；--force 可跳过提示）
   lcode trash [--empty]            查看 / 清空回收站
   lcode archive [--check]          压缩归档空闲 ≥30 天的会话
+  lcode index rebuild              从 JSONL 重建并压缩 SQLite 索引
+
+任务（无 GUI，共用桌面端内核）
+  lcode run <任务描述> [--cwd <dir>] [--trust-workspace]
+  lcode run --session <id> <补充要求> [--trust-workspace]
+  lcode jobs list                 查看活动作业的驻留语义
+  lcode jobs kill <id>            仅原运行时可执行；新 CLI 会明确拒绝接管
 
 自检
   lcode doctor                     环境自检
@@ -96,6 +122,18 @@ async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2))
   if (opts.sessionsArgv !== undefined) {
     process.exitCode = await runSessionsCommand(opts.sessionsArgv)
+    return
+  }
+  if (opts.indexArgv !== undefined) {
+    process.exitCode = await runIndexCommand(opts.indexArgv)
+    return
+  }
+  if (opts.runArgv !== undefined) {
+    process.exitCode = await runTaskCommand(opts.runArgv)
+    return
+  }
+  if (opts.jobsArgv !== undefined) {
+    process.exitCode = await runJobsCommand(opts.jobsArgv)
     return
   }
   if (opts.doctor !== undefined) {

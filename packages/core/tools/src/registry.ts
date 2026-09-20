@@ -1,5 +1,6 @@
 import { Context } from '@lcode/context'
-import type { Disposer } from '@lcode/util'
+import type { Disposer, JsonValue } from '@lcode/util'
+import type { CardType } from '@lcode/session'
 import { ERROR_CODES, LcodeErrorImpl, isJsonValue } from '@lcode/util'
 import type { ToolActionIntent, ToolCall, ToolDefinition, ToolGuard, ToolResult, ToolSchema } from './types.ts'
 
@@ -11,6 +12,8 @@ export interface ToolRegistry {
   register<TIn, TOut>(tool: ToolDefinition<TIn, TOut>): Disposer
   /** 当前可见的 schema 列表（受作用域与 restrict 影响） */
   schemas(): readonly ToolSchema[]
+  /** 查询工具声明的卡片类型；用于在结果落盘前生成 pending 卡片。 */
+  card?(name: string): CardType | undefined
   /** 收窄可见集合（只能收窄） */
   restrict(ids: readonly string[]): Disposer
   /** 注册守卫：类型上只有 deny 与"弃权"，没有 allow */
@@ -47,6 +50,10 @@ export class InMemoryToolRegistry implements ToolRegistry {
     return [...this.tools.values()]
       .filter((t) => allowed.has(t.name))
       .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }))
+  }
+
+  card(name: string): CardType | undefined {
+    return this.tools.get(name)?.card
   }
 
   restrict(ids: readonly string[]): Disposer {
@@ -97,8 +104,9 @@ export class InMemoryToolRegistry implements ToolRegistry {
      * 反过来会让"用户批准了"变成绕过守卫的通行证。
      */
     const intent = tool.describeAction === undefined ? undefined : tool.describeAction(parsed)
-    const pre: { call: ToolCall; intent?: ToolActionIntent; scope?: unknown; deny?: string } = {
+    const pre: { call: ToolCall; intent?: ToolActionIntent; scope?: unknown; signal: AbortSignal; deny?: string } = {
       call,
+      signal: opts.signal,
       ...(intent === undefined ? {} : { intent }),
       ...(opts.scope === undefined ? {} : { scope: opts.scope }),
     }
@@ -129,10 +137,37 @@ export class InMemoryToolRegistry implements ToolRegistry {
       return this.fail(call, ERROR_CODES.ET_INVALID_OUTPUT, '工具返回的不是无损 JSON 规范值')
     }
 
-    const result: ToolResult = { callId: call.callId, name: call.name, ok: true, value }
+    const presentation = this.presentationMeta(tool, parsed, value)
+    const meta = this.cardMeta(tool.card, presentation)
+    const result: ToolResult = {
+      callId: call.callId,
+      name: call.name,
+      ok: true,
+      value,
+      ...(meta === undefined ? {} : { meta }),
+    }
     await this.ctx.emit('tools/execute', { call, result })
     await this.ctx.emit('tools/post-execute', { call, result })
     return result
+  }
+
+  private presentationMeta(tool: ToolDefinition<unknown, unknown>, parsed: unknown, value: unknown): JsonValue | undefined {
+    if (tool.presentationMeta === undefined) return undefined
+    try {
+      const meta = tool.presentationMeta(parsed, value as JsonValue)
+      return isJsonValue(meta) ? meta : undefined
+    } catch {
+      // 卡片只是投影；展示函数出错不能把一个已经完成的工具变成失败。
+      return undefined
+    }
+  }
+
+  private cardMeta(card: CardType | undefined, presentation: JsonValue | undefined): JsonValue | undefined {
+    if (card === undefined && presentation === undefined) return undefined
+    if (presentation !== undefined && isRecord(presentation)) {
+      return { ...presentation, ...(card === undefined ? {} : { card }) } as JsonValue
+    }
+    return { card: card ?? 'generic', ...(presentation === undefined ? {} : { value: presentation }) }
   }
 
   private currentVisibleIds(): Set<string> {
@@ -181,4 +216,8 @@ function toCode(err: unknown): (typeof ERROR_CODES)[keyof typeof ERROR_CODES] {
 
 function truncate(s: string, n = 80): string {
   return s.length > n ? `${s.slice(0, n)}…` : s
+}
+
+function isRecord(value: unknown): value is Record<string, JsonValue> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

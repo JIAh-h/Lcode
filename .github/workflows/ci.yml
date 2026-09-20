@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
 
       - uses: actions/setup-node@v4
         with:
@@ -27,6 +29,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
+
+      # 根 packageManager 与 CI 安装版本必须相同；否则 lockfile 与本地门禁会在
+      # 不同 pnpm 版本下得到不一致结果。
+      - name: 验证 pnpm 版本
+        run: |
+          pnpm --version
+          test "$(pnpm --version)" = "9.12.0"
 
       - name: 安装依赖
         run: pnpm install --frozen-lockfile
@@ -49,6 +58,9 @@ jobs:
       - name: 打包桌面主进程
         run: pnpm --filter @lcode/desktop build:main
 
+      - name: CLI 构建
+        run: pnpm --filter @lcode/cli build
+
       # preload 必须在 sandbox 下真的把桥暴露出来：一旦它 require 了沙箱不允许的模块，
       # 整个 preload 会**静默不执行**（终端无提示），UI 上只是没有主进程桥。
       - name: preload 桥自检
@@ -58,14 +70,23 @@ jobs:
       - name: 单元测试与不变量（I1–I5 / I7）
         run: pnpm test
 
+      - name: 无密钥快照重放（M-ENG-03）
+        run: pnpm test:replay
+
+      - name: 核心覆盖率门禁（T7.2）
+        run: pnpm test:coverage
+
       - name: 依赖方向检查
         run: pnpm check:deps
 
       - name: 核心循环纯度检查（I6）
-        run: pnpm check:invariants
+        run: pnpm check:invariants:test && pnpm check:invariants
 
       - name: 文档集校验
         run: pnpm check:docs
 
       - name: 源码体积基线
         run: pnpm check:size
+
+      - name: 索引体积与容量基线
+        run: pnpm check:index-size:test && pnpm check:index-size

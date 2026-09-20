@@ -3,9 +3,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { InMemoryToolRegistry } from '@lcode/tools'
-import type { ToolActionIntent, ToolCall, ToolDefinition } from '@lcode/tools'
+import type { ToolActionIntent, ToolCall } from '@lcode/tools'
 import { createContext } from '@lcode/context'
-import { createLocalFs } from '@lcode/fs-local'
+import { createFsMutationAuthority, createLocalFs } from '@lcode/fs-local'
 import { createFsTools } from './tools.ts'
 
 /**
@@ -24,7 +24,7 @@ beforeEach(() => {
   ctx = createContext()
   tools = new InMemoryToolRegistry(ctx)
   for (const t of createFsTools({ fs: createLocalFs({ workspaceRoot: root }), workspaceRoot: root })) {
-    tools.register(t as ToolDefinition)
+    tools.register(t)
   }
 })
 
@@ -157,5 +157,34 @@ describe('pre-execute 可以拒掉（策略层的接缝）', () => {
     expect(r).toMatchObject({ ok: false, error: { code: 'ET-DENIED' } })
     // **没有执行**：拒绝必须真的拦住副作用，而不只是回一个错误
     expect(executed).toBe(false)
+  })
+})
+
+describe('P5-00：写工具透传调用身份', () => {
+  it('带 broker 时，write 使用当前 sessionId/callId 的许可', async () => {
+    const authority = createFsMutationAuthority()
+    const guarded = new InMemoryToolRegistry(ctx)
+    for (const tool of createFsTools({ fs: createLocalFs({ workspaceRoot: root, mutationAuthority: authority }), workspaceRoot: root })) {
+      guarded.register(tool)
+    }
+    authority.grant({ sessionId: 'session-a', callId: 'write-a', paths: [join(root, 'allowed.txt')] })
+    const result = await guarded.execute(
+      { callId: 'write-a', name: 'write', arguments: JSON.stringify({ path: 'allowed.txt', content: 'done' }) },
+      { signal: new AbortController().signal, scope: { sessionId: 'session-a' } },
+    )
+    expect(result.ok).toBe(true)
+  })
+
+  it('没有同次许可时，工具不会绕过 guarded Provider', async () => {
+    const authority = createFsMutationAuthority()
+    const guarded = new InMemoryToolRegistry(ctx)
+    for (const tool of createFsTools({ fs: createLocalFs({ workspaceRoot: root, mutationAuthority: authority }), workspaceRoot: root })) {
+      guarded.register(tool)
+    }
+    const result = await guarded.execute(
+      { callId: 'write-b', name: 'write', arguments: JSON.stringify({ path: 'blocked.txt', content: 'blocked' }) },
+      { signal: new AbortController().signal, scope: { sessionId: 'session-a' } },
+    )
+    expect(result).toMatchObject({ ok: false, error: { code: 'ET-DENIED' } })
   })
 })

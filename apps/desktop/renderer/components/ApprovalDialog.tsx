@@ -38,6 +38,7 @@ interface ApprovalImpact {
   readonly network?: { readonly domains: readonly string[] } | undefined
   readonly env?: readonly string[] | undefined
   readonly sandboxChange?: { readonly from: string; readonly to: string } | undefined
+  readonly sandbox?: { readonly status: 'degraded'; readonly mechanism: string; readonly reason: string } | undefined
   readonly processScope?: string | undefined
 }
 
@@ -51,6 +52,7 @@ export interface ApprovalRequest {
 interface ApprovalBridge {
   onAsked(handler: (payload: unknown) => void): () => void
   answer(input: { callId: string; result: 'allowed-once' | 'rejected' | 'cancelled' }): Promise<unknown>
+  pending(): Promise<unknown>
 }
 
 function bridge(): ApprovalBridge | undefined {
@@ -65,7 +67,13 @@ export function ApprovalDialog() {
     const api = bridge()
     if (api === undefined) return
     // 内核那边在等这个回答；没订阅到就没人答 → fail-closed（12 §5.2）
-    return api.onAsked((payload) => setRequest(payload as ApprovalRequest))
+    const stop = api.onAsked((payload) => setRequest(payload as ApprovalRequest))
+    // Renderer 重载不会重启主进程；重新挂载后必须把仍在等待的完整问题拿回来。
+    void api.pending().then((payload) => {
+      const pending = Array.isArray(payload) ? payload[0] : undefined
+      if (pending !== undefined) setRequest(pending as ApprovalRequest)
+    }).catch(() => undefined)
+    return stop
   }, [])
 
   if (request === null) return null
@@ -143,6 +151,23 @@ export function ApprovalDialog() {
             {t('会拿到这些环境变量：')}
             <span className="mono">{request.impact.env.join(', ')}</span>
           </div>
+        )}
+
+        {request.impact.sandboxChange !== undefined && (
+          <div className="ap-meta">
+            {t('沙箱将从 ')}<span className="mono">{request.impact.sandboxChange.from}</span>{t(' 变为 ')}<span className="mono">{request.impact.sandboxChange.to}</span>
+          </div>
+        )}
+
+        {request.impact.sandbox !== undefined && (
+          <div className="ap-danger">
+            <div className="ap-danger-title">{t('当前操作没有系统级沙箱约束')}</div>
+            <div className="ap-meta">{request.impact.sandbox.mechanism} · {request.impact.sandbox.reason}</div>
+          </div>
+        )}
+
+        {request.impact.processScope !== undefined && (
+          <div className="ap-meta">{t('进程范围：')}{request.impact.processScope}</div>
         )}
 
         {/* 故意**没有**"总是允许"：一次审批只管一次（12 §5.1） */}

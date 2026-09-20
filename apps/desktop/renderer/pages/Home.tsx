@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { ComposerBar } from '../components/ComposerBar.tsx'
 import { toast } from '../components/toast.ts'
 import { t } from '../i18n/index.ts'
+import { notifySessionChanged, sessionBridge } from '../store/sessionBridge.ts'
 
 /**
  * P1 首页（文档 19 §3.1，布局对齐 Codex）。
@@ -14,24 +15,70 @@ import { t } from '../i18n/index.ts'
 
 type Proj = { name: string; path: string }
 
-/** 左侧已有的项目（与侧栏分组一致；后续接入真实数据源） */
-const EXISTING_PROJECTS = ['web-app', 'api-server']
-
 /** 能力卡片：点击把示例任务填入输入框（沿用原型的可点击设计） */
 const CARDS: { ic: string; title: string; desc: string; preset: string }[] = [
-  { ic: '⌕', title: '探索并理解代码', desc: '只读，不会改动任何文件', preset: '帮我梳理这个项目的结构和主要功能' },
-  { ic: '✎', title: '构建新功能或工具', desc: '读取、编辑、运行，改动前先给你看', preset: '我想构建一个新功能：' },
-  { ic: '✓', title: '审查代码并提出建议', desc: '找出问题与隐患，给出修改建议', preset: '审查一下最近的改动，指出问题与风险' },
-  { ic: '⚒', title: '修复问题与失败', desc: '跑测试、看日志、定位并修掉', preset: '现在有报错/测试不过，帮我定位原因' },
+  {
+    ic: '⌕',
+    title: '探索并理解代码',
+    desc: '只读，不会改动任何文件',
+    preset: '帮我梳理这个项目的结构和主要功能',
+  },
+  {
+    ic: '✎',
+    title: '构建新功能或工具',
+    desc: '读取、编辑、运行，改动前先给你看',
+    preset: '我想构建一个新功能：',
+  },
+  {
+    ic: '✓',
+    title: '审查代码并提出建议',
+    desc: '找出问题与隐患，给出修改建议',
+    preset: '审查一下最近的改动，指出问题与风险',
+  },
+  {
+    ic: '⚒',
+    title: '修复问题与失败',
+    desc: '跑测试、看日志、定位并修掉',
+    preset: '现在有报错/测试不过，帮我定位原因',
+  },
 ]
 
 export function HomePage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const [text, setText] = useState('')
   const [proj, setProj] = useState<Proj | null>(null)
   const [pickOpen, setPickOpen] = useState(false)
   const [dragOver, setDragOver] = useState(false)
+  const [projects, setProjects] = useState<Proj[]>([])
   const pickRef = useRef<HTMLSpanElement | null>(null)
+
+  useEffect(() => {
+    const state = location.state as { cwd?: unknown } | null
+    if (typeof state?.cwd === 'string' && state.cwd !== '') {
+      const name = state.cwd.split(/[\\/]/).filter(Boolean).pop() || state.cwd
+      setProj({ name, path: state.cwd })
+    }
+  }, [location.key, location.state])
+
+  useEffect(() => {
+    const api = sessionBridge()
+    if (api === undefined) return
+    void api
+      .list()
+      .then((result) => {
+        const seen = new Set<string>()
+        const next: Proj[] = []
+        for (const item of result.items) {
+          if (item.workspace === null || seen.has(item.workspace)) continue
+          seen.add(item.workspace)
+          const name = item.workspace.split(/[\\/]/).filter(Boolean).pop() || item.workspace
+          next.push({ name, path: item.workspace })
+        }
+        setProjects(next)
+      })
+      .catch(() => setProjects([]))
+  }, [])
 
   /* 点击「选择项目」弹窗外部、或按 Esc 时收起（与 AppShell 菜单栏同一套交互） */
   useEffect(() => {
@@ -58,12 +105,14 @@ export function HomePage() {
   const submit = async () => {
     const value = text.trim()
     if (value.length === 0) return
-    const api = (globalThis as unknown as {
-      lcode?: {
-        session?: { create(i: unknown): Promise<{ session_id: string }> }
-        agent?: { send(i: unknown): Promise<unknown> }
+    const api = (
+      globalThis as unknown as {
+        lcode?: {
+          session?: { create(i: unknown): Promise<{ session_id: string }> }
+          agent?: { send(i: unknown): Promise<unknown> }
+        }
       }
-    }).lcode
+    ).lcode
     if (api?.session === undefined || api.agent === undefined) {
       toast(t('当前环境没有主进程桥，无法新建对话'))
       return
@@ -75,14 +124,15 @@ export function HomePage() {
       const created = await api.session.create({ cwd, title })
       // 首句**在这里就发出去**：用户已经表达完了意图，没必要进去再发一次
       await api.agent.send({ session_id: created.session_id, text: value })
+      notifySessionChanged()
       navigate(`/sessions/${created.session_id}`)
     } catch (err) {
       toast(err instanceof Error ? err.message : t('新建对话失败'))
     }
   }
 
-  const pickExisting = (name: string) => {
-    setProj({ name, path: '~/' + name })
+  const pickExisting = (project: Proj) => {
+    setProj(project)
     setPickOpen(false)
   }
 
@@ -133,7 +183,8 @@ export function HomePage() {
       <h1>
         {proj ? (
           <>
-            {t('我们应该在')} <em>{proj.name}</em>{t('中做些什么？')}
+            {t('我们应该在')} <em>{proj.name}</em>
+            {t('中做些什么？')}
           </>
         ) : (
           t('我们要构建什么？')
@@ -141,12 +192,7 @@ export function HomePage() {
       </h1>
       <div className="hcards">
         {CARDS.map((c) => (
-          <div
-            key={c.title}
-            className="hcard"
-            title={t('点击填入示例任务')}
-            onClick={() => setText(t(c.preset))}
-          >
+          <div key={c.title} className="hcard" title={t('点击填入示例任务')} onClick={() => setText(t(c.preset))}>
             <div className="ic">{c.ic}</div>
             <h3>{t(c.title)}</h3>
             <p>{t(c.desc)}</p>
@@ -187,8 +233,8 @@ export function HomePage() {
                 {pickOpen && (
                   <div className="pickmenu">
                     <div className="picklab">{t('已有项目')}</div>
-                    {EXISTING_PROJECTS.map((n) => (
-                      <a key={n} onClick={() => pickExisting(n)}>
+                    {projects.map((project) => (
+                      <a key={project.path} onClick={() => pickExisting(project)}>
                         <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
                           <path
                             d="M2.5 4.5A1.5 1.5 0 014 3h2l1.5 2H12a1.5 1.5 0 011.5 1.5v5A1.5 1.5 0 0112 13H4a1.5 1.5 0 01-1.5-1.5v-7z"
@@ -196,9 +242,10 @@ export function HomePage() {
                             strokeWidth="1.2"
                           />
                         </svg>
-                        {n}
+                        {project.name}
                       </a>
                     ))}
+                    {projects.length === 0 && <div className="pickhint">{t('还没有打开过项目')}</div>}
                     <hr />
                     <a
                       onClick={() => {

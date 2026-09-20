@@ -118,6 +118,20 @@ describe('答案如实转达', () => {
 })
 
 describe('落盘：两个事件一定成对（12 §5.5）', () => {
+  it('单次调用传入的会话优先于服务默认会话，避免并发会话串日志', async () => {
+    const first = fakeSession()
+    const second = fakeSession()
+    const service = createApprovalService({
+      channel: channel('rejected'),
+      getSession: () => first.session,
+    })
+
+    await service.ask(REQUEST, { session: second.session })
+
+    expect(first.events).toEqual([])
+    expect(types(second.events)).toEqual(['approval/asked', 'approval/decided'])
+  })
+
   it('问一次 → asked + decided 各一条，且四态都成对', async () => {
     for (const answer of ['allowed-once', 'rejected', 'cancelled', 'unavailable'] as const) {
       const { session, events } = fakeSession()

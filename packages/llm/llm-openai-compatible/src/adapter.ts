@@ -88,7 +88,7 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
   async listModels(signal: AbortSignal): Promise<readonly ModelInfo[]> {
     const { baseUrl, headers } = await this.resolveEndpoint()
     const res = await this.request(`${baseUrl}/models`, { method: 'GET', headers, signal })
-    const body = (await res.json()) as { data?: { id?: unknown; name?: unknown }[] }
+    const body = parseModelListResponse(await res.text())
     const list = Array.isArray(body.data) ? body.data : []
     return list
       .filter((item): item is { id: string; name?: string } => typeof item.id === 'string')
@@ -151,7 +151,6 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
       signal,
     })
 
-    const text = await drain(res, signal)
     const acc = new Map<number, { id: string; name: string; args: string }>()
     let usage: TokenUsage | undefined
     /**
@@ -168,7 +167,9 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
      */
     let parts = ''
 
-    for (const event of parseSse(text)) {
+    // 必须边读边翻译：若先把 Response.body 读完，界面会在请求结束后才一次性看到
+    // 全部文本，`stream: true` 就失去了意义。
+    for await (const event of parseSseStream(res, signal)) {
       if (event === '[DONE]') break
       let parsed: OpenAiStreamChunk
       try {
@@ -341,6 +342,34 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
     if (!res.ok) throw httpError(res, url)
     return res
   }
+}
+
+/**
+ * OpenAI-compatible providers normally return `{ data: [...] }` for `GET /models`.
+ * Some gateways, including BaiLian workspace endpoints, wrap that same object in
+ * SSE `data:` frames. Treat both transport envelopes as one model-list contract.
+ */
+function parseModelListResponse(text: string): { data?: { id?: unknown; name?: unknown }[] } {
+  try {
+    return JSON.parse(text) as { data?: { id?: unknown; name?: unknown }[] }
+  } catch {
+    for (const event of parseSse(text)) {
+      if (event === '[DONE]') continue
+      try {
+        const parsed = JSON.parse(event) as { data?: unknown }
+        if (Array.isArray(parsed.data)) return parsed as { data?: { id?: unknown; name?: unknown }[] }
+      } catch {
+        // Ignore malformed heartbeat frames; a later frame may carry the list.
+      }
+    }
+  }
+
+  throw new LcodeErrorImpl({
+    code: ERROR_CODES.EL_MODEL_ERROR,
+    message: '模型服务返回的模型清单不是可识别的 JSON 或 SSE 数据帧',
+    userMessage: '模型服务返回了无法识别的模型清单。请检查该服务是否支持 OpenAI 兼容的 /models 接口。',
+    retryable: false,
+  })
 }
 
 interface InternalBody {
@@ -539,27 +568,70 @@ function toolResultToText(content: unknown): string {
 /** SSE 解析：按行取 `data:` 载荷（OpenAI 用纯 `data:` 行 + 空行分隔） */
 export function* parseSse(text: string): Generator<string> {
   for (const rawLine of text.split('\n')) {
-    const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
-    if (!line.startsWith('data:')) continue
-    const payload = line.slice(5).trim()
-    if (payload !== '') yield payload
+    const payload = sseData(rawLine)
+    if (payload !== undefined) yield payload
   }
 }
 
-/** 读干响应体（供上面逐行解析用） */
-async function drain(res: Response, signal: AbortSignal): Promise<string> {
-  if (res.body === null) return await res.text()
+/**
+ * 增量解析 SSE 响应体。
+ *
+ * 网络分块不保证与 SSE 行边界对齐，因此保留未完成的一行，直到下一个分块补齐它。
+ * 这也让暂停操作能取消正在等待的 `reader.read()`。
+ */
+export async function* parseSseStream(res: Response, signal: AbortSignal): AsyncGenerator<string> {
+  if (res.body === null) {
+    const text = await res.text()
+    signal.throwIfAborted()
+    yield* parseSse(text)
+    return
+  }
+
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
-  let out = ''
-  for (;;) {
-    signal.throwIfAborted()
-    const { done, value } = await reader.read()
-    if (done) break
-    out += decoder.decode(value, { stream: true })
+  let buffered = ''
+  const onAbort = () => {
+    void reader.cancel().catch(() => undefined)
   }
-  out += decoder.decode()
-  return out
+  signal.addEventListener('abort', onAbort, { once: true })
+
+  try {
+    for (;;) {
+      signal.throwIfAborted()
+      const { done, value } = await reader.read()
+      signal.throwIfAborted()
+      if (done) break
+
+      buffered += decoder.decode(value, { stream: true })
+      let newline = buffered.indexOf('\n')
+      while (newline !== -1) {
+        const payload = sseData(buffered.slice(0, newline))
+        buffered = buffered.slice(newline + 1)
+        if (payload !== undefined) yield payload
+        newline = buffered.indexOf('\n')
+      }
+    }
+
+    buffered += decoder.decode()
+    if (buffered !== '') {
+      const payload = sseData(buffered)
+      if (payload !== undefined) yield payload
+    }
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+    try {
+      reader.releaseLock()
+    } catch {
+      // Reader may already have been released by a runtime after cancellation.
+    }
+  }
+}
+
+function sseData(rawLine: string): string | undefined {
+  const line = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+  if (!line.startsWith('data:')) return undefined
+  const payload = line.slice(5).trim()
+  return payload === '' ? undefined : payload
 }
 
 function isAbort(err: unknown): boolean {

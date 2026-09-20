@@ -36,6 +36,8 @@ export interface FsWriteResult {
   readonly bytesWritten: number
   /** 本次是否新建了文件（已存在则为 false） */
   readonly created: boolean
+  /** 整体写入的前后行差异；用于写后审查和会话回放，不依赖重新读取当前文件。 */
+  readonly hunks: readonly FsEditHunk[]
 }
 
 /** 一处替换（`edit` 的结果；diff 卡片据此**纯投影重建**，不重读文件——20 §6.3 / M-DIFF-01） */
@@ -91,6 +93,25 @@ export interface FsReadOpts {
 
 export interface FsWriteOpts {
   readonly createDirs?: boolean | undefined
+  /** 由策略层为一次已批准的写调用签发；配置了 broker 的 Provider 必须消费它。 */
+  readonly mutationAccess?: FsMutationAccess | undefined
+}
+
+/** 一次写入调用的身份，不能跨会话或跨 tool call 复用。 */
+export interface FsMutationAccess {
+  readonly sessionId: string
+  readonly callId: string
+}
+
+/** 策略层签发给文件 Provider 的精确一次性写入许可。 */
+export interface FsMutationGrant extends FsMutationAccess {
+  readonly paths: readonly string[]
+}
+
+/** 文件能力 broker 的最小接口。 */
+export interface FsMutationAuthority {
+  grant(grant: FsMutationGrant): void
+  consume(access: FsMutationAccess | undefined, path: string): void
 }
 
 export interface FsEditInput {
@@ -99,6 +120,8 @@ export interface FsEditInput {
   readonly newText: string
   /** 是否替换全部匹配（默认 false；false 时匹配不唯一即报错） */
   readonly replaceAll?: boolean | undefined
+  /** 同 `FsWriteOpts.mutationAccess`。 */
+  readonly mutationAccess?: FsMutationAccess | undefined
 }
 
 export interface FsGlobOpts {

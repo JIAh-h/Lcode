@@ -1,8 +1,7 @@
-/**
- * @lcode/terminal-pty —— 骨架占位壳。
- * PTY 终端实现
- * 真实实现按文档 23 §14 批次推进；当前导出空注册占位。
- */
+export type { LocalTerminalOptions } from './local-terminal.ts'
+export { createLocalTerminal, LocalTerminalService } from './local-terminal.ts'
+
+/** 供能力装配层调用的最小注册入口。 */
 export function register(): () => void {
   return () => {}
 }

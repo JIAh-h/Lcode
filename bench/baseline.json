@@ -1,0 +1,32 @@
+{
+  "generatedAt": "2026-09-17T01:59:08.976Z",
+  "platform": "win32-x64",
+  "node": "v22.20.0",
+  "coldStartMs": 277,
+  "portableRestartMs": 288,
+  "rendererIdleFps": 60,
+  "rendererFrameP95Ms": 16.8,
+  "replay": [
+    {
+      "events": 10000,
+      "messages": 20,
+      "deriveMs": 2.53,
+      "rssDeltaMb": 1.07
+    },
+    {
+      "events": 100000,
+      "messages": 200,
+      "deriveMs": 16.57,
+      "rssDeltaMb": 8.32
+    }
+  ],
+  "replayRssMb": 84.9,
+  "archiveBytes": 136952680,
+  "archiveLimitBytes": 157286400,
+  "skipped": {
+    "firstTokenMs": "需要真实模型响应与渲染首 chunk probe，不能从启动时间推算",
+    "scrollFps": "已测空闲 renderer 帧率；长会话滚动仍需要专用 probe",
+    "timelineSeekMs": "需要 10 万事件 replay 定位 probe",
+    "crossPlatform": "当前运行机为 Windows，等待 macOS/Linux 基准机"
+  }
+}

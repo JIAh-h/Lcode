@@ -141,6 +141,7 @@ class AgentHandleImpl implements AgentHandle {
   async dispose(): Promise<void> {
     if (!this.alive) return
     this.alive = false
+    /* c8 ignore next 3 -- core store 当前不注册额外 disposer；循环保留给装配层扩展点 */
     for (let i = this.disposers.length - 1; i >= 0; i--) {
       this.disposers[i]!()
     }

@@ -14,8 +14,8 @@ export interface SystemPromptService {
   context(id: string, fn: (ctx: AssembleCtx) => string | Promise<string>, opts?: { readonly order?: number }): Disposer
   /** 声明变量的取值来源 */
   variable(name: string, resolve: (ctx: AssembleCtx) => string): Disposer
-  /** 追加/收窄工具 schema（收窄是叠加的，不可放宽） */
-  tools(ids: readonly string[] | ((all: readonly ToolSchema[]) => readonly ToolSchema[])): Disposer
+  /** 追加/收窄工具 schema（收窄是叠加的，不可放宽）。会话级策略可读取装配上下文。 */
+  tools(ids: readonly string[] | ((all: readonly ToolSchema[], ctx: AssembleCtx) => readonly ToolSchema[])): Disposer
   /** 装配（纯函数语义） */
   assemble(input: AssembleInput): Promise<AssembledPrompt>
 }
@@ -53,7 +53,7 @@ export class InMemorySystemPromptService implements SystemPromptService {
   private sections = new Map<string, SectionEntry>()
   private contexts = new Map<string, ContextEntry>()
   private variables = new Map<string, (ctx: AssembleCtx) => string>()
-  private toolOps: Array<{ order: number; apply: (all: readonly ToolSchema[]) => readonly ToolSchema[] }> = []
+  private toolOps: Array<{ order: number; apply: (all: readonly ToolSchema[], ctx: AssembleCtx) => readonly ToolSchema[] }> = []
   private orderCounter = 0
 
   constructor(private readonly toolsRegistry: ToolRegistry) {}
@@ -89,7 +89,7 @@ export class InMemorySystemPromptService implements SystemPromptService {
     }
   }
 
-  tools(ids: readonly string[] | ((all: readonly ToolSchema[]) => readonly ToolSchema[])): Disposer {
+  tools(ids: readonly string[] | ((all: readonly ToolSchema[], ctx: AssembleCtx) => readonly ToolSchema[])): Disposer {
     const apply =
       typeof ids === 'function'
         ? ids
@@ -97,7 +97,7 @@ export class InMemorySystemPromptService implements SystemPromptService {
     this.toolOps.push({ order: this.orderCounter++, apply })
     const idx = this.toolOps.length - 1
     return () => {
-      this.toolOps[idx] = undefined as unknown as { order: number; apply: (all: readonly ToolSchema[]) => readonly ToolSchema[] }
+      this.toolOps[idx] = undefined as unknown as { order: number; apply: (all: readonly ToolSchema[], ctx: AssembleCtx) => readonly ToolSchema[] }
     }
   }
 
@@ -131,7 +131,7 @@ export class InMemorySystemPromptService implements SystemPromptService {
     const ops = [...this.toolOps].sort((a, b) => a.order - b.order || 0)
     for (const op of ops) {
       if (!op) continue
-      const narrowed = op.apply(all)
+      const narrowed = op.apply(all, ctx)
       // 校验收窄：结果必须是输入的子集（P4）
       const inputIds = new Set(all.map((s) => s.name))
       for (const s of narrowed) {

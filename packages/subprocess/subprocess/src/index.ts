@@ -1,1 +1,1 @@
-export type { SpawnedProcess, SpawnOpts, SubprocessService } from './subprocess.ts'
+export type { SpawnedProcess, SpawnOpts, SpawnedPty, PtySpawnOpts, SubprocessService } from './subprocess.ts'

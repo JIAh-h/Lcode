@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@lcode/plugin-manifest": "workspace:*",
-    "@lcode/context": "workspace:*",
+    "@lcode/session-persistence-sqlite": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {

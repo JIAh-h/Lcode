@@ -85,8 +85,10 @@ function eventToMessage(event: SessionEvent): ModelMessage {
       return (event.data as { readonly message: AssistantMessage }).message
     case 'tool/result':
       return (event.data as { readonly message: ToolResultMessage }).message
+    /* c8 ignore next 2 -- isSurfaceEvent 只允许上面的三类事件，default 不可由当前类型流到达 */
     default:
       // 开放接口：未知类型跳过（若它标了 ignorable 或已在加载时被拒绝，06 §2.3）
+      /* c8 ignore next -- isSurfaceEvent 只允许上面的三类事件 */
       throw new Error(`不可达：非表面事件 ${event.type}`)
   }
 }

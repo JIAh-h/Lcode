@@ -1,3 +1,4 @@
+import { platformSandboxCapabilities } from '@lcode/sandbox'
 import type { ResolvedSandboxPolicy, SandboxService, SandboxStatus, SandboxWrapResult } from '@lcode/sandbox'
 
 /**
@@ -26,13 +27,17 @@ export interface LocalSandboxOptions {
 }
 
 export function createLocalSandbox(options: LocalSandboxOptions = {}): SandboxService {
-  const reason = options.reason ?? defaultReason()
+  const capabilities = platformSandboxCapabilities()
+  const reason = options.reason ?? capabilities.reason
   const status: SandboxStatus = {
     available: false,
     mechanism: 'none',
-    knownEscapeSurfaces: ['文件系统（无约束）', '网络（无约束）', '进程（无约束）'],
+    knownEscapeSurfaces: Object.entries(capabilities.boundaries)
+      .filter(([, boundary]) => boundary.state !== 'enforced')
+      .map(([name]) => ({ filesystem: '文件系统', network: '网络', spawn: '进程' }[name] ?? name) + '（无约束）'),
     degraded: true,
     reason,
+    capabilities,
   }
 
   return {
@@ -47,18 +52,4 @@ export function createLocalSandbox(options: LocalSandboxOptions = {}): SandboxSe
       return { enforced: false, wrappedArgv: [...argv], degradationReason: reason }
     },
   }
-}
-
-function defaultReason(): string {
-  const platform = process.platform
-  if (platform === 'win32') {
-    return 'Windows 原生沙箱（AppContainer + Job Object）尚未接入，命令在无约束下运行。'
-  }
-  if (platform === 'darwin') {
-    return 'macOS 沙箱（Seatbelt）尚未接入，命令在无约束下运行。'
-  }
-  if (platform === 'linux') {
-    return 'Linux 沙箱（Landlock + seccomp）尚未接入，命令在无约束下运行。'
-  }
-  return `当前平台（${platform}）没有可用的沙箱实现，命令在无约束下运行。`
 }

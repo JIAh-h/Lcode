@@ -36,6 +36,11 @@ export interface ToolDefinition<TIn = JsonValue, TOut = JsonValue> {
   readonly inputSchema: ToolInputSchema
   /** 声明式卡片意图（UI 投影，08 §8） */
   readonly card?: CardType
+  /**
+   * 从已解析参数和规范值生成可重放的 UI 元数据。
+   * 纯函数、不得 I/O；结果会落在 `tool/result.meta`，实时与回放共用。
+   */
+  readonly presentationMeta?: (args: TIn, value: JsonValue) => JsonValue
   /** 超时预算（毫秒）；超时 → ET-TIMEOUT */
   readonly timeoutMs?: number
   /**

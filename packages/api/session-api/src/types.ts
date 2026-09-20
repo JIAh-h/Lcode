@@ -1,5 +1,15 @@
 import type { ModelSelection } from '@lcode/agent-default-model'
-import type { ModelMessage, SessionEvent, SurfaceOp } from '@lcode/session'
+import type {
+  ApprovalAction,
+  ApprovalBasis,
+  EpochHeader,
+  Impact,
+  ModelMessage,
+  SessionEvent,
+  StreamChunk,
+  SurfaceOp,
+  ToolResultMessage,
+} from '@lcode/session'
 import type { JsonValue } from '@lcode/util'
 
 /**
@@ -333,6 +343,113 @@ export interface IndexDoctorReport {
   readonly needsReindex: number
   /** 给人看的一句话说明（可选） */
   readonly note?: string | undefined
+}
+
+/** `history.replay`：目标 seq 可以是请求头本身或该请求步骤中的任一事件。 */
+export interface HistoryReplayInput {
+  readonly session_id: string
+  readonly up_to_seq: number
+}
+
+export interface ReplayToolCall {
+  readonly call: {
+    readonly seq: number
+    readonly call_id: string
+    readonly name: string
+    readonly card?: string | undefined
+    /** 原始 JSON 字符串，保持与 `tool/call.arguments` 一致。 */
+    readonly arguments: string
+  }
+  readonly result?: ToolResultMessage | undefined
+}
+
+export interface ReplayDecision {
+  readonly kind: string
+  readonly basis: string
+  readonly at: number
+}
+
+/** `history.replay` 的只读请求快照（06 §10.2）。 */
+export interface ReplaySnapshot {
+  readonly header: EpochHeader
+  /** 请求头之前的表面投影，恰好是这次请求发送给模型的历史。 */
+  readonly messages: readonly ModelMessage[]
+  readonly chunks: readonly StreamChunk[]
+  readonly toolCalls: readonly ReplayToolCall[]
+  readonly decisions: readonly ReplayDecision[]
+}
+
+/** `history.why` 以工具调用事件的 seq 作为稳定锚点，而不是容易跨轮重复的 callId。 */
+export interface HistoryWhyInput {
+  readonly session_id: string
+  readonly call_seq: number
+}
+
+export interface HistoryCheckpointsInput {
+  readonly session_id: string
+}
+
+/** 只读取一个事件的 payload；前端先持有时间轴元数据，需要时才调用。 */
+export interface HistoryBodyInput {
+  readonly session_id: string
+  readonly seq: number
+}
+
+export interface HistoryBodyResult {
+  /** UTF-8 编码后的 JSON payload 字节数，供 UI 决定是否展开。 */
+  readonly bytes: number
+  /** 不透明且由 payload 内容绑定的标识；会话被清除后自然失效。 */
+  readonly ref: string
+  /** 只返回目标事件的无损 JSON 载荷，不返回整条会话或相邻事件。 */
+  readonly data: JsonValue
+}
+
+export interface DecisionTrace {
+  readonly call: {
+    readonly seq: number
+    readonly call_id: string
+    readonly name: string
+  }
+  /**
+   * 没有策略落盘时必须明确返回 `not-recorded`，不能把沉默解释成允许。
+   * `basis` 是实际发生审批时策略给出的解释。
+   */
+  readonly policy: {
+    readonly status: 'not-recorded' | 'recorded'
+    readonly basis?: ApprovalBasis | undefined
+  }
+  readonly approval: {
+    readonly status: 'not-requested' | 'pending' | 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+    readonly action?: ApprovalAction | undefined
+    readonly basis?: ApprovalBasis | undefined
+    readonly impact?: Impact | undefined
+    readonly asked_at?: number | undefined
+    readonly decided_at?: number | undefined
+    readonly decided_by?: 'human' | 'auto-denied' | 'cancelled' | undefined
+  }
+  /** 沙箱事件同样是事实记录；没写入即不对其强制能力作任何推断。 */
+  readonly sandbox: {
+    readonly status: 'not-recorded' | 'profiled' | 'degraded'
+    readonly mode?: string | undefined
+    readonly reason?: string | undefined
+    readonly mechanism?: string | undefined
+  }
+}
+
+/** 已闭合轮的只读锚点；它不是文件快照，也不承诺可回滚。 */
+export interface Checkpoint {
+  readonly turn: number
+  readonly end_seq: number
+  readonly ended_at: number
+  readonly reason: 'completed' | 'cancelled' | 'interrupted' | 'error'
+}
+
+/** `history.*` 属于 session-api 边界，而非 persistence 服务域（21 §2.12）。 */
+export interface HistoryApi {
+  replay(input: HistoryReplayInput): Promise<ReplaySnapshot>
+  why(input: HistoryWhyInput): Promise<DecisionTrace>
+  checkpoints(input: HistoryCheckpointsInput): Promise<readonly Checkpoint[]>
+  body(input: HistoryBodyInput): Promise<HistoryBodyResult>
 }
 
 /**

@@ -1,8 +1,8 @@
-import { spawn } from 'node:child_process'
-import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import { setTimeout as delay } from 'node:timers/promises'
+import { spawn } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { setTimeout as delay } from "node:timers/promises";
 
 /**
  * 端到端冒烟：**真实模型用真实工具读真实文件**。
@@ -15,106 +15,147 @@ import { setTimeout as delay } from 'node:timers/promises'
  * 旧服务端、测的是旧逻辑"这种极难排查的坑）。
  */
 
-const HOME = process.env.LCODE_HOME
-if (HOME === undefined || HOME === '') throw new Error('需要 LCODE_HOME')
+const HOME = process.env.LCODE_HOME;
+if (HOME === undefined || HOME === "") throw new Error("需要 LCODE_HOME");
 
-const FAKE_SERVER = fileURLToPath(new URL('./fake-model-server.mjs', import.meta.url))
+const FAKE_SERVER = fileURLToPath(
+  new URL("./fake-model-server.mjs", import.meta.url),
+);
 
 const ELECTRON = fileURLToPath(
-  new URL('../../../node_modules/.pnpm/electron@33.4.11/node_modules/electron/dist/electron.exe', import.meta.url),
-)
-const PORT = 9227
-const PORT_FAKE = 8898
+  new URL(
+    "../../../node_modules/.pnpm/electron@33.4.11/node_modules/electron/dist/electron.exe",
+    import.meta.url,
+  ),
+);
+const PORT = 9227;
+const PORT_FAKE = 8898;
 /** 工作区：冒烟期间建一个真文件让模型读 */
-const WORKSPACE = join(HOME, 'ws')
+const WORKSPACE = join(HOME, "ws");
 
-rmSync(WORKSPACE, { recursive: true, force: true })
-mkdirSync(WORKSPACE, { recursive: true })
-writeFileSync(join(WORKSPACE, 'hello.txt'), 'SECRET_MARKER_12345\n第二行\n', 'utf8')
+rmSync(WORKSPACE, { recursive: true, force: true });
+mkdirSync(WORKSPACE, { recursive: true });
+writeFileSync(
+  join(WORKSPACE, "hello.txt"),
+  "SECRET_MARKER_12345\n第二行\n",
+  "utf8",
+);
 
 const fakeServer = spawn(process.execPath, [FAKE_SERVER], {
   env: { ...process.env, FAKE_PORT: String(PORT_FAKE) },
-  stdio: 'ignore',
-})
+  stdio: "ignore",
+});
 
-const child = spawn(ELECTRON, ['.', `--remote-debugging-port=${PORT}`], {
-  cwd: 'apps/desktop',
-  env: { ...process.env },
-  stdio: ['ignore', 'pipe', 'pipe'],
-})
-const logs = []
-child.stdout.on('data', (b) => logs.push(String(b)))
-child.stderr.on('data', (b) => logs.push(String(b)))
+const child = spawn(
+  ELECTRON,
+  [
+    "--no-sandbox",
+    "--in-process-gpu",
+    "--disable-gpu-compositing",
+    "--disable-gpu",
+    ".",
+    `--remote-debugging-port=${PORT}`,
+    ...(process.env.LCODE_ELECTRON_USER_DATA_DIR
+      ? [`--user-data-dir=${process.env.LCODE_ELECTRON_USER_DATA_DIR}`]
+      : []),
+  ],
+  {
+    cwd: "apps/desktop",
+    env: { ...process.env },
+    stdio: ["ignore", "pipe", "pipe"],
+  },
+);
+const logs = [];
+child.stdout.on("data", (b) => logs.push(String(b)));
+child.stderr.on("data", (b) => logs.push(String(b)));
 
 function cleanup() {
-  fakeServer.kill()
-  child.kill()
+  fakeServer.kill();
+  child.kill();
 }
 
 async function findPage(timeoutMs = 30000) {
-  const deadline = Date.now() + timeoutMs
+  const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
-      const res = await fetch(`http://127.0.0.1:${PORT}/json/list`)
-      const targets = await res.json()
-      const page = targets.find((t) => t.type === 'page' && t.url.startsWith('file://'))
-      if (page !== undefined) return page
+      const res = await fetch(`http://127.0.0.1:${PORT}/json/list`);
+      const targets = await res.json();
+      const page = targets.find(
+        (t) => t.type === "page" && t.url.startsWith("file://"),
+      );
+      if (page !== undefined) return page;
     } catch {
       /* 还没起来 */
     }
-    await delay(500)
+    await delay(500);
   }
-  throw new Error('等不到可调试的页面目标')
+  throw new Error("等不到可调试的页面目标");
 }
 
 class Cdp {
   constructor(ws) {
-    this.ws = ws
-    this.id = 0
-    this.pending = new Map()
-    ws.addEventListener('message', (event) => {
-      const msg = JSON.parse(event.data)
-      const resolve = this.pending.get(msg.id)
+    this.ws = ws;
+    this.id = 0;
+    this.pending = new Map();
+    ws.addEventListener("message", (event) => {
+      const msg = JSON.parse(event.data);
+      const resolve = this.pending.get(msg.id);
       if (resolve !== undefined) {
-        this.pending.delete(msg.id)
-        resolve(msg.result)
+        this.pending.delete(msg.id);
+        resolve(
+          msg.error === undefined
+            ? msg.result
+            : {
+                exceptionDetails: {
+                  exception: { description: JSON.stringify(msg.error) },
+                },
+              },
+        );
       }
-    })
+    });
   }
   send(method, params = {}) {
-    const id = ++this.id
+    const id = ++this.id;
     return new Promise((resolve, reject) => {
       this.pending.set(id, (r) =>
-        r?.exceptionDetails === undefined ? resolve(r) : reject(new Error(JSON.stringify(r.exceptionDetails))),
-      )
-      this.ws.send(JSON.stringify({ id, method, params }))
-    })
+        r?.exceptionDetails === undefined
+          ? resolve(r)
+          : reject(new Error(JSON.stringify(r.exceptionDetails))),
+      );
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
   }
   async eval(expression) {
-    const r = await this.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })
+    const r = await this.send("Runtime.evaluate", {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+    });
     if (r.exceptionDetails !== undefined) {
-      throw new Error(`页面内报错：${r.exceptionDetails.exception?.description ?? JSON.stringify(r.exceptionDetails)}`)
+      throw new Error(
+        `页面内报错：${r.exceptionDetails.exception?.description ?? JSON.stringify(r.exceptionDetails)}`,
+      );
     }
-    return r.result?.value
+    return r.result?.value;
   }
 }
 
-let cdp
+let cdp;
 try {
-  const page = await findPage()
-  const ws = new WebSocket(page.webSocketDebuggerUrl)
+  const page = await findPage();
+  const ws = new WebSocket(page.webSocketDebuggerUrl);
   await new Promise((resolve, reject) => {
-    ws.addEventListener('open', resolve, { once: true })
-    ws.addEventListener('error', reject, { once: true })
-  })
-  cdp = new Cdp(ws)
+    ws.addEventListener("open", resolve, { once: true });
+    ws.addEventListener("error", reject, { once: true });
+  });
+  cdp = new Cdp(ws);
 
   const bridge = await cdp.eval(`(() => {
     const l = window.lcode
     return { session: !!l?.session, agent: !!l?.agent, model: !!l?.model, approval: !!l?.approval }
-  })()`)
-  console.log('① preload 桥:', JSON.stringify(bridge))
-  if (!bridge.approval) throw new Error('审批桥没暴露')
+  })()`);
+  console.log("① preload 桥:", JSON.stringify(bridge));
+  if (!bridge.approval) throw new Error("审批桥没暴露");
 
   await cdp.eval(`(async () => {
     await window.lcode.model.save({
@@ -123,48 +164,50 @@ try {
       base_url: 'http://127.0.0.1:${PORT_FAKE}',
       api_key: 'sk-smoke',
     })
-  })()`)
+  })()`);
 
   // 建会话（cwd 指向冒烟工作区，含那个真文件）
   const sessionId = await cdp.eval(`(async () => {
     const created = await window.lcode.session.create({ cwd: ${JSON.stringify(WORKSPACE)}, title: '工具冒烟' })
     await window.lcode.agent.send({ session_id: created.session_id, text: '读一下 hello.txt' })
     return created.session_id
-  })()`)
-  console.log('② 已建会话并发送:', sessionId)
+  })()`);
+  console.log("② 已建会话并发送:", sessionId);
 
   // 等"调工具 → 拿结果 → 再回答"这整圈跑完
-  await delay(9000)
-  await cdp.eval(`(() => { window.location.hash = '#/sessions/${sessionId}' })()`)
-  await delay(2000)
+  await delay(9000);
+  await cdp.eval(
+    `(() => { window.location.hash = '#/sessions/${sessionId}' })()`,
+  );
+  await delay(2000);
 
   const dom = await cdp.eval(`(() => {
     const el = document.querySelector('.sessionstream')
     return { exists: !!el, text: el ? el.innerText : '' }
-  })()`)
-  console.log('③ 界面文本:', JSON.stringify(dom.text).slice(0, 400))
+  })()`);
+  console.log("③ 界面文本:", JSON.stringify(dom.text).slice(0, 400));
 
   // 关键断言：要看得到**文件内容**（证明工具真的执行了、结果回到了模型）
-  const sawFileContent = dom.text.includes('SECRET_MARKER_12345')
-  const sawError = dom.text.includes('没能跑起来')
-  const ok = sawFileContent && !sawError
+  const sawFileContent = dom.text.includes("SECRET_MARKER_12345");
+  const sawError = dom.text.includes("没能跑起来");
+  const ok = sawFileContent && !sawError;
   console.log(
     ok
-      ? '\n✅ 工具链通过：模型调 read → 读到真实文件 → 内容回到模型'
+      ? "\n✅ 工具链通过：模型调 read → 读到真实文件 → 内容回到模型"
       : sawError
-        ? '\n❌ 这一轮失败了'
-        : '\n❌ 没看到工具读到的文件内容',
-  )
+        ? "\n❌ 这一轮失败了"
+        : "\n❌ 没看到工具读到的文件内容",
+  );
   if (!ok) {
-    console.log('\n--- electron 日志 ---')
-    console.log(logs.join('').split('\n').slice(-30).join('\n'))
+    console.log("\n--- electron 日志 ---");
+    console.log(logs.join("").split("\n").slice(-30).join("\n"));
   }
-  cleanup()
-  process.exit(ok ? 0 : 1)
+  cleanup();
+  process.exit(ok ? 0 : 1);
 } catch (err) {
-  console.error('冒烟失败：', err.message ?? err)
-  console.log('\n--- electron 日志 ---')
-  console.log(logs.join('').split('\n').slice(-30).join('\n'))
-  cleanup()
-  process.exit(1)
+  console.error("冒烟失败：", err.message ?? err);
+  console.log("\n--- electron 日志 ---");
+  console.log(logs.join("").split("\n").slice(-30).join("\n"));
+  cleanup();
+  process.exit(1);
 }

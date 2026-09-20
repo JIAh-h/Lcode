@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import type { ModelMessage, SessionEvent, SessionService } from '@lcode/session'
+import type { EpochHeader, ModelMessage, SessionEvent, SessionService, StreamChunk, ToolResultMessage } from '@lcode/session'
 import { InMemorySessionStore, deriveMessages } from '@lcode/session'
 import type { EventFrame, JsonlSessionPersistence, LoadedLog } from '@lcode/session-persistence-jsonl'
 import {
@@ -76,6 +76,12 @@ import type {
   FlushResult,
   ForkSessionInput,
   ForkSessionResult,
+  HistoryApi,
+  HistoryBodyInput,
+  HistoryBodyResult,
+  HistoryCheckpointsInput,
+  HistoryReplayInput,
+  HistoryWhyInput,
   IndexDoctorReport,
   IndexFinding,
   ListSessionsInput,
@@ -89,6 +95,11 @@ import type {
   RestoreSessionResult,
   ResumeSessionInput,
   ResumeSessionResult,
+  ReplayDecision,
+  ReplaySnapshot,
+  ReplayToolCall,
+  Checkpoint,
+  DecisionTrace,
   SessionHeader,
   SessionMeta,
   SessionMetaInput,
@@ -156,6 +167,232 @@ function forkBoundary(message: string): LcodeErrorImpl {
     userMessage: '你选的位置落在一个还没结束的回合中间，请换一个位置。',
     retryable: false,
   })
+}
+
+function replayTargetNotFound(sessionId: string, seq: number): LcodeErrorImpl {
+  return new LcodeErrorImpl({
+    code: ERROR_CODES.EC_NOT_FOUND,
+    message: `回放位置没有请求快照：${sessionId}@${seq}`,
+    userMessage: '这个位置还没有可回放的请求。',
+    retryable: false,
+  })
+}
+
+function historyEventNotFound(sessionId: string, seq: number): LcodeErrorImpl {
+  return new LcodeErrorImpl({
+    code: ERROR_CODES.EC_NOT_FOUND,
+    message: `会话事件不存在：${sessionId}@${seq}`,
+    userMessage: '这个历史位置已经不存在。',
+    retryable: false,
+  })
+}
+
+function replayFormatUnsupported(sessionId: string, seq: number): LcodeErrorImpl {
+  return new LcodeErrorImpl({
+    code: ERROR_CODES.ES_FORMAT_UNSUPPORTED,
+    message: `请求快照缺少 system 或 tools：${sessionId}@${seq}`,
+    userMessage: '这个旧会话没有保存完整请求，不能伪造为精确回放。',
+    retryable: false,
+  })
+}
+
+function isRequestHeader(
+  event: SessionEvent,
+): event is SessionEvent & { readonly type: 'request/header'; readonly data: { readonly header: EpochHeader } } {
+  return event.type === 'request/header'
+}
+
+function isAssistantChunk(
+  event: SessionEvent,
+): event is SessionEvent & { readonly type: 'assistant/chunk'; readonly data: { readonly chunk: StreamChunk } } {
+  return event.type === 'assistant/chunk'
+}
+
+function isApprovalAsked(
+  event: SessionEvent,
+): event is SessionEvent & {
+  readonly type: 'approval/asked'
+  readonly data: {
+    readonly callId: string
+    readonly action: DecisionTrace['approval']['action']
+    readonly basis: NonNullable<DecisionTrace['approval']['basis']>
+    readonly impact: NonNullable<DecisionTrace['approval']['impact']>
+    readonly askedAt: number
+  }
+} {
+  return event.type === 'approval/asked'
+}
+
+function isApprovalDecided(
+  event: SessionEvent,
+): event is SessionEvent & {
+  readonly type: 'approval/decided'
+  readonly data: {
+    readonly callId: string
+    readonly result: Exclude<DecisionTrace['approval']['status'], 'not-requested' | 'pending'>
+    readonly decidedBy: NonNullable<DecisionTrace['approval']['decided_by']>
+    readonly decidedAt: number
+  }
+} {
+  return event.type === 'approval/decided'
+}
+
+function hasReplayableRequest(header: EpochHeader): boolean {
+  return typeof header.system === 'string' && Array.isArray(header.tools)
+}
+
+function replayToolCalls(events: readonly SessionEvent[]): readonly ReplayToolCall[] {
+  const results = new Map<string, ToolResultMessage>()
+  for (const event of events) {
+    if (event.type !== 'tool/result') continue
+    const data = event.data as { readonly message: ToolResultMessage }
+    results.set(data.message.toolCallId, data.message)
+  }
+
+  const calls: ReplayToolCall[] = []
+  for (const event of events) {
+    if (event.type !== 'tool/call') continue
+    const data = event.data as { readonly callId: string; readonly name: string; readonly card?: string; readonly arguments: string }
+    const result = results.get(data.callId)
+    calls.push({
+      call: { seq: event.seq, call_id: data.callId, name: data.name, arguments: data.arguments, ...(data.card === undefined ? {} : { card: data.card }) },
+      ...(result === undefined ? {} : { result }),
+    })
+  }
+  return calls
+}
+
+function replayDecisions(events: readonly SessionEvent[]): readonly ReplayDecision[] {
+  const decisions: ReplayDecision[] = []
+  for (const event of events) {
+    if (event.type === 'approval/asked') {
+      const data = event.data as { readonly basis: { readonly reason: string }; readonly askedAt: number }
+      decisions.push({ kind: 'approval/asked', basis: data.basis.reason, at: data.askedAt })
+      continue
+    }
+    if (event.type === 'approval/decided') {
+      const data = event.data as { readonly result: string; readonly decidedBy: string; readonly decidedAt: number }
+      decisions.push({ kind: `approval/decided:${data.result}`, basis: data.decidedBy, at: data.decidedAt })
+    }
+  }
+  return decisions
+}
+
+interface AuditEvent {
+  readonly type: string
+  readonly seq: number
+  readonly time: number
+  readonly data: unknown
+}
+
+function asAuditEvent(event: SessionEvent): AuditEvent {
+  return event as unknown as AuditEvent
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function sandboxTrace(events: readonly SessionEvent[]): DecisionTrace['sandbox'] {
+  let trace: DecisionTrace['sandbox'] = { status: 'not-recorded' }
+  for (const event of events) {
+    const audit = asAuditEvent(event)
+    if (audit.type === 'sandbox/profile' && isRecord(audit.data)) {
+      trace = {
+        status: 'profiled',
+        ...(typeof audit.data['mode'] === 'string' ? { mode: audit.data['mode'] } : {}),
+      }
+      continue
+    }
+    if (audit.type === 'sandbox/degraded' && isRecord(audit.data)) {
+      trace = {
+        status: 'degraded',
+        ...(typeof audit.data['reason'] === 'string' ? { reason: audit.data['reason'] } : {}),
+        ...(typeof audit.data['mechanism'] === 'string' ? { mechanism: audit.data['mechanism'] } : {}),
+      }
+    }
+  }
+  return trace
+}
+
+function decisionTrace(events: readonly SessionEvent[], callIndex: number): DecisionTrace {
+  const callEvent = events[callIndex]
+  if (callEvent === undefined || callEvent.type !== 'tool/call') throw new Error('不可达：工具调用丢失')
+  const { callId, name } = callEvent.data
+
+  // 工具流水线逐个执行。窗口到匹配结果为止，避免同名 callId 在后续轮次复用时串线。
+  let endIndex = events.length
+  for (let index = callIndex + 1; index < events.length; index += 1) {
+    const event = events[index]
+    if (event?.type === 'tool/result' && event.data.message.toolCallId === callId) {
+      endIndex = index + 1
+      break
+    }
+  }
+  const related = events.slice(callIndex + 1, endIndex)
+  const asked = related.filter(isApprovalAsked).find((event) => event.data.callId === callId)
+  const decided = related.filter(isApprovalDecided).find((event) => event.data.callId === callId)
+
+  if (asked === undefined) {
+    return {
+      call: { seq: callEvent.seq, call_id: callId, name },
+      policy: { status: 'not-recorded' },
+      approval: { status: 'not-requested' },
+      sandbox: sandboxTrace(related),
+    }
+  }
+
+  const approval: DecisionTrace['approval'] = {
+    status: decided?.data.result ?? 'pending',
+    action: asked.data.action,
+    basis: asked.data.basis,
+    impact: asked.data.impact,
+    // 旧日志缺少时间字段时，事件信封 time 是唯一正确回退，不改写原日志。
+    asked_at: asked.data.askedAt ?? asked.time,
+    ...(decided === undefined
+      ? {}
+      : {
+          decided_at: decided.data.decidedAt ?? decided.time,
+          decided_by: decided.data.decidedBy,
+        }),
+  }
+  return {
+    call: { seq: callEvent.seq, call_id: callId, name },
+    policy: { status: 'recorded', basis: asked.data.basis },
+    approval,
+    sandbox: sandboxTrace(related),
+  }
+}
+
+function closedTurnCheckpoints(events: readonly SessionEvent[]): readonly Checkpoint[] {
+  const openTurns = new Set<number>()
+  const checkpoints: Checkpoint[] = []
+  for (const event of events) {
+    if (event.type === 'turn/start') {
+      openTurns.add(event.data.turn)
+      continue
+    }
+    if (event.type !== 'turn/end' || !openTurns.has(event.data.turn)) continue
+    openTurns.delete(event.data.turn)
+    checkpoints.push({
+      turn: event.data.turn,
+      end_seq: event.seq,
+      ended_at: event.time,
+      reason: event.data.reason,
+    })
+  }
+  return checkpoints
+}
+
+function historyBody(sessionId: string, event: SessionEvent): HistoryBodyResult {
+  // I5 已保证 data 能无损 JSON 化。复制后返回，调用方不能改到内存中的权威事件。
+  const encoded = JSON.stringify(event.data)
+  return {
+    bytes: Buffer.byteLength(encoded, 'utf8'),
+    // `ref` 不暴露日志路径；同一不可变事件数据总有同一 ref，追加后不会失效。
+    ref: `event:${Buffer.from(`${sessionId}:${event.seq}:${sha256Hex(encoded)}`, 'utf8').toString('base64url')}`,
+    data: JSON.parse(encoded) as JsonValue,
+  }
 }
 
 /** 事件帧 → 追加输入（回放已有日志用；`seq` 由 store 重新分配，必须与位置一致） */
@@ -257,7 +494,7 @@ function renderMarkdown(header: { session_id: string; cwd: string | null; create
   return lines.join('\n')
 }
 
-export class LocalSessionsApi implements SessionsApi {
+export class LocalSessionsApi implements SessionsApi, HistoryApi {
   private readonly home: string
   private readonly persistence: JsonlSessionPersistence
   private readonly index: SessionIndexWriter
@@ -467,6 +704,82 @@ export class LocalSessionsApi implements SessionsApi {
     const session = await this.ensureReadable(input.session_id)
     const events = session.store.events(input.up_to === undefined ? undefined : { to: input.up_to })
     return { messages: deriveMessages(events) }
+  }
+
+  /**
+   * 从权威 JSONL 构造一次历史请求快照（21 §2.12）。
+   *
+   * `up_to_seq` 不是简单的数组截断：它定位到“不晚于该位置的最近请求头”，
+   * 而模型消息只能由该请求头之前的事件派生。把请求后的 assistant/tool
+   * 事件混进 `messages` 会让回放变成事后重算，直接破坏 I1。
+   */
+  async replay(input: HistoryReplayInput): Promise<ReplaySnapshot> {
+    if (!Number.isInteger(input.up_to_seq) || input.up_to_seq < 0) {
+      throw invalidParams(`up_to_seq 非法：${input.up_to_seq}`)
+    }
+
+    const session = await this.ensureReadable(input.session_id)
+    const events = session.store.events()
+    let headerIndex = -1
+    for (let index = 0; index < events.length; index += 1) {
+      const event = events[index]
+      if (event === undefined) continue
+      if (event.seq > input.up_to_seq) break
+      if (isRequestHeader(event)) headerIndex = index
+    }
+    if (headerIndex < 0) throw replayTargetNotFound(input.session_id, input.up_to_seq)
+
+    let endIndex = events.length
+    for (let index = headerIndex + 1; index < events.length; index += 1) {
+      const event = events[index]
+      if (event !== undefined && isRequestHeader(event)) {
+        endIndex = index
+        break
+      }
+    }
+
+    const headerEvent = events[headerIndex]
+    if (headerEvent === undefined || !isRequestHeader(headerEvent)) throw new Error('不可达：回放请求头丢失')
+    if (!hasReplayableRequest(headerEvent.data.header)) {
+      throw replayFormatUnsupported(input.session_id, input.up_to_seq)
+    }
+    const requestEvents = events.slice(headerIndex + 1, endIndex)
+    return {
+      header: headerEvent.data.header,
+      messages: deriveMessages(events.slice(0, headerIndex)),
+      chunks: requestEvents.filter(isAssistantChunk).map((event) => event.data.chunk),
+      toolCalls: replayToolCalls(requestEvents),
+      decisions: replayDecisions(requestEvents),
+    }
+  }
+
+  /** 从一次工具调用的相邻审计事件构造可解释的权限决策轨迹（21 §2.12）。 */
+  async why(input: HistoryWhyInput): Promise<DecisionTrace> {
+    if (!Number.isInteger(input.call_seq) || input.call_seq < 0) {
+      throw invalidParams(`call_seq 非法：${input.call_seq}`)
+    }
+    const session = await this.ensureReadable(input.session_id)
+    const events = session.store.events()
+    const callIndex = events.findIndex((event) => event.type === 'tool/call' && event.seq === input.call_seq)
+    if (callIndex < 0) throw replayTargetNotFound(input.session_id, input.call_seq)
+    return decisionTrace(events, callIndex)
+  }
+
+  /** 列出已闭合轮边界；文件回滚属于后续 P6，不在这里预先承诺。 */
+  async checkpoints(input: HistoryCheckpointsInput): Promise<readonly Checkpoint[]> {
+    const session = await this.ensureReadable(input.session_id)
+    return closedTurnCheckpoints(session.store.events())
+  }
+
+  /** 惰性读取单个事件 payload；权限校验由将来 IPC 边界按会话归属执行。 */
+  async body(input: HistoryBodyInput): Promise<HistoryBodyResult> {
+    if (!Number.isInteger(input.seq) || input.seq < 0) {
+      throw invalidParams(`seq 非法：${input.seq}`)
+    }
+    const session = await this.ensureReadable(input.session_id)
+    const event = session.store.events().find((candidate) => candidate.seq === input.seq)
+    if (event === undefined) throw historyEventNotFound(input.session_id, input.seq)
+    return historyBody(input.session_id, event)
   }
 
   async flush(input: FlushInput): Promise<FlushResult> {

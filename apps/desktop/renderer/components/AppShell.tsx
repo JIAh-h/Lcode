@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { t } from '../i18n/index.ts'
 import { toast } from './toast.ts'
+import { sessionBridge } from '../store/sessionBridge.ts'
+import type { SessionMeta } from '../store/sessionBridge.ts'
 
 /**
  * 桌面外壳（按 webapp 原型 1:1 移植）：
@@ -15,29 +17,60 @@ function isHr(it: MItem): it is { hr: true } {
   return (it as { hr: true }).hr === true
 }
 
-const SESSION_GROUPS = [
-  {
-    name: 'web-app',
-    items: [
-      { to: '/sessions/demo-1', title: '把 parse.ts 换成结构化解析', state: 'var(--state-running)', count: '14 步' },
-      { to: '/sessions/demo-2', title: '看一下这个项目主要是做什么的', state: 'var(--state-idle)', count: '已完成' },
-    ],
-  },
-  {
-    name: 'api-server',
-    items: [
-      { to: '/sessions/demo-3', title: '给订单接口补测试', state: 'var(--state-idle)', count: '已完成' },
-      { to: '/sessions/demo-4', title: '修登录态过期不跳转', state: 'var(--state-error)', count: '中断' },
-    ],
-  },
-]
+function sessionApi(): { list(input?: unknown): Promise<{ items: readonly SessionMeta[] }> } | undefined {
+  return (
+    globalThis as unknown as {
+      lcode?: {
+        session?: {
+          list(input?: unknown): Promise<{ items: readonly SessionMeta[] }>
+        }
+      }
+    }
+  ).lcode?.session
+}
+
+function workspaceName(workspace: string | null): string {
+  if (workspace === null || workspace === '') return t('未命名工作区')
+  return workspace.split(/[\\/]/).filter(Boolean).pop() ?? workspace
+}
+
+function stateColor(status: SessionMeta['status']): string {
+  if (status === 'busy' || status === 'waiting-approval') return 'var(--state-running)'
+  if (status === 'error') return 'var(--state-error)'
+  return 'var(--state-idle)'
+}
 
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
   const [open, setOpen] = useState<string | null>(null)
+  const [sessions, setSessions] = useState<readonly SessionMeta[]>([])
   const barRef = useRef<HTMLDivElement | null>(null)
   const zoomRef = useRef(1)
+
+  const refreshSessions = useCallback(async () => {
+    const api = sessionApi()
+    if (api === undefined) return
+    try {
+      const result = await api.list()
+      setSessions(result.items)
+    } catch {
+      setSessions([])
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshSessions()
+    const refresh = () => void refreshSessions()
+    window.addEventListener('lcode:session-changed', refresh)
+    const disposeBridge = sessionBridge()?.onChanged(() => {
+      window.dispatchEvent(new Event('lcode:session-changed'))
+    })
+    return () => {
+      window.removeEventListener('lcode:session-changed', refresh)
+      disposeBridge?.()
+    }
+  }, [refreshSessions])
 
   /* 点击菜单栏外部时收起全部下拉 */
   useEffect(() => {
@@ -89,6 +122,22 @@ export function AppShell({ children }: { children: ReactNode }) {
   })
 
   const goSettingsSec = (sec: string) => act(() => navigate('/settings', { state: { sec } }))
+  const currentSessionId = pathname.match(/^\/sessions\/([^/]+)/)?.[1]
+  const openFolder = act(() => {
+    void window.lcode.chooseFolder(t('选择项目文件夹')).then((path) => {
+      if (path !== null) navigate('/', { state: { cwd: path } })
+    })
+  })
+  const sessionGroups = useMemo(() => {
+    const groups = new Map<string, SessionMeta[]>()
+    for (const session of sessions) {
+      const name = workspaceName(session.workspace)
+      const group = groups.get(name) ?? []
+      group.push(session)
+      groups.set(name, group)
+    }
+    return [...groups.entries()]
+  }, [sessions])
 
   /* 菜单文案：标签与提示统一过 t()；`label` 同时用作 key，仍保留中文原文 */
   const MENUS: { id: string; label: string; items: MItem[] }[] = [
@@ -97,12 +146,11 @@ export function AppShell({ children }: { children: ReactNode }) {
       label: t('文件'),
       items: [
         { label: t('新对话'), kbd: '⌃N', run: act(() => navigate('/')) },
-        { label: t('新建临时对话'), kbd: '⌃⇧N', run: say(t('已开启临时对话——关闭后不会保留在历史里（mock）')) },
-        { label: t('新建窗口'), run: say(t('演示：新建窗口')) },
+        { label: t('新建临时对话'), kbd: '⌃⇧N', run: act(() => navigate('/')) },
         { hr: true },
-        { label: t('打开文件夹…'), kbd: '⌃O', run: say(t('演示：打开文件夹（桌面版弹出系统选择框）')) },
+        { label: t('打开文件夹…'), kbd: '⌃O', run: openFolder },
         { hr: true },
-        { label: t('关闭会话'), kbd: '⌃W', run: say(t('已关闭当前会话（mock）')) },
+        { label: t('关闭会话'), kbd: '⌃W', run: act(() => navigate('/')) },
         { hr: true },
         { label: t('退出'), kbd: '⌃Q', run: act(() => window.close()) },
       ],
@@ -128,10 +176,21 @@ export function AppShell({ children }: { children: ReactNode }) {
       label: t('视图'),
       items: [
         { label: t('切换侧边栏'), kbd: '⌃B', run: toggleSide },
-        { label: t('切换变更/文件面板'), kbd: '⌃J', run: say(t('工作台右侧面板开关在标题栏（演示）')) },
+        {
+          label: t('切换变更/文件面板'),
+          kbd: '⌃J',
+          run: say(t('请使用工作台标题栏中的面板按钮')),
+        },
         { hr: true },
-        { label: t('工作台'), run: act(() => navigate('/sessions/demo-1')) },
-        { label: t('回放时间轴'), kbd: '⌃R', run: act(() => navigate('/sessions/demo-1/replay')) },
+        {
+          label: t('工作台'),
+          run: act(() => navigate(currentSessionId === undefined ? '/' : `/sessions/${currentSessionId}`)),
+        },
+        {
+          label: t('回放时间轴'),
+          kbd: '⌃R',
+          run: act(() => navigate(currentSessionId === undefined ? '/' : `/sessions/${currentSessionId}/replay`)),
+        },
         { hr: true },
         { label: t('切换深色/浅色主题'), run: toggleTheme },
         { hr: true },
@@ -141,22 +200,37 @@ export function AppShell({ children }: { children: ReactNode }) {
         { hr: true },
         { label: t('切换全屏'), kbd: 'F11', run: toggleFullscreen },
         { hr: true },
-        { label: t('状态与异常'), run: act(() => navigate('/sessions/demo-1/error')) },
-        { label: t('崩溃恢复（演示入口）'), run: act(() => navigate('/sessions/demo-1/recovery')) },
+        {
+          label: t('状态与异常'),
+          run: act(() => navigate(currentSessionId === undefined ? '/' : `/sessions/${currentSessionId}/error`)),
+        },
+        {
+          label: t('崩溃恢复（演示入口）'),
+          run: act(() => navigate(currentSessionId === undefined ? '/' : `/sessions/${currentSessionId}/recovery`)),
+        },
       ],
     },
     {
       id: 'help',
       label: t('帮助'),
       items: [
-        { label: t('文档'), run: say(t('演示：打开 Lcode 文档（桌面版跳转官网）')) },
+        {
+          label: t('文档'),
+          run: say(t('演示：打开 Lcode 文档（桌面版跳转官网）')),
+        },
         { label: t('显示键盘快捷键'), kbd: '⌃/', run: goSettingsSec('keys') },
         { hr: true },
-        { label: t('故障排除'), run: say(t('doctor 检查完成：运行环境正常 · 3 项全部通过（mock）')) },
+        { label: t('故障排除'), run: goSettingsSec('history') },
         { label: t('反馈…'), run: say(t('感谢反馈！演示版暂不收集反馈内容')) },
         { hr: true },
-        { label: t('检查更新…'), run: say(t('当前已是最新版本 v1.0.0（mock）')) },
-        { label: t('关于 Lcode'), run: say(t('Lcode v1.0.0 · 本地优先的 AI 编码工作台')) },
+        {
+          label: t('检查更新…'),
+          run: say(t('当前已是最新版本 v1.0.0（mock）')),
+        },
+        {
+          label: t('关于 Lcode'),
+          run: say(t('Lcode v1.0.0 · 本地优先的 AI 编码工作台')),
+        },
       ],
     },
   ]
@@ -168,12 +242,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="menubar" ref={barRef}>
         {/* 侧栏收起/展开（WorkBuddy 排版：左上角第一个位置是面板开关，其后紧跟菜单） */}
         {!isSettings && (
-          <button
-            className="mtoggle"
-            title={t('收起/显示左侧栏')}
-            aria-label={t('收起/显示左侧栏')}
-            onClick={toggleSide}
-          >
+          <button className="mtoggle" title={t('收起/显示左侧栏')} aria-label={t('收起/显示左侧栏')} onClick={toggleSide}>
             <svg width="15" height="15" viewBox="0 0 16 16" fill="none">
               <rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="currentColor" strokeWidth="1.2" />
               <rect x="1.5" y="2.5" width="4.5" height="11" rx="1" fill="currentColor" opacity=".28" stroke="none" />
@@ -219,13 +288,26 @@ export function AppShell({ children }: { children: ReactNode }) {
             </div>
             <div className="shead">{t('工作区')}</div>
             <nav className="snav">
-              <a className="new" href="#/" onClick={(e) => { e.preventDefault(); navigate('/') }}>
+              <a
+                className="new"
+                href="#/"
+                onClick={(e) => {
+                  e.preventDefault()
+                  navigate('/')
+                }}
+              >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
                   <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                 </svg>
                 {t('新对话')}
               </a>
-              <a href="#" onClick={(e) => { e.preventDefault(); toast(t('演示：打开文件夹')) }}>
+              <a
+                href="#"
+                onClick={(e) => {
+                  e.preventDefault()
+                  openFolder()
+                }}
+              >
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
                   <path
                     d="M2.5 4.5A1.5 1.5 0 014 3h2l1.5 2H12a1.5 1.5 0 011.5 1.5v5A1.5 1.5 0 0112 13H4a1.5 1.5 0 01-1.5-1.5v-7z"
@@ -236,19 +318,27 @@ export function AppShell({ children }: { children: ReactNode }) {
                 {t('打开文件夹…')}
               </a>
             </nav>
-            {SESSION_GROUPS.map((g) => (
-              <div key={g.name} style={{ display: 'flex', flexDirection: 'column', minHeight: 0, flex: 1 }}>
-                <div className="sgroup">{g.name}</div>
+            {sessionGroups.map(([name, items]) => (
+              <div
+                key={name}
+                style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  minHeight: 0,
+                  flex: 1,
+                }}
+              >
+                <div className="sgroup">{name}</div>
                 <div className="slist">
-                  {g.items.map((it) => (
+                  {items.map((it) => (
                     <NavLink
-                      key={it.to}
-                      to={it.to}
+                      key={it.session_id}
+                      to={`/sessions/${it.session_id}`}
                       className={({ isActive }) => 'sitem' + (isActive ? ' on' : '')}
                     >
-                      <i className="st" style={{ background: it.state }} />
-                      {it.title}
-                      <span className="cnt">{t(it.count)}</span>
+                      <i className="st" style={{ background: stateColor(it.status) }} />
+                      {it.title || t('未命名会话')}
+                      <span className="cnt">{it.last_seq < 0 ? t('空会话') : t('{n} 条记录', { n: it.last_seq + 1 })}</span>
                     </NavLink>
                   ))}
                 </div>

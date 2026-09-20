@@ -1,4 +1,4 @@
-import type { ApprovalAction, ApprovalBasis, ApprovalResult, Impact } from '@lcode/session'
+import type { ApprovalAction, ApprovalBasis, ApprovalResult, Impact, SessionService } from '@lcode/session'
 
 /**
  * ApprovalService —— 审批（12 §5）。
@@ -53,6 +53,11 @@ export interface ApprovalAskOpts {
    */
   readonly timeoutMs?: number | undefined
   readonly signal?: AbortSignal | undefined
+  /**
+   * 本次审批所属会话。由工具权限钩子按调用 scope 传入，避免并发会话经全局状态串日志。
+   * 缺省时才使用服务构造时的 `getSession` 兼容单会话调用方。
+   */
+  readonly session?: SessionService | undefined
 }
 
 export interface ApprovalService {

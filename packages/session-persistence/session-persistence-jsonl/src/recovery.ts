@@ -64,6 +64,8 @@ export interface OpenStructures {
   readonly openStep: { readonly turn: number; readonly step: number } | null
   /** 有 `tool/call` 但无配对 `tool/result` 的调用（按出现顺序） */
   readonly unpairedToolCalls: readonly UnpairedToolCall[]
+  /** 有 `approval/asked` 但无配对 `approval/decided` 的审批（仅当前未闭合轮） */
+  readonly unpairedApprovals: readonly UnpairedApproval[]
 }
 
 export interface UnpairedToolCall {
@@ -72,6 +74,10 @@ export interface UnpairedToolCall {
   /** 该调用所属的轮与步（合成 `tool/result` 的 data 需要） */
   readonly turn: number
   readonly step: number
+}
+
+export interface UnpairedApproval {
+  readonly callId: string
 }
 
 export interface RecoveryResult {
@@ -100,6 +106,7 @@ export function findOpenStructures(frames: readonly FrameData[]): OpenStructures
   let openStep: { turn: number; step: number } | null = null
   const pending = new Map<string, UnpairedToolCall>()
   const order: string[] = []
+  const pendingApprovals = new Set<string>()
 
   for (const frame of frames) {
     switch (frame.type) {
@@ -111,6 +118,7 @@ export function findOpenStructures(frames: readonly FrameData[]): OpenStructures
         // 轮已闭合：残留的孤儿 tool/call 属于上一世，不再算欠账
         pending.clear()
         order.length = 0
+        pendingApprovals.clear()
         break
       case 'step/start': {
         const d = frame.data as { turn: number; step: number }
@@ -121,9 +129,19 @@ export function findOpenStructures(frames: readonly FrameData[]): OpenStructures
         openStep = null
         break
       case 'tool/call': {
-        const d = frame.data as { callId: string; name: string; turn: number; step: number }
+        const d = frame.data as {
+          callId: string
+          name: string
+          turn: number
+          step: number
+        }
         if (!pending.has(d.callId)) order.push(d.callId)
-        pending.set(d.callId, { callId: d.callId, name: d.name, turn: d.turn, step: d.step })
+        pending.set(d.callId, {
+          callId: d.callId,
+          name: d.name,
+          turn: d.turn,
+          step: d.step,
+        })
         break
       }
       case 'tool/result': {
@@ -135,17 +153,27 @@ export function findOpenStructures(frames: readonly FrameData[]): OpenStructures
         }
         break
       }
+      case 'approval/asked': {
+        const d = frame.data as { callId: string }
+        pendingApprovals.add(d.callId)
+        break
+      }
+      case 'approval/decided': {
+        const d = frame.data as { callId: string }
+        pendingApprovals.delete(d.callId)
+        break
+      }
       default:
         // 事件词汇表是开放的（06 §2.3）：插件事件一律不参与闭合判定
         break
     }
   }
 
-  const unpairedToolCalls = order
-    .map((callId) => pending.get(callId))
-    .filter((call): call is UnpairedToolCall => call !== undefined)
+  const unpairedToolCalls = order.map((callId) => pending.get(callId)).filter((call): call is UnpairedToolCall => call !== undefined)
 
-  return { openTurn, openStep, unpairedToolCalls }
+  const unpairedApprovals = openTurn === null ? [] : [...pendingApprovals].map((callId) => ({ callId }))
+
+  return { openTurn, openStep, unpairedToolCalls, unpairedApprovals }
 }
 
 /**
@@ -154,11 +182,7 @@ export function findOpenStructures(frames: readonly FrameData[]): OpenStructures
  * `lastTime` 是日志最后一条事件的 `time`（保持单调），`now` 是当前时刻。
  * 返回的帧 `seq: -1` —— 调用方负责按日志长度重编号（见 `applyRecovery`）。
  */
-export function synthesizeClosers(
-  frames: readonly FrameData[],
-  now: number,
-  lastTime?: number,
-): RecoveryResult {
+export function synthesizeClosers(frames: readonly FrameData[], now: number, lastTime?: number): RecoveryResult {
   const open = findOpenStructures(frames)
   // 没有显式给出锚点就退到 `now`：补记只要求 time 单调不减，
   // 而"最后一条事件的时间"在撕裂尾场景下未必等于磁盘最后一条（那条已被丢弃）。
@@ -184,6 +208,22 @@ export function synthesizeClosers(
         error: { name: 'AbortedBeforeDispatch', code: ABORTED_BEFORE_DISPATCH },
         // 06 §9.4：补记必须"可区分"——UI 据此在时间轴上标注"此处为恢复时补全"
         meta: { card: 'generic', repaired: true },
+      },
+    })
+  }
+
+  // 审批问题也必须闭合。恢复时没有用户可交互的上下文，按取消处理，
+  // 并明确标记 decidedBy，避免把"进程崩溃"误读成"用户拒绝"。
+  for (const approval of open.unpairedApprovals) {
+    closers.push({
+      type: 'approval/decided',
+      seq: -1,
+      time: repairTime,
+      data: {
+        callId: approval.callId,
+        result: 'cancelled',
+        decidedBy: 'cancelled',
+        decidedAt: repairTime,
       },
     })
   }
@@ -223,11 +263,7 @@ export function synthesizeClosers(
  *
  * **幂等**：对一个已经恢复过的日志再调用，`closers` 为空、也不会再追加 end-seed。
  */
-export function planRecovery(
-  frames: readonly FrameData[],
-  now: number = nowEpochMs(),
-  lastTime?: number,
-): RecoveryResult {
+export function planRecovery(frames: readonly FrameData[], now: number = nowEpochMs(), lastTime?: number): RecoveryResult {
   const result = synthesizeClosers(frames, now, lastTime)
   if (!result.repaired) return result
   const tail = result.closers[result.closers.length - 1]!
@@ -270,7 +306,5 @@ export function appendClosers(
 
 /** 帧 → 事件（读侧边界；`type` 是 string，插件可扩展，06 §2.3） */
 export function framesToEvents(frames: readonly EventFrame[]): SessionEvent[] {
-  return frames.map(
-    (frame): SessionEvent => ({ ...frame, seq: asSeq(frame.seq) }) as unknown as SessionEvent,
-  )
+  return frames.map((frame): SessionEvent => ({ ...frame, seq: asSeq(frame.seq) }) as unknown as SessionEvent)
 }

@@ -1,7 +1,9 @@
 import type { ResolvedSandboxPolicy } from '@lcode/sandbox'
 import type { ShellBackgroundResult, ShellForegroundResult, ShellRunOpts, ShellResult, ShellService } from '@lcode/shell'
-import { ERROR_CODES, LcodeErrorImpl, newSessionId } from '@lcode/util'
-import { spawn } from 'node:child_process'
+import type { JobsService } from '@lcode/jobs'
+import type { SubprocessService } from '@lcode/subprocess'
+import { createLocalSubprocess } from '@lcode/subprocess-local'
+import { ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 
 /**
  * `shell-local` —— 本机命令执行（批次⑤）。
@@ -27,15 +29,12 @@ export interface LocalShellOptions {
   /**
    * 沙箱包装器。省略 = 无沙箱（等价于 `sandbox-local`），并且结果里如实标 `enforced: false`。
    */
-  readonly wrap?: ((argv: readonly string[], policy: ResolvedSandboxPolicy) => Promise<{ enforced: boolean; wrappedArgv: readonly string[] }>) | undefined
-  /** 后台作业的登记表（省略则不启用后台模式——直接报错，而不是假装在跑） */
-  readonly jobs?: JobRegistry | undefined
-}
-
-/** 后台作业登记表（骨架阶段的最小形态：只登记 + 可查/可杀） */
-export interface JobRegistry {
-  add(entry: { readonly jobId: string; readonly argv: readonly string[]; readonly kill: () => Promise<void> }): void
-  get(jobId: string): { readonly argv: readonly string[]; readonly kill: () => Promise<void> } | undefined
+  readonly wrap?:
+    ((argv: readonly string[], policy: ResolvedSandboxPolicy) => Promise<{ enforced: boolean; wrappedArgv: readonly string[] }>) | undefined
+  /** 发布即脱离的后台作业服务；省略则后台模式明确报错。 */
+  readonly jobs?: JobsService | undefined
+  /** 子进程 Provider；桌面运行时显式注入，独立使用时回退到本机 Provider。 */
+  readonly subprocess?: SubprocessService | undefined
 }
 
 export interface CreateLocalShellResult {
@@ -49,6 +48,7 @@ const MAX_OUTPUT_BYTES = 1_000_000
 
 export function createLocalShell(options: LocalShellOptions): CreateLocalShellResult {
   const root = options.workspaceRoot
+  const subprocess = options.subprocess ?? createLocalSubprocess()
 
   const shell: ShellService = {
     async run(argv: readonly string[], opts: ShellRunOpts = {}): Promise<ShellResult> {
@@ -72,8 +72,8 @@ export function createLocalShell(options: LocalShellOptions): CreateLocalShellRe
 
       const background = opts.runInBackground === true
 
-      if (background) return spawnBackground(options, wrapped, cwd, opts)
-      return spawnForeground(wrapped, cwd, opts, timeoutMs)
+      if (background) return spawnBackground(options, subprocess, wrapped, cwd, opts)
+      return spawnForeground(subprocess, wrapped, cwd, opts, timeoutMs)
     },
   }
 
@@ -83,38 +83,33 @@ export function createLocalShell(options: LocalShellOptions): CreateLocalShellRe
 // ─────────── 前台 ───────────
 
 async function spawnForeground(
-  wrapped: { readonly enforced: boolean; readonly wrappedArgv: readonly string[] },
+  subprocess: SubprocessService,
+  wrapped: {
+    readonly enforced: boolean
+    readonly wrappedArgv: readonly string[]
+  },
   cwd: string,
   opts: ShellRunOpts,
   timeoutMs: number,
 ): Promise<ShellForegroundResult> {
-  const child = spawn(wrapped.wrappedArgv[0]!, wrapped.wrappedArgv.slice(1), {
-    cwd,
-    env: { ...process.env, ...(opts.env ?? {}) },
-    windowsHide: true,
-    // 不接 stdio：我们要自己收集，见下
-    stdio: ['ignore', 'pipe', 'pipe'],
-  })
+  const child = await subprocess.spawn({ argv: wrapped.wrappedArgv, cwd, env: mergedEnv(opts.env) })
 
   const stdout = collector()
   const stderr = collector()
-  child.stdout?.on('data', stdout.push)
-  child.stderr?.on('data', stderr.push)
+  child.stdout.on('data', stdout.push)
+  child.stderr.on('data', stderr.push)
 
   let timedOut = false
   const timer = setTimeout(() => {
     timedOut = true
     // killTree 而非 kill：`npm test` 拉起的是一棵进程树，只杀顶层会留下孙进程继续跑
-    void killTree(child.pid)
+    void child.killTree()
   }, timeoutMs)
 
-  const onAbort = (): void => void killTree(child.pid)
+  const onAbort = (): void => void child.killTree()
   opts.signal?.addEventListener('abort', onAbort, { once: true })
 
-  const exited = await new Promise<{ code: number | null; signal: string | null }>((resolve) => {
-    child.on('close', (code, signal) => resolve({ code, signal }))
-    child.on('error', () => resolve({ code: null, signal: null }))
-  })
+  const exited = await child.exited
 
   clearTimeout(timer)
   opts.signal?.removeEventListener('abort', onAbort)
@@ -138,11 +133,16 @@ async function spawnForeground(
 
 async function spawnBackground(
   options: LocalShellOptions,
-  wrapped: { readonly enforced: boolean; readonly wrappedArgv: readonly string[] },
+  subprocess: SubprocessService,
+  wrapped: {
+    readonly enforced: boolean
+    readonly wrappedArgv: readonly string[]
+  },
   cwd: string,
   opts: ShellRunOpts,
 ): Promise<ShellBackgroundResult> {
-  if (options.jobs === undefined) {
+  const jobs = options.jobs
+  if (jobs === undefined) {
     throw new LcodeErrorImpl({
       code: ERROR_CODES.EC_NOT_READY,
       message: '后台作业未装配（缺 jobs 依赖）',
@@ -150,24 +150,37 @@ async function spawnBackground(
       retryable: false,
     })
   }
-  const jobId = newSessionId()
-  const child = spawn(wrapped.wrappedArgv[0]!, wrapped.wrappedArgv.slice(1), {
-    cwd,
-    env: { ...process.env, ...(opts.env ?? {}) },
-    windowsHide: true,
-    stdio: 'ignore',
-    // 后台进程**不要**继承事件循环的生命周期：父进程退出后它该活着
-    detached: true,
+  const started = await jobs.start({
+    kind: 'shell',
+    label: wrapped.wrappedArgv.join(' '),
+    ...(opts.ownerAgentId === undefined ? {} : { ownerAgentId: opts.ownerAgentId }),
+    // 这个回调拿到的是 jobs 自己的 AbortSignal：外层工具调用结束或取消之后，
+    // 已发布的作业不会受影响；只有 jobs.kill / owner dispose / service dispose 会 abort。
+    run: async ({ signal, write }) => await spawnBackgroundProcess(subprocess, wrapped.wrappedArgv, cwd, opts, signal, write),
   })
-  child.unref()
-  options.jobs.add({
-    jobId,
-    argv: wrapped.wrappedArgv,
-    kill: async () => {
-      await killTree(child.pid)
-    },
-  })
-  return { kind: 'background', jobId }
+  return { kind: 'background', jobId: started.jobId }
+}
+
+async function spawnBackgroundProcess(
+  subprocess: SubprocessService,
+  argv: readonly string[],
+  cwd: string,
+  opts: ShellRunOpts,
+  signal: AbortSignal,
+  write: (data: string | Uint8Array) => void,
+): Promise<{ readonly exitCode: number; readonly signal: string | null }> {
+  const child = await subprocess.spawn({ argv, cwd, env: mergedEnv(opts.env) })
+  child.stdout.on('data', (chunk: Buffer) => write(chunk))
+  child.stderr.on('data', (chunk: Buffer) => write(chunk))
+  const onAbort = (): void => { void child.killTree() }
+  if (signal.aborted) onAbort()
+  else signal.addEventListener('abort', onAbort, { once: true })
+  try {
+    const exited = await child.exited
+    return { exitCode: exited.code ?? -1, signal: exited.signal }
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+  }
 }
 
 // ─────────── 内部 ───────────
@@ -206,28 +219,17 @@ function collector(): { push: (chunk: Buffer) => void; text: () => string } {
   }
 }
 
-/**
- * 整体终止进程树。
- *
- * Windows 用 `taskkill /T`（`/T` = 连同子进程），其它平台按进程组杀（`-pid`）。
- * 失败**不抛**：调用点在超时回调里，那里抛错没有接收者。
- */
-async function killTree(pid: number | undefined): Promise<void> {
-  if (pid === undefined) return
-  await new Promise<void>((resolve) => {
-    const killer =
-      process.platform === 'win32'
-        ? spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
-        : spawn('kill', ['-TERM', `-${pid}`], { stdio: 'ignore' })
-    killer.on('close', () => resolve())
-    killer.on('error', () => resolve())
-  })
-}
-
 /** 本机默认 shell 的 argv 前缀（`['/bin/bash','-lc']` / `['cmd','/c']`） */
 function defaultShellArgv(): readonly string[] {
   if (process.platform === 'win32') {
     return [process.env['COMSPEC'] ?? 'cmd.exe', '/d', '/s', '/c']
   }
   return [process.env['SHELL'] ?? '/bin/sh', '-c']
+}
+
+/** `process.env` 允许 undefined；子进程契约只允许实际可传递的字符串。 */
+function mergedEnv(overrides: Readonly<Record<string, string>> | undefined): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries({ ...process.env, ...(overrides ?? {}) }).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+  )
 }

@@ -1,8 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReplayLlmAdapter } from '@lcode/llm-replay'
 import type { ReplayScript } from '@lcode/llm-replay'
+import type { SandboxService } from '@lcode/sandbox'
+import { createApprovalService } from '@lcode/approval'
+import type { ApprovalService } from '@lcode/approval'
 import { loadLog } from '@lcode/session-persistence-jsonl'
 import { closeAllIndexDbs, openIndexDb } from '@lcode/session-persistence-sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -44,9 +47,112 @@ const textScript: ReplayScript = {
   ],
 }
 
+const terminalOpenScript: ReplayScript = {
+  provider: 'custom',
+  model: 'test-model',
+  chunks: [
+    { type: 'tool-call-delta', callId: 'terminal-open', name: 'terminal', argsDelta: '{"op":"open"}' },
+    {
+      type: 'done',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'terminal-open', name: 'terminal', input: { op: 'open' } }],
+      },
+    },
+  ],
+}
+
+const blockedWriteScript: ReplayScript = {
+  provider: 'custom',
+  model: 'test-model',
+  chunks: [
+    {
+      type: 'tool-call-delta',
+      callId: 'blocked-write',
+      name: 'write',
+      argsDelta: '{"path":"should-not-exist.txt","content":"blocked"}',
+    },
+    {
+      type: 'done',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'blocked-write', name: 'write', input: { path: 'should-not-exist.txt', content: 'blocked' } }],
+      },
+    },
+  ],
+}
+
+const submittedPlanScript: ReplayScript = {
+  provider: 'custom',
+  model: 'test-model',
+  chunks: [
+    { type: 'tool-call-delta', callId: 'submit-plan', name: 'submit_plan', argsDelta: '{"summary":"创建验收文件","steps":["写入验收文件"]}' },
+    {
+      type: 'done',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'submit-plan', name: 'submit_plan', input: { summary: '创建验收文件', steps: ['写入验收文件'] } }],
+      },
+    },
+  ],
+}
+
+const writeAfterPlanScript: ReplayScript = {
+  provider: 'custom',
+  model: 'test-model',
+  chunks: [
+    { type: 'tool-call-delta', callId: 'write-after-plan', name: 'write', argsDelta: '{"path":"planned.txt","content":"done"}' },
+    {
+      type: 'done',
+      message: {
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 'write-after-plan', name: 'write', input: { path: 'planned.txt', content: 'done' } }],
+      },
+    },
+  ],
+}
+
+/** 装配测试不验证 OS 沙箱本身，显式注入受保护 Provider，避免以裸实现掩盖业务断言。 */
+const enforcedSandbox: SandboxService = {
+  status: async () => ({
+    available: true,
+    mechanism: 'test',
+    knownEscapeSurfaces: [],
+    degraded: false,
+    capabilities: {
+      platform: 'test',
+      mechanism: 'test',
+      boundaries: {
+        filesystem: { state: 'enforced', plannedMechanism: 'test', message: '测试 Provider 已强制' },
+        network: { state: 'enforced', plannedMechanism: 'test', message: '测试 Provider 已强制' },
+        spawn: { state: 'enforced', plannedMechanism: 'test', message: '测试 Provider 已强制' },
+      },
+      reason: '测试 Provider 已强制',
+    },
+  }),
+  wrap: async (argv) => ({ enforced: true, wrappedArgv: argv }),
+}
+
+/** PTY 的真实数据链测试要验证 node-pty 本身，故显式模拟尚未接入原生 PTY 的降级环境。 */
+const degradedSandbox: SandboxService = {
+  ...enforcedSandbox,
+  status: async () => ({
+    ...(await enforcedSandbox.status()),
+    available: false,
+    mechanism: 'none',
+    degraded: true,
+    reason: '测试环境没有原生 PTY 沙箱。',
+  }),
+  wrap: async (argv) => ({ enforced: false, wrappedArgv: argv, degradationReason: '测试环境没有原生 PTY 沙箱。' }),
+}
+
 /** 建运行时并把 replay 适配器注册成 `custom`（与设置页里那家同名，模拟真实链路） */
-async function makeRuntime(scripts: readonly ReplayScript[]): Promise<AgentRuntime> {
-  const rt = await createAgentRuntime({ home })
+async function makeRuntime(
+  scripts: readonly ReplayScript[],
+  sandbox: SandboxService = enforcedSandbox,
+  approval?: ApprovalService,
+): Promise<AgentRuntime> {
+  const rt = await createAgentRuntime({ home, sandbox, ...(approval === undefined ? {} : { approval }) })
   const llm = rt.ctx.get('llm')
   // 用 replay 顶掉真实适配器：`ctx.llm` 是注册表，按 provider 名查找（消费方不知道实现）
   llm.register(new ReplayLlmAdapter(scripts))
@@ -114,7 +220,9 @@ describe('A. 对话闭环：一句话 → 回复 → 落盘 → 可查', () => {
       'assistant/message',
       'step/end',
       'turn/end',
+      'checkpoint/created',
     ])
+    expect(events.at(-1)).toMatchObject({ type: 'checkpoint/created', data: { files: 0, partial: false } })
     // I2：seq 连续无空洞
     events.forEach((event, index) => expect(event.seq).toBe(index))
   })
@@ -195,23 +303,37 @@ describe('A. 装配的接线正确性', () => {
     expect(assembled.system).toContain('Lcode')
   })
 
-  it('`request/header` 记下了 provider 与 model（可重放审计点）', async () => {
+  it('`request/header` 记下完整模型输入配置（可重放审计点）', async () => {
     const rt = await makeRuntime([textScript])
     const sessionId = await runTurn(rt)
     const events = loadLog(join(home, (await rt.sessions.meta({ session_id: sessionId })).header.log_path)).events
     const header = events.find((e) => e.type === 'request/header')
-    expect(header).toMatchObject({ data: { header: { provider: 'custom', model: 'test-model' } } })
+    expect(header).toMatchObject({
+      data: {
+        header: {
+          provider: 'custom',
+          model: 'test-model',
+          system: expect.stringContaining('Lcode'),
+          tools: expect.arrayContaining([
+            expect.objectContaining({ name: 'read', inputSchema: expect.any(Object) }),
+          ]),
+        },
+      },
+    })
   })
 
-  it('工具已接：`ctx.tools` 有六个工具，且提示词**不再**说"不能读写文件"', async () => {
+  it('工具已接：注册表含计划提交工具，但正常请求不暴露它', async () => {
     const rt = await makeRuntime([textScript])
-    // 五个文件工具 + shell
+    // 五个文件工具 + shell + owner 隔离的持久 terminal + 两个计划工具
     expect(rt.ctx.get('tools').schemas().map((s) => s.name).sort()).toEqual([
       'edit',
       'glob',
       'grep',
       'read',
+      'request_plan_change',
       'shell',
+      'submit_plan',
+      'terminal',
       'write',
     ])
     const assembled = await rt.ctx.get('systemPrompt').assemble({})
@@ -220,14 +342,148 @@ describe('A. 装配的接线正确性', () => {
     expect(assembled.system).not.toContain('尚未接入')
     expect(assembled.system).toContain('read')
     expect(assembled.system).toContain('edit')
+    expect(assembled.tools.some((tool) => tool.name === 'submit_plan')).toBe(false)
+    expect(assembled.tools.some((tool) => tool.name === 'request_plan_change')).toBe(false)
+  })
+
+  it('计划模式：请求只暴露只读工具，写调用被拒绝且不落盘', async () => {
+    const rt = await makeRuntime([blockedWriteScript, textScript])
+    const { session_id } = await rt.sessions.create({ cwd: home, title: '计划模式测试' })
+    rt.ctx.get('planMode').enter(session_id)
+    const { agent_id } = await rt.agents.create({ session_id })
+    await sendAndWait(rt, agent_id, '先分析再修改')
+    await rt.sessions.flush({ session_id })
+
+    const events = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events
+    const header = events.find((event) => event.type === 'request/header')
+    expect(header).toMatchObject({
+      data: { header: { tools: [{ name: 'read' }, { name: 'glob' }, { name: 'grep' }, { name: 'submit_plan' }] } },
+    })
+    const result = events.find((event) => event.type === 'tool/result')
+    expect(result).toMatchObject({
+      data: { message: { toolCallId: 'blocked-write', isError: true }, error: { code: 'ET-DENIED' } },
+    })
+    expect(existsSync(join(home, 'should-not-exist.txt'))).toBe(false)
+  })
+
+  it('计划提交并确认后，自动创建正常执行回合并按批准计划写入', async () => {
+    const rt = await makeRuntime([submittedPlanScript, textScript, writeAfterPlanScript, textScript])
+    const { session_id } = await rt.sessions.create({ cwd: home, title: '计划确认闭环' })
+    rt.ctx.get('workspaceTrust').setTrusted(home, true)
+    rt.ctx.get('planMode').enter(session_id)
+    const { agent_id } = await rt.agents.create({ session_id })
+
+    await sendAndWait(rt, agent_id, '先给计划')
+    const approved = rt.ctx.get('planMode').confirm(session_id)
+    expect(rt.ctx.get('planMode').isActive(session_id)).toBe(false)
+
+    await sendAndWait(rt, agent_id, approved.executionPrompt)
+    await rt.sessions.flush({ session_id })
+
+    const events = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events
+    expect(events.map((event) => event.type)).toContain('plan/proposed')
+    expect(events.map((event) => event.type)).toContain('plan/approved')
+    expect(existsSync(join(home, 'planned.txt'))).toBe(true)
+    expect(readFileSync(join(home, 'planned.txt'), 'utf8')).toBe('done')
+
+    const checkpoint = [...events].reverse().find((event) => event.type === 'checkpoint/created')
+    expect(checkpoint).toMatchObject({ data: { files: 1, partial: false } })
+    writeFileSync(join(home, 'planned.txt'), 'drift', 'utf8')
+    await rt.checkpoints.restore({
+      sessionId: session_id,
+      workspaceRoot: home,
+      session: rt.sessions.sessionServiceFor(session_id),
+      checkpointId: (checkpoint?.data as { checkpointId: string }).checkpointId,
+    })
+    expect(readFileSync(join(home, 'planned.txt'), 'utf8')).toBe('done')
+    await rt.sessions.flush({ session_id })
+    const restored = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events.at(-1)
+    expect(restored).toMatchObject({ type: 'checkpoint/restored' })
+  })
+
+  it('terminal.open 走真实 PTY，并落下可回放的 tool/call 与 terminal 卡片', async () => {
+    const rt = await makeRuntime(
+      [terminalOpenScript, textScript],
+      degradedSandbox,
+      createApprovalService({ channel: { ask: async () => 'allowed-once' } }),
+    )
+    const cwd = process.cwd()
+    const { session_id } = await rt.sessions.create({ cwd, title: '终端工具测试' })
+    rt.ctx.get('workspaceTrust').setTrusted(cwd, true)
+    const { agent_id } = await rt.agents.create({ session_id })
+    await sendAndWait(rt, agent_id, '打开一个终端')
+    await rt.sessions.flush({ session_id })
+
+    const events = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events
+    const call = events.find((event) => event.type === 'tool/call')
+    const result = events.find((event) => event.type === 'tool/result')
+    expect(call).toMatchObject({ data: { name: 'terminal', callId: 'terminal-open', card: 'terminal' } })
+    expect(result).toMatchObject({
+      data: { message: { toolCallId: 'terminal-open', isError: false }, meta: { card: 'terminal', op: 'open', terminalId: expect.any(String) } },
+    })
+  })
+
+  it('系统级沙箱未提供受控 PTY 时，terminal.open 明确拒绝', async () => {
+    const rt = await makeRuntime([terminalOpenScript, textScript])
+    const cwd = process.cwd()
+    const { session_id } = await rt.sessions.create({ cwd, title: '受控终端拒绝测试' })
+    rt.ctx.get('workspaceTrust').setTrusted(cwd, true)
+    const { agent_id } = await rt.agents.create({ session_id })
+    await sendAndWait(rt, agent_id, '打开一个终端')
+    await rt.sessions.flush({ session_id })
+
+    const events = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events
+    expect(events.find((event) => event.type === 'tool/result')).toMatchObject({
+      data: { message: { toolCallId: 'terminal-open', isError: true }, error: { code: 'EC-NOT_READY' } },
+    })
+  })
+
+  it('未信任工作区在标准权限下仍拒绝打开终端', async () => {
+    const rt = await makeRuntime([terminalOpenScript, textScript])
+    const { session_id } = await rt.sessions.create({ cwd: home, title: '未信任终端测试' })
+    const { agent_id } = await rt.agents.create({ session_id })
+    await sendAndWait(rt, agent_id, '打开一个终端')
+    await rt.sessions.flush({ session_id })
+
+    const events = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events
+    const result = events.find((event) => event.type === 'tool/result')
+    expect(result).toMatchObject({
+      data: {
+        message: { toolCallId: 'terminal-open', isError: true },
+        error: { code: 'ET-DENIED' },
+      },
+    })
   })
 
   it('文件系统与 shell 服务都挂进了 ctx（工具靠它们干活）', async () => {
     const rt = await makeRuntime([textScript])
     expect(rt.ctx.get('fs')).toBeDefined()
     expect(rt.ctx.get('shell')).toBeDefined()
+    expect(rt.ctx.get('terminals')).toBeDefined()
+    expect(rt.ctx.get('jobs')).toBeDefined()
     expect(rt.ctx.get('sandbox')).toBeDefined()
     expect(rt.ctx.get('permissionPresets').get()).toBe('标准')
+  })
+
+  it('agent 销毁会终止其已发布的后台作业（不是取消任意一个对话回合）', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id } = await rt.sessions.create({ cwd: home, title: '作业 owner 清理' })
+    const { agent_id } = await rt.agents.create({ session_id })
+    let aborted = false
+    const started = await rt.ctx.get('jobs').start({
+      kind: 'watch',
+      label: 'owner cleanup test',
+      ownerAgentId: agent_id,
+      run: async ({ signal }) => await new Promise<void>((resolve) => {
+        signal.addEventListener('abort', () => {
+          aborted = true
+          resolve()
+        }, { once: true })
+      }),
+    })
+    await rt.agents.dispose({ agent_id })
+    expect(aborted).toBe(true)
+    expect(rt.ctx.get('jobs').status({ jobId: started.jobId, ownerAgentId: agent_id }).status).toBe('killed')
   })
 })
 

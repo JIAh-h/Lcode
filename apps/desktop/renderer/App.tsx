@@ -6,6 +6,7 @@ import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { useLocale } from './i18n/index.ts'
 import { HomePage } from './pages/Home.tsx'
 import { syncModelsFromMain } from './store/modelSync.ts'
+import { syncPermissionPresetFromMain } from './store/permissionSync.ts'
 import { WorkspacePage } from './pages/Workspace.tsx'
 import { ReplayPage } from './pages/Replay.tsx'
 import { SettingsPage } from './pages/Settings.tsx'
@@ -30,6 +31,7 @@ export function App() {
      放在设置页里曾导致"启动后首页显示假模型、进过设置才对"（见 store/modelSync）。 */
   useEffect(() => {
     void syncModelsFromMain()
+    void syncPermissionPresetFromMain()
   }, [])
   return (
     <AppShell>

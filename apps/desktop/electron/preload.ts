@@ -44,6 +44,20 @@ const api = {
     create: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.create', input),
     /** 打开会话：返回 meta + 已有历史，并开始推送它之后的事件 */
     open: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:session.open', sessionId),
+    delete: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.delete', input),
+    restore: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.restore', input),
+    export: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.export', input),
+    fork: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.fork', input),
+    /** 回放时的精确请求快照；主进程只接受 session id 与事件序号。 */
+    history: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.history', input),
+    /** 大事件 payload 按需读取，避免随打开会话一次性传给渲染进程。 */
+    body: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:event.body', input),
+    /** 某次工具调用的权限、审批与沙箱证据。 */
+    why: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:trace.why', input),
+    /** 已闭合轮的只读检查点。 */
+    checkpoints: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.checkpoints', input),
+    fileCheckpoints: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.fileCheckpoints', input),
+    restoreCheckpoint: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.checkpoint.restore', input),
     /** 订阅结构/表面事件（即时） */
     onEvent: (handler: (payload: unknown) => void): (() => void) => {
       const listener = (_e: unknown, payload: unknown): void => handler(payload)
@@ -68,10 +82,44 @@ const api = {
       ipcRenderer.on('lcode:session.turnFailed', listener)
       return () => ipcRenderer.removeListener('lcode:session.turnFailed', listener)
     },
+    /** 任何窗口完成创建、删除、恢复或分叉后，刷新侧栏会话树。 */
+    onChanged: (handler: (payload: unknown) => void): (() => void) => {
+      const listener = (_e: unknown, payload: unknown): void => handler(payload)
+      ipcRenderer.on('lcode:session.changed', listener)
+      return () => ipcRenderer.removeListener('lcode:session.changed', listener)
+    },
   },
   agent: {
     send: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:agent.send', input),
+    steer: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:agent.steer', input),
+    queue: {
+      list: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:agent.queue.list', input),
+      edit: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:agent.queue.edit', input),
+      remove: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:agent.queue.remove', input),
+      clear: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:agent.queue.clear', input),
+      guide: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:agent.queue.guide', input),
+    },
     cancel: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:agent.cancel', sessionId),
+    resume: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:agent.resume', sessionId),
+  },
+  plan: {
+    enter: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plan.enter', input),
+    confirm: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plan.confirm', input),
+  },
+  workspaceTrust: {
+    list: (): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.list'),
+    set: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.set', input),
+  },
+  permissions: {
+    get: (): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.get'),
+    set: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.set', input),
+  },
+  tasks: {
+    list: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:tasks.list', input),
+    readJob: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:tasks.job.read', input),
+    killJob: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:tasks.job.kill', input),
+    readTerminal: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:tasks.terminal.read', input),
+    closeTerminal: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:tasks.terminal.close', input),
   },
   approval: {
     /**
@@ -88,7 +136,7 @@ const api = {
     },
     /** 回答。同一个 callId 只能答一次（二次应答报错——一次审批只管一次） */
     answer: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:approval.answer', input),
-    /** 当前还挂着的问题（窗口刷新后据此恢复弹窗） */
+    /** 当前还挂着的问题（窗口刷新后据此恢复弹窗，返回完整请求而非只有 callId） */
     pending: (): Promise<unknown> => ipcRenderer.invoke('lcode:approval.pending'),
   },
 } as const

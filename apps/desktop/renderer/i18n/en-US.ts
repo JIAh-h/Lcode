@@ -31,6 +31,18 @@ export const EN: Readonly<Record<string, string>> = {
   复制: 'Copy',
   默认: 'Default',
   当前: 'Current',
+  运行命令: 'Run command',
+  修改文件: 'Modify file',
+  搜索文件: 'Search files',
+  读取文件: 'Read file',
+  打开网页: 'Open webpage',
+  执行操作: 'Run action',
+  命令执行中: 'Command in progress',
+  文件内容: 'File contents',
+  文件变更: 'File changes',
+  匹配文件: 'Matching files',
+  网页内容: 'Webpage contents',
+  操作已完成: 'Action completed',
 
   /* ── 菜单栏（应用内自绘） ── */
   文件: 'File',
@@ -158,6 +170,10 @@ export const EN: Readonly<Record<string, string>> = {
   这次对话用哪个模型: 'Which model for this chat',
   '换默认模型请到「设置 → 模型」': 'Change the default in Settings → Model',
   发送: 'Send',
+  暂停: 'Pause',
+  继续: 'Resume',
+  暂停失败: 'Could not pause',
+  继续失败: 'Could not resume',
   '已附加文件夹：{name}': 'Attached folder: {name}',
   '已附加文件：{name}': 'Attached file: {name}',
   '当前不在桌面应用内，无法打开系统选择框':
@@ -174,8 +190,8 @@ export const EN: Readonly<Record<string, string>> = {
   无人值守: 'Unattended',
   '它只能看，不能改': 'It can only look, never change',
   '能改我的项目，动手前问我': 'Can change my project, asks first',
-  '工作区内自己干，不打扰我': 'Works inside the workspace without interrupting me',
-  '工作区内自己干，不打扰你': 'Works inside the workspace without interrupting you',
+  '受系统级沙箱约束时，工作区内自行执行': 'Works inside the workspace only when system sandboxing is enforced',
+  '受系统级沙箱约束时用于自动化': 'For automation only when system sandboxing is enforced',
   '哪里都能碰，但动手前问我': 'Can touch anything, but asks first',
   '哪里都能碰，但动手前问你': 'Can touch anything, but asks first',
   '用于自动化，不打扰我': 'For automation, doesn’t interrupt me',
@@ -215,6 +231,29 @@ export const EN: Readonly<Record<string, string>> = {
   '系统提示（当时的确切内容）': 'System prompt (exactly as it was)',
   '… 该步装配后的 system 快照 …': '… the assembled system snapshot at this step …',
   工具调用: 'Tool calls',
+  工具: 'Tool',
+  终端: 'Terminal',
+  搜索: 'Search',
+  读取: 'Read',
+  网页: 'Web',
+  '已在后台运行': 'Running in background',
+  退出码: 'Exit code',
+  '正在执行…': 'Running…',
+  '读取中…': 'Loading…',
+  为什么: 'Why',
+  '查看完整正文': 'Load full payload',
+  '查看原始参数': 'View raw arguments',
+  '结果已截断，展开后可按需读取': 'Result truncated; expand to load more',
+  已闭合检查点: 'Closed checkpoints',
+  当前会话还没有可用检查点: 'This session has no available checkpoints',
+  '确定把工作区恢复到第 {n} 轮的文件状态吗？': 'Restore the workspace to the file state from round {n}?',
+  '已恢复 {n} 个文件，移除 {m} 个后续文件。': 'Restored {n} files and removed {m} later files.',
+  '恢复失败，工作区没有被标记为已恢复。': 'Restore failed; the workspace was not marked as restored.',
+  '恢复中…': 'Restoring…',
+  恢复到此状态: 'Restore to this state',
+  个文件: 'files',
+  决策记录: 'Decision record',
+  '该步骤没有权限决策记录': 'This step has no permission decisions',
   模型可见消息: 'Messages visible to the model',
   '从第 {n} 步重新开始': 'Restart from step {n}',
 
@@ -239,7 +278,7 @@ export const EN: Readonly<Record<string, string>> = {
   '已经帮你恢复到最后一个完整的状态。恢复时补记了 2 条收尾记录，在时间轴上以补记样式标注。':
     'We restored the last complete state. Two closing records were backfilled and are marked as backfilled on the timeline.',
   '丢弃的撕裂记录：1 条（文件末尾不完整）': 'Discarded torn records: 1 (incomplete at end of file)',
-  '补记的合成事件：2 条（step/end + turn/end）': 'Backfilled synthetic events: 2 (step/end + turn/end)',
+  '恢复时补全的记录：{n} 条': 'Records completed during recovery: {n}',
   继续这个对话: 'Continue this chat',
 
   /* ── P8 异常 + 错误边界 ── */
@@ -406,10 +445,12 @@ export const EN: Readonly<Record<string, string>> = {
     'Decides when Lcode needs to ask you. Changes apply immediately.',
   预设: 'Presets',
   '不会改动任何文件，适合先让它看代码': 'Changes nothing — good for having it read code first',
-  '工作区内自动执行；改工作区外、跑有风险的命令前先问':
-    'Runs freely inside the workspace; asks before touching files outside it or running risky commands',
-  '用于自动化，不打扰你；建议配合最严守卫':
-    'For automation; pairs best with the strictest guards',
+  '受保护时可在工作区执行；沙箱降级时改动前确认':
+    'Runs in the workspace when protected; asks before mutations when sandboxing is degraded',
+  '仅在系统级沙箱可用时自动执行；否则拒绝改动':
+    'Runs automatically only when system sandboxing is available; otherwise rejects mutations',
+  '仅在系统级沙箱可用时用于自动化；否则拒绝改动':
+    'For automation only when system sandboxing is available; otherwise rejects mutations',
   细则: 'Details',
   工作区外文件每次都问: 'Always ask for files outside the workspace',
   '没有「记住选择」；一次确认只管一次':

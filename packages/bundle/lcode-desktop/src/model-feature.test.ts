@@ -162,6 +162,23 @@ describe('装配：探测（测试连接）走真实的六类归因', () => {
     f.dispose()
   })
 
+  it('已选择模型改走真实 chat 调用，不把 /models 漏列当作模型不存在', async () => {
+    const { feature: f, calls } = await feature((url) => {
+      if (url.endsWith('/models')) return new Response(JSON.stringify({ data: [] }), { status: 200 })
+      return new Response('data: {"choices":[{"delta":{"content":"OK"}}]}\n\ndata: [DONE]\n\n', {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    })
+    await f.saveCustom({ ...CUSTOM, api_key: 'sk-secret' })
+    await expect(f.api.probe({ provider: 'custom-gw', model: 'deepseek-v4.1-flash' })).resolves.toEqual({
+      ok: true,
+      models: [{ id: 'deepseek-v4.1-flash' }],
+    })
+    expect(calls.map((call) => call.url)).toEqual(['https://gw.corp.example.com/v1/chat/completions'])
+    f.dispose()
+  })
+
   it('401 → credential-rejected（不是笼统的"失败"）', async () => {
     const { feature: f } = await feature(() => new Response('{}', { status: 401 }))
     await f.saveCustom({ ...CUSTOM, api_key: 'bad-key' })

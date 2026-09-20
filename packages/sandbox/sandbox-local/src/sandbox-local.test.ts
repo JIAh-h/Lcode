@@ -18,6 +18,8 @@ describe('status：如实报告"没有沙箱"', () => {
     expect(status.available).toBe(false)
     expect(status.degraded).toBe(true)
     expect(status.mechanism).toBe('none')
+    expect(status.capabilities.platform).toBe(process.platform)
+    expect(status.capabilities.boundaries.filesystem.state).toBe('unavailable')
     // 原因必须非空：用户看到"为什么没沙箱"比只看到一个布尔有用得多
     expect(status.reason).toBeTruthy()
     expect(typeof status.reason).toBe('string')

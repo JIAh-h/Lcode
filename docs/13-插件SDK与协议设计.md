@@ -416,6 +416,7 @@ const agent = ctx.lookup.resolve(agentId)          // 还原成活体 Agent
 |---|---|---|
 | `initialize` | 握手：协商协议版本、能力、工作区 | 是（**就绪边界**） |
 | `session/prompt` | 提交一次用户输入 | **否**，仅返回**入队回执**（§5.4） |
+| `approval/answer` | 回传一次审批决定（`call_id` + `result`） | 是（回执式） |
 | `session/cancel` | 取消某会话当前进行中的活动 | 是（回执式） |
 | `session/load` | 装载/恢复既有会话（种子） | 是 |
 | `shutdown` | 优雅退出：先 drain 再退出 | 是 |
@@ -426,11 +427,11 @@ const agent = ctx.lookup.resolve(agentId)          // 还原成活体 Agent
 |---|---|---|
 | `session.event` | 一条会话事件（如 `tool/call`、`assistant/message`） | 事件流主通道 |
 | `session.status` | `idle` / `busy` / `error` 等状态迁移 | 供客户端判断"是否还在忙" |
-| `approval.requested` | `requestId`、action/basis/impact（12 §5.4） | 请求一次性审批 |
+| `approval.requested` | `call_id`、`asked_at`、action/basis/impact（12 §5.4） | 请求一次性审批 |
 | `subagent.started` | 子代理作用域 id、父作用域 | 子代理生命周期 |
 | `subagent.finished` | 子代理结论摘要 | 子代理生命周期 |
 
-> **`approval.requested` 是通知，不是请求**：服务端不阻塞等待某个 RPC 响应；客户端的批准结果通过 `session/prompt`-系（或专门的结果方法）回传，最终落为 `approval/decided` 事件（12 §5.5）。
+> **`approval.requested` 是通知，不是请求**：服务端不阻塞等待某个 RPC 响应；客户端以独立的 `approval/answer`（`call_id` + `result`）回传，最终落为 `approval/decided` 事件（12 §5.5）。`result` 只能是 `allowed-once` / `rejected` / `cancelled`；`unavailable` 只能由服务端在没有应答者时落盘，客户端不得伪造。stdio 只使用 snake_case，进程内事件使用对应的 `callId` / `askedAt` / `decidedAt`。
 
 ### 5.4 核心约定：`prompt` 只返回入队回执
 
@@ -519,9 +520,9 @@ sequenceDiagram
 ← {"jsonrpc":"2.0","method":"session.event","params":{"session_id":"s_01H","seq":130,"type":"tool/call","payload":{"tool":"read","args":{"path":"test/login.test.ts"}}}}
 ← {"jsonrpc":"2.0","method":"session.event","params":{"session_id":"s_01H","seq":131,"type":"tool/result","payload":{"tool":"read","ok":true}}}
 // 5) 需要审批：通知 + 客户端回传决定
-← {"jsonrpc":"2.0","method":"approval.requested","params":{"request_id":"ap_9","action":{"tool":"shell","summary":"npm test -- login"},"basis":{"source":"preset","reason":"标准预设下 shell 需询问"},"impact":{"sandboxChange":{"from":"workspace-write","to":"workspace-write"},"network":{"domains":[]}}}}
-→ {"jsonrpc":"2.0","id":4,"method":"session/prompt","params":{"session_id":"s_01H","approval_result":{"request_id":"ap_9","decision":"allowed-once"}}}
-← {"jsonrpc":"2.0","id":4,"result":{"receipt":{"accepted":true,"seq":132}}}
+← {"jsonrpc":"2.0","method":"approval.requested","params":{"call_id":"ap_9","asked_at":1757491200456,"action":{"tool":"shell","summary":"npm test -- login"},"basis":{"source":"preset","reason":"标准预设下 shell 需询问"},"impact":{"sandboxChange":{"from":"workspace-write","to":"workspace-write"},"network":{"domains":[]}}}}
+→ {"jsonrpc":"2.0","id":4,"method":"approval/answer","params":{"call_id":"ap_9","result":"allowed-once"}}
+← {"jsonrpc":"2.0","id":4,"result":{"accepted":true}}
 // 6) 子代理
 ← {"jsonrpc":"2.0","method":"subagent.started","params":{"scope":"ag_7f3a","parent":"s_01H"}}
 ← {"jsonrpc":"2.0","method":"subagent.finished","params":{"scope":"ag_7f3a","summary":"定位到 mock 未重置"}}
@@ -661,7 +662,7 @@ flowchart TD
 ## 未决问题
 
 - [ ] **`session/cancel` 的粒度**未定：只支持"取消整个会话当前活动"，还是支持"取消某一轮/某一步"？后者对交互体验更好，但会引入更复杂的关联（卡在：内核研发 + 需要与 [06-会话事件日志与可重放设计.md](./06-会话事件日志与可重放设计.md) 对齐）。
-- [ ] **审批结果回传走哪个方法**未定：示例里复用了 `session/prompt`（带 `approval_result`），也可以独立成 `session/approve`。需要定一个并写进协议（卡在：协议设计）。
+- [x] **审批结果回传方法**：固定为独立的 `approval/answer`，参数为 `call_id` 与 `result`；`session/prompt` 只提交用户输入。
 - [ ] **`lookup` 表的生命周期边界**未定：`lookupId` 在对象销毁后立即失效，还是保留一个短暂宽限期以容忍在途消息？（卡在：内核研发）。
 - [ ] **MCP 服务端的会话归属模型**未定：`client_id → 作用域` 的映射是否需要持久化，以及是否允许外部调用者看到本机会话历史（安全上倾向"否"）（卡在：安全 + 生态）。
 - [ ] **插件的 SDK 版本与内核解耦**未定：目前要求同版本发布，长期可能需要"SDK 独立版本 + 兼容矩阵"（卡在：生态）。

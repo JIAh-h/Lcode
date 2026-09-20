@@ -289,6 +289,55 @@ describe('① 流式翻译：SSE → StreamChunk', () => {
     ])
   })
 
+  it('响应尚未结束时立即产出首个文本增量', async () => {
+    const encoder = new TextEncoder()
+    let release!: () => void
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encoder.encode('data: {"choices":[{"delta":{"content":"先"}}]}\n\n'))
+          void new Promise<void>((resolve) => {
+            release = resolve
+          }).then(() => {
+            controller.enqueue(
+              encoder.encode('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'),
+            )
+            controller.close()
+          })
+        },
+      }),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
+    )
+    const adapter = makeAdapter({ fetch: (async () => response) as typeof globalThis.fetch })
+    const call = await adapter.prepareCall({ provider: 'custom', model: 'm' }, { signal: new AbortController().signal })
+    const iterator = adapter.stream(call, new AbortController().signal)[Symbol.asyncIterator]()
+    let timeout: ReturnType<typeof setTimeout> | undefined
+
+    try {
+      const first = await Promise.race([
+        iterator.next(),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error('首个增量在响应结束前没有产出')), 100)
+        }),
+      ])
+      expect(first).toEqual({ value: { type: 'text-delta', text: '先' }, done: false })
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
+      release()
+    }
+
+    const rest: unknown[] = []
+    for (;;) {
+      const next = await iterator.next()
+      if (next.done) break
+      rest.push(next.value)
+    }
+    expect(rest).toContainEqual({
+      type: 'done',
+      message: { role: 'assistant', content: [{ type: 'text', text: '先' }], provider: 'custom', model: 'm' },
+    })
+  })
+
   it('**done 携带完整正文**（引擎把 done.message 当权威，空 content 会让 UI 啥都看不到）', async () => {
     // 这个用例是补出来的：原来只断言了 chunk 翻译，没断言 done 的内容完整性，
     // 于是单测全绿、而真实对话在界面上是空回复（实测踩过）。
@@ -591,6 +640,19 @@ describe('① 模型清单与重试策略', () => {
     const models = await adapter.listModels(new AbortController().signal)
     expect(models.map((m) => m.id)).toEqual(['gpt-4o', 'deepseek-chat'])
     expect(models[1]!.name).toBe('DeepSeek Chat')
+  })
+
+  it('listModels 兼容百炼以 SSE data 帧包装的模型清单', async () => {
+    const adapter = makeAdapter({
+      fetch: (async () =>
+        new Response('data:{"object":"list","data":[{"id":"deepseek-v4.1-flash"}]}\n\ndata: [DONE]\n', {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })) as typeof globalThis.fetch,
+    })
+
+    const models = await adapter.listModels(new AbortController().signal)
+    expect(models).toMatchObject([{ id: 'deepseek-v4.1-flash', name: 'deepseek-v4.1-flash' }])
   })
 
   it('不重试确定性拒绝（认证失败、模型不存在）', async () => {

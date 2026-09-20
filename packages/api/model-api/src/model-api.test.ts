@@ -72,13 +72,25 @@ describe('model.probe（六类归因，永不抛错）', () => {
     expect(result).toEqual({ ok: true, models: [{ id: 'replay-model' }] })
   })
 
-  it('模型名不在清单 → model-not-found', async () => {
+  it('已选择模型以实际调用为准，不因 /models 漏列而误报 model-not-found', async () => {
     const { api } = await makeApi()
     const result = await api.probe({ provider: 'replay', model: 'nope' })
-    expect(result).toEqual({
-      ok: false,
-      failure: { kind: 'model-not-found', code: 'EL-UNKNOWN_MODEL', message: expect.any(String) },
-    })
+    expect(result).toEqual({ ok: true, models: [{ id: 'nope' }] })
+  })
+
+  it('实际调用返回 EL-UNKNOWN_MODEL 才归因为 model-not-found', async () => {
+    const rejected = failingAdapter(ERROR_CODES.EL_UNKNOWN_MODEL)
+    rejected.stream = async function* () {
+      throw new LcodeErrorImpl({
+        code: ERROR_CODES.EL_UNKNOWN_MODEL,
+        message: 'server rejected model',
+        userMessage: '模型不存在',
+        retryable: false,
+      })
+    }
+    const { api } = await makeApi({ adapters: [rejected] })
+    const result = await api.probe({ provider: 'failing', model: 'nope' })
+    expect(result).toMatchObject({ ok: false, failure: { kind: 'model-not-found', code: 'EL-UNKNOWN_MODEL' } })
   })
 
   it('EL-NO_ADAPTER → endpoint-unreachable（保留原始 code）', async () => {

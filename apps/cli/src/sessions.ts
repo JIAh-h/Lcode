@@ -257,3 +257,24 @@ function usageError(message: string): number {
   console.error(message)
   return 1
 }
+
+/** 索引是可丢弃投影；重建读取 JSONL 权威日志，并在收尾 VACUUM 回收空闲页。 */
+export async function runIndexCommand(argv: readonly string[]): Promise<number> {
+  if (argv[0] !== 'rebuild' || argv.length !== 1) {
+    console.error('用法：lcode index rebuild')
+    return 1
+  }
+
+  await initZstd()
+  const api = new LocalSessionsApi({ home: resolveLcodeHome() })
+  try {
+    const report = api.reindex()
+    console.log(`索引重建完成：扫描 ${report.scanned}，重建 ${report.rebuilt}，跳过 ${report.skipped.length}`)
+    for (const skipped of report.skipped) {
+      console.error(`  ✗ ${skipped.sessionId} [${skipped.code ?? 'UNKNOWN'}] ${skipped.message}`)
+    }
+    return report.skipped.length === 0 ? 0 : 1
+  } finally {
+    await api.close()
+  }
+}

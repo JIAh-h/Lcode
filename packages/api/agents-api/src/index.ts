@@ -6,4 +6,5 @@ export type {
   AgentStatusEvent,
   CancellationCause,
   EnqueueReceipt,
+  QueuedMessage,
 } from './types.ts'

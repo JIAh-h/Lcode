@@ -1,12 +1,14 @@
 import { useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
+import type { QueuedMessage } from '../store/sessionBridge.ts'
 import { TextArea } from './controls.tsx'
 import { PopMenu } from './PopMenu.tsx'
 import type { PopMenuItem } from './PopMenu.tsx'
 import { toast } from './toast.ts'
 import { t } from '../i18n/index.ts'
 import { chooseDefaultModel } from '../store/modelSync.ts'
-import { PERMISSION_PRESETS, PERMISSION_PRESET_HINT, setPermissionPreset, useUiPrefs } from '../store/uiPrefs.ts'
+import { choosePermissionPreset } from '../store/permissionSync.ts'
+import { PERMISSION_PRESETS, PERMISSION_PRESET_HINT, useUiPrefs } from '../store/uiPrefs.ts'
 import type { PermissionPreset } from '../store/uiPrefs.ts'
 
 /**
@@ -36,23 +38,48 @@ export function ComposerBar({
   value,
   onChange,
   onSend,
+  primaryAction = 'send',
+  onPrimaryAction,
   placeholder,
   sendTitle = '发送',
   hint,
   leading,
+  planActive = false,
+  planReady = false,
+  onPlanAction,
+  queued = [],
+  onGuideQueued,
+  onEditQueued,
+  onRemoveQueued,
+  onClearQueued,
 }: {
   value: string
   onChange: (next: string) => void
   onSend: () => void
+  primaryAction?: 'send' | 'pause' | 'resume'
+  onPrimaryAction?: (() => void) | undefined
   placeholder?: string
   sendTitle?: string
   /** textarea 上方的提示行（可选） */
   hint?: string
   /** textarea 之前的插槽（首页用它放「选择项目」行） */
   leading?: ReactNode
+  /** 会话级计划模式；激活时该按钮表示“确认并开始执行”。 */
+  planActive?: boolean
+  /** 是否已有可确认的结构化计划。 */
+  planReady?: boolean
+  onPlanAction?: (() => void) | undefined
+  /** 当前任务完成后才发送的运行时消息队列。 */
+  queued?: readonly QueuedMessage[]
+  onGuideQueued?: ((queueId: string) => void) | undefined
+  onEditQueued?: ((queueId: string, text: string) => void) | undefined
+  onRemoveQueued?: ((queueId: string) => void) | undefined
+  onClearQueued?: (() => void) | undefined
 }) {
   const prefs = useUiPrefs()
   const [attachments, setAttachments] = useState<readonly Attachment[]>([])
+  const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
+  const [editingQueueText, setEditingQueueText] = useState('')
 
   const addAttachment = (path: string | null, kind: Attachment['kind']): void => {
     if (!path) return
@@ -86,7 +113,28 @@ export function ComposerBar({
   }
 
   const onKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>): void => {
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) onSend()
+    // 与 Codex 一致：Enter 提交，Shift+Enter 明确保留换行；输入法候选确认不能误发。
+    if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return
+    e.preventDefault()
+    if (value.trim() !== '') onSend()
+  }
+
+  const textOfQueued = (item: QueuedMessage): string =>
+    item.content
+      .filter((block): block is Extract<QueuedMessage['content'][number], { readonly type: 'text'; readonly text: string }> => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n')
+
+  const startEdit = (item: QueuedMessage): void => {
+    setEditingQueueId(item.queue_id)
+    setEditingQueueText(textOfQueued(item))
+  }
+
+  const saveEdit = (): void => {
+    if (editingQueueId === null || editingQueueText.trim() === '') return
+    onEditQueued?.(editingQueueId, editingQueueText.trim())
+    setEditingQueueId(null)
+    setEditingQueueText('')
   }
 
   const addItems: readonly PopMenuItem[] = [
@@ -112,10 +160,64 @@ export function ComposerBar({
   /** 当前选中项的显示名；没选或找不到就显示引导文案 */
   const currentModelLabel =
     prefs.models.find((m) => m.name === prefs.defaultProvider)?.src ?? ''
+  const cannotSend = primaryAction === 'send' && value.trim() === ''
 
   return (
     <>
       {leading}
+      {queued.length > 0 ? (
+        <div className="queued-list" aria-label={t('待发送消息')}>
+          {queued.map((item) => {
+            const editing = editingQueueId === item.queue_id
+            return (
+              <div className="queued-message" key={item.queue_id}>
+                <span className="queued-mark" aria-hidden="true">↳</span>
+                <div className="queued-content">
+                  {editing ? (
+                    <textarea
+                      className="queued-editor"
+                      value={editingQueueText}
+                      onChange={(event) => setEditingQueueText(event.target.value)}
+                      autoFocus
+                    />
+                  ) : (
+                    <span className="queued-text">{textOfQueued(item)}</span>
+                  )}
+                </div>
+                <div className="queued-actions">
+                  {editing ? (
+                    <>
+                      <button className="queued-action" title={t('保存修改')} onClick={saveEdit}>✓</button>
+                      <button className="queued-action" title={t('取消编辑')} onClick={() => setEditingQueueId(null)}>✕</button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="queued-guide" title={t('不打断当前任务，在下一步调整方向')} onClick={() => onGuideQueued?.(item.queue_id)}>
+                        {t('引导')}
+                      </button>
+                      <button className="queued-action" title={t('移除待发送消息')} onClick={() => onRemoveQueued?.(item.queue_id)}>⌫</button>
+                      <PopMenu
+                        trigger="…"
+                        buttonClass="queued-action"
+                        title="更多操作"
+                        up
+                        items={[
+                          { id: 'edit', label: '编辑消息' },
+                          { id: 'clear', label: '关闭队列' },
+                        ]}
+                        onSelect={(action) => {
+                          if (action === 'edit') startEdit(item)
+                          else onClearQueued?.()
+                        }}
+                      />
+                    </>
+                  )}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : null}
       {attachments.length > 0 ? (
         <div className="attchips">
           {attachments.map((a) => (
@@ -134,6 +236,16 @@ export function ComposerBar({
       ) : null}
       <TextArea variant="bare" placeholder={placeholder} value={value} onChange={onChange} onKeyDown={onKeyDown} />
       <div className="cinbar">
+        {onPlanAction ? (
+          <button
+            className={'planmode' + (planActive ? ' on' : '')}
+            title={t(planActive ? (planReady ? '确认计划并开始执行' : '等待助手提交计划') : '进入计划模式')}
+            onClick={onPlanAction}
+            disabled={planActive && !planReady}
+          >
+            {t(planActive ? '开始执行' : '计划模式')}
+          </button>
+        ) : null}
         <PopMenu
           trigger="＋"
           title="添加附件"
@@ -147,7 +259,9 @@ export function ComposerBar({
           up
           header="它什么时候需要问你"
           items={permItems}
-          onSelect={(id) => setPermissionPreset(id as PermissionPreset)}
+          onSelect={(id) => {
+            void choosePermissionPreset(id as PermissionPreset).catch(() => toast(t('权限预设保存失败')))
+          }}
         />
         <PopMenu
           // 没有模型时**不能显示空触发器**（一个光秃秃的 " ▾" 让人不知道那是什么）。
@@ -170,8 +284,14 @@ export function ComposerBar({
             toast(t('已切换模型：{name}', { name: prefs.models.find((m) => m.name === id)?.src ?? id }))
           }}
         />
-        <button className="send" title={t(sendTitle)} onClick={onSend}>
-          ↑
+        <button
+          className={'send' + (primaryAction === 'pause' ? ' stop' : '')}
+          title={t(primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : sendTitle)}
+          aria-label={t(primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : sendTitle)}
+          onClick={onPrimaryAction ?? onSend}
+          disabled={cannotSend}
+        >
+          {primaryAction === 'pause' ? '■' : primaryAction === 'resume' ? '▶' : '↑'}
         </button>
       </div>
       {hint ? <div className="chint">{hint}</div> : null}

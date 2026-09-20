@@ -821,10 +821,14 @@ END;
 | `tool/result` | `meta` | object | ◻ | **可重放的 UI 元数据**（如 diff hunks） | `JsonValue`；由 `presentationMeta` 产生 |
 | `approval/asked` | `callId` | string | ✅ | 请求所属调用 | 与 `tool/call.callId` 对应 |
 | `approval/asked` | `action` / `basis` / `impact` | object | ✅ | 操作 / 依据 / 影响面 | 见 [12 §5.4](./12-安全权限与沙箱模型.md#54-审批展示内容规范) |
+| `approval/asked` | `callId` | string | ✅ | 与 `tool/call` 配对的审批调用键 | — |
+| `approval/asked` | `askedAt` | integer | ✅（新日志） | 向应答者发出请求的 epoch ms | 旧日志缺失时回退事件信封 `time` |
 | `approval/decided` | `callId` | string | ✅ | 请求所属调用 | — |
 | `approval/decided` | `result` | string | ✅ | 四结果之一 | `allowed-once` / `rejected` / `cancelled` / `unavailable`（§6.5） |
+| `approval/decided` | `decidedBy` | string | ✅（新日志） | 决策来源 | `human` / `auto-denied` / `cancelled` |
+| `approval/decided` | `decidedAt` | integer | ✅（新日志） | 得到决定的 epoch ms | 旧日志缺失时回退事件信封 `time` |
 
-> **审批必须落盘**（[12 §5.5](./12-安全权限与沙箱模型.md#55-审批必须落盘为可审计事件)）：`asked` 与 `decided` 成对；悬挂的 `asked` 是崩溃恢复要处理的。`unavailable` **也要记录**——它是"被拒绝"的一种，不是"没发生"。`06 §2.2` 载荷为 `{ callId, action, basis, impact }`；[12 §5.5](./12-安全权限与沙箱模型.md#55-审批必须落盘为可审计事件) 另提 `requestId` / `askedAt` / `decidedAt`，合并入词汇表**待 06 补充**。
+> **审批必须落盘**（[12 §5.5](./12-安全权限与沙箱模型.md#55-审批必须落盘为可审计事件)）：`asked` 与 `decided` 成对；悬挂的 `asked` 由崩溃恢复补为同一 `callId` 的 `decided(result = 'cancelled', decidedBy = 'cancelled')`。`unavailable` **也要记录**——它是"被拒绝"的一种，不是"没发生"。`requestId` 是未发布文档字段；读旧导入数据时映射为 `callId`，新事件不得写入它。
 
 ### 5.4 内容与表面
 
@@ -835,7 +839,7 @@ END;
 | `user/message` | `id` / `source` | string / object | ◻ | 消息 id / 来源（用户/注入/压缩摘要） | `MessageSource`（开放） |
 | `user/message` | `surfaceOp` / `sourceEventSeqs` | object / number[] | ◻ | **表面操作**（缺省 = `append`）/ 血缘 | 见 §4.1 |
 | `todo/write` | `todos` | array | ✅ | **整表快照**（last-write-wins） | `TodoItem[]` |
-| `plan/mode` | `active` | boolean | ✅ | 计划模式开关（**整值替换**） | `true` / `false` |
+| `plan/mode` | `active` / `reason` | boolean / string | ✅ / ◻ | 计划模式开关（**整值替换**）/ 进入、确认或取消原因 | `true` / `false`；`entered` / `confirmed` / `cancelled` |
 
 > `user/message` / `assistant/message` / `tool/result` 是**唯三**的**表面****事件**（[06 §3.1](./06-会话事件日志与可重放设计.md#31-表面的定义)）。压缩摘要以 `user/message` + `surfaceOp:{op:'replace',…}` 进入**表面**（[06 §3.3](./06-会话事件日志与可重放设计.md#33-replace-的三种用途)）。
 
@@ -1242,13 +1246,13 @@ COMMIT;                                      -- search_index 由触发器随 mes
 - [ ] **`web` 卡片抓回的正文是否进 FTS**：索引增强搜索，但会把外部内容引入本地索引。卡在安全（[12](./12-安全权限与沙箱模型.md)）。
 - [ ] **`events` 表是否保留**：既然 JSONL 是真相、`session_log_index` 已能定位，`events` 是"查询便利"还是"必要"？倾向保留（时间轴骨架依赖），需实测确认不与 `session_log_index` 冗余。卡在内核研发。
 - [ ] **`TurnEndReason` 完整取值集合**：`completed` / `aborted` / `cancelled` / `interrupted` / `error` 已在代码里实现（`core/session/src/types.ts`），但**本文 §6.2 的表尚未回填**；`aborted` 由 T6.1 的崩溃恢复补记使用。待 06 定稿后回填 §6.2。
-- [ ] **审批事件字段的最终形状**：`06 §2.2` 只给 `{ callId, action, basis, impact }`，`12 §5.5` 另提 `requestId` / `askedAt` / `decidedAt`。以谁为准并合入 `06` 词汇表？卡在内核研发。
-- [ ] **`file_changes` 的 `rename` 语义**：`path` 只记新路径，旧路径放哪？倾向"前旧后新各一行 + 一个 `from_path` 列"，需定稿。
+- [x] **审批事件字段的最终形状**：内部事件固定 `callId` / `askedAt` / `decidedAt`，stdio 固定 `call_id` / `asked_at` / `decided_at`；结果枚举与孤立 `asked` 的恢复语义已统一到 06 / 12 / 13 / 21。历史 `requestId` 只在导入兼容层映射，不再写出。
+- [x] **`file_changes` 的 `rename` 语义**：v0.1 只记录一行，`path` 为目标路径；源路径保留在原始展示元数据。产品需要 X→Y 索引查询时，再迁移新增 `from_path`。
 - [ ] **`sessions.status` 的 `waiting-approval` 是否独立**：当前作为 `busy` 细分；需确认 UI 是否需要独立状态点。卡在客户端设计（[10](./10-桌面客户端设计.md)）。
 - [ ] **`settings_effective` 是否物化**：当前用视图实时计算；设置读写是低频，倾向不物化。卡在内核研发。
 - [ ] **是否启用 SQLite `STRICT` 表**：本文未用（兼容性优先）。v1.0 锁到 SQLite ≥ 3.37 后是否全面启用？启用会让类型错误在写入时暴露。卡在内核研发。
 - [ ] **`Lcode Home` 是否遵循 XDG**（`$XDG_DATA_HOME`）：当前固定 `~/.lcode`。卡在产品 + 客户端研发。
-- [ ] **索引体检门禁**：§9.2 的"索引 > 日志 15% 即异常"是否进 CI？需先有基线数据。卡在质量负责人。
+- [x] **索引体检门禁**：已由 `scripts/check-index-size.mjs` 与正反向测试建立基线，并在 CI 的“索引体积与容量基线”步骤阻断；阈值仍是 §9.2 的“索引 > 日志 15% 即异常”。
 - [ ] **`credentials_refs.scope` 的 `LIKE` 约束**：SQLite 的 `LIKE` 在 `CHECK` 里的大小写敏感性与索引利用需实测；可能需拆成显式枚举。卡在内核研发。
 
 ---

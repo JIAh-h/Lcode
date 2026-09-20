@@ -63,7 +63,7 @@ export function syncLocaleFromMain(): void {
 
 /** `<html lang>` 与当前语言保持一致（无障碍 / 输入法行为） */
 function syncHtmlLang(): void {
-  document.documentElement.lang = current
+  if (typeof document !== 'undefined') document.documentElement.lang = current
 }
 syncHtmlLang()
 

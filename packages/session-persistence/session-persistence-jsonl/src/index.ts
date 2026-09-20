@@ -52,7 +52,7 @@ export {
   planRecovery,
   synthesizeClosers,
 } from './recovery.ts'
-export type { OpenStructures, RecoveryResult, UnpairedToolCall } from './recovery.ts'
+export type { OpenStructures, RecoveryResult, UnpairedApproval, UnpairedToolCall } from './recovery.ts'
 
 // ── zstd 压缩（22 §9.4；T6.2） ──
 export {

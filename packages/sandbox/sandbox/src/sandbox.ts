@@ -49,6 +49,15 @@ export interface SandboxStatus {
   readonly degraded: boolean
   /** 降级时的可读原因；`degraded: false` 时为 undefined */
   readonly reason?: string | undefined
+  /** 文件、网络、进程三项的实际约束能力；不能由 UI 或文案自行推断。 */
+  readonly capabilities: PlatformSandboxCapabilities
+}
+
+/** 显式取消信任工作区后，Provider 对自己曾授予的 OS 级访问权的撤销结果。 */
+export interface SandboxReleaseResult {
+  readonly released: boolean
+  /** 未能撤销时的可读原因；本地策略仍会立即停止信任该目录。 */
+  readonly reason?: string | undefined
 }
 
 export interface SandboxService {
@@ -60,6 +69,13 @@ export interface SandboxService {
    * 要么如实报告"我没能约束住"（`enforced: false`）。
    */
   wrap(argv: readonly string[], policy: ResolvedSandboxPolicy): Promise<SandboxWrapResult>
+  /** 强制沙箱下的交互 PTY 必须由原生 Provider 显式接管。 */
+  wrapPty?(argv: readonly string[], policy: ResolvedSandboxPolicy): Promise<SandboxWrapResult>
+  /**
+   * 取消信任精确工作区时撤销 Provider 曾授予的本机权限。非原生 Provider 可以省略。
+   * 调用方仍须移除自己的信任记录，不能因 cleanup 失败继续把目录视为可信。
+   */
+  releaseWorkspace?(workspace: string): Promise<SandboxReleaseResult>
 }
 
 /** ctx key 声明（合并进 @lcode/context） */
@@ -74,3 +90,5 @@ declare module '@lcode/context' {
     'sandbox/profile': { readonly profile: string; readonly mode: SandboxMode }
   }
 }
+
+import type { PlatformSandboxCapabilities } from './capabilities.ts'

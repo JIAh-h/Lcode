@@ -7,6 +7,7 @@ import re, io, os, glob, collections
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DOCS = os.path.join(ROOT, 'docs')
 PROTO = os.path.join(ROOT, 'prototype')
+UI_COPY = os.path.join(ROOT, 'apps', 'desktop', 'renderer', 'i18n', 'en-US.ts')
 
 # 规格内色值（来自 docs/10 §6.1）
 SPEC_HEX = set('''#FFFFFF #F7F7F8 #F1F1F3 #E7E7EA #D9D9DE #1B1B1F #5A5A62 #9A9AA2 #2563EB #EEF4FE
@@ -18,6 +19,17 @@ SPEC_HEX = set('''#FFFFFF #F7F7F8 #F1F1F3 #E7E7EA #D9D9DE #1B1B1F #5A5A62 #9A9AA
 BANNED_TERMS = ['presentationMeta', 'surfaceOp', 'fail-closed', '不变量', 'ABORTED', 'tool/result',
                 'turn/end', 'step/end', 'seq ', 'EpochHeader', 'ModelSelection', 'credentialRef',
                 'request/header', 'allowed-once', 'sandbox/mode', 'workspace-write']
+
+# 19 §6.2 的用户界面术语黑名单。词典是桌面端所有可翻译文本的集中入口；扫描它
+# 可以在不启动 Electron 的 CI 中拦截新增的内部协议词。最终页面文本由 portable
+# 烟测再次覆盖，避免仅检查源代码而漏过渲染路径。
+UI_BANNED_TERMS = [
+    'tool/result', 'turn/end', 'session/event', 'presentationMeta', 'surfaceOp',
+    'EpochHeader', 'ModelSelection', 'ABORTED_BEFORE_DISPATCH',
+    'CREDENTIAL_REJECTED', 'TOOL_TIMEOUT', '不变量 I1', 'ADR-0022', 'seq ',
+    'surface replace', 'fail-closed', '单调守卫', '水滴/洋葱', '插件降级',
+    '派发模式', '回放态', '请求快照', 'todo_write',
+]
 
 
 def check_links():
@@ -80,7 +92,20 @@ def check_proto():
     return ok
 
 
+def check_ui_copy():
+    """检查桌面端用户文案词典，不扫描实现代码、日志或可展开诊断详情。"""
+    if not os.path.exists(UI_COPY):
+        print('\n桌面文案词典: 缺失 %s' % os.path.relpath(UI_COPY, ROOT))
+        return False
+    text = io.open(UI_COPY, encoding='utf-8').read()
+    hits = {term: text.count(term) for term in UI_BANNED_TERMS if term in text}
+    print('\n桌面文案词典 %s' % os.path.relpath(UI_COPY, ROOT))
+    print('  术语黑名单命中: %s' % (hits or '无 OK'))
+    return not hits
+
+
 if __name__ == '__main__':
     a = check_links()
     b = check_proto()
-    print('\n结果: %s' % ('全部通过 OK' if a and b else '存在问题'))
+    c = check_ui_copy()
+    print('\n结果: %s' % ('全部通过 OK' if a and b and c else '存在问题'))

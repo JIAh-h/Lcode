@@ -200,6 +200,7 @@ function isBoundarySafe(prefix: readonly SessionEvent[]): boolean {
     if (event.type === 'turn/end') turnEnd = event.seq
   }
   if (turnStart === undefined) return true // 没有开启任何轮
+  /* c8 ignore next -- turnStart 已由上一分支证明存在，?? 是类型安全兜底 */
   return turnEnd !== undefined && turnEnd >= (turnStart ?? 0)
 }
 

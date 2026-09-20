@@ -1,5 +1,6 @@
 import type { AgentHandle, AgentRef, AgentSpec } from '@lcode/agent'
 import type { PreparedCall } from '@lcode/llm'
+import type { SessionService, TurnEndReason } from '@lcode/session'
 import { TurnEngine } from './engine.ts'
 import type { AgentLoopDeps, LoopHandle } from './engine.ts'
 
@@ -27,7 +28,7 @@ export interface AgentLoopRuntime extends AgentLoop {
 }
 
 export type { AgentLoopDeps, CapturedRequest } from './engine.ts'
-export type { EnqueueResult, LoopHandle } from './engine.ts'
+export type { EnqueueResult, LoopHandle, QueuedInput } from './engine.ts'
 
 /** 具体循环：把注册表身份（@lcode/agent）与轮引擎组装成一个可用的句柄 */
 class ConcreteAgentLoop implements AgentLoopRuntime {
@@ -70,6 +71,8 @@ declare module '@lcode/context' {
   interface Events {
     'agent/pre-step': { agentId: string; turn: number; nextStep: number }
     'agent/request': { call: PreparedCall }
+    /** 回合已写入终态；检查点等终局副作用在此串行完成，下一回合开始前可见。 */
+    'agent/turn-ended': { agentId: string; sessionId: string; session: SessionService; turn: number; reason: TurnEndReason; endSeq: number }
   }
   /** ctx key（文档 20 §5.6）：单数 = 一个引擎 */
   interface Services {

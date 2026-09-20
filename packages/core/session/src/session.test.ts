@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { asSessionId, ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 import { InMemorySessionStore } from './session.ts'
-import { deriveSurfaceItems } from './surface.ts'
+import { deriveEventMessage, deriveSurfaceItems } from './surface.ts'
 import type { SessionEvent } from './types.ts'
 
 function makeStore() {
@@ -16,6 +16,7 @@ describe('session 不变量 S1：seq 单调连续无空洞', () => {
     expect(e0.seq).toBe(0)
     expect(e1.seq).toBe(1)
     expect(store.length).toBe(2)
+    expect(store.events({ from: 0, to: 1 })).toHaveLength(1)
   })
 
   it('appendMany 保持连续', () => {
@@ -25,6 +26,7 @@ describe('session 不变量 S1：seq 单调连续无空洞', () => {
       { type: 'step/end', data: { turn: 1, step: 1 } },
     ])
     expect(evs.map((e) => e.seq)).toEqual([0, 1])
+    expect(makeStore().appendMany([])).toEqual([])
   })
 })
 
@@ -50,9 +52,39 @@ describe('session 不变量 S4：事件 data 无损 JSON（I5）', () => {
     const ev = store.append({ type: 'todo/write', data: { todos: [{ id: 'a', text: 't', status: 'pending' }] } })
     expect(Object.isFrozen(ev.data)).toBe(true)
   })
+
+  it('保留显式时间、血缘和 ignorable 标记', () => {
+    const store = makeStore()
+    const event = store.append({
+      type: 'turn/start',
+      data: { turn: 1 },
+      time: 123,
+      sourceEventSeqs: [0],
+      ignorable: true,
+    })
+    expect(event).toMatchObject({ time: 123, sourceEventSeqs: [0], ignorable: true })
+  })
 })
 
 describe('表面投影（06 §3）', () => {
+  it('非表面事件不产生模型消息', () => {
+    expect(deriveEventMessage({ type: 'turn/start', seq: 0, time: 0, data: { turn: 1 } } as never)).toBeNull()
+  })
+
+  it('直接派生时也拒绝越界 replace', () => {
+    expect(() =>
+      deriveSurfaceItems([
+        {
+          type: 'user/message',
+          seq: 0,
+          time: 0,
+          data: { role: 'user', content: 'hi' },
+          surfaceOp: { op: 'replace', start: 2, end: 3 },
+        } as never,
+      ]),
+    ).toThrowError(RangeError)
+  })
+
   it('只投影三类表面事件', () => {
     const store = makeStore()
     store.append({ type: 'turn/start', data: { turn: 1 } })
@@ -88,6 +120,23 @@ describe('表面投影（06 §3）', () => {
     expect(msgs.map((m) => m.role)).toEqual(['user', 'assistant'])
   })
 
+  it('非表面事件携带 append 操作不改变投影', () => {
+    const store = makeStore()
+    store.append({ type: 'turn/start', data: { turn: 1 }, surfaceOp: 'append' })
+    expect(store.deriveMessages()).toEqual([])
+  })
+
+  it('非表面事件的 replace 仍按当前表面范围校验', () => {
+    const store = makeStore()
+    store.append({ type: 'user/message', data: { role: 'user', content: 'hi' } })
+    store.append({
+      type: 'tool/call',
+      data: { turn: 1, step: 1, callId: 'c', name: 'x', arguments: '{}' },
+      surfaceOp: { op: 'replace', start: 0, end: 1 },
+    })
+    expect(store.deriveMessages()).toEqual([])
+  })
+
   it('replace 区间越界抛错（I4）', () => {
     const store = makeStore()
     store.append({ type: 'user/message', data: { role: 'user', content: 'hi' } })
@@ -114,6 +163,13 @@ describe('派生是纯函数（P1 / I1）', () => {
 })
 
 describe('fork 分叉（20 §5.1）', () => {
+  it('切点越界拒绝', async () => {
+    const store = makeStore()
+    await expect(store.fork(0)).resolves.toMatchObject({ seed: [] })
+    await expect(store.fork(-1)).rejects.toMatchObject({ code: ERROR_CODES.ES_FORK_BOUNDARY_INVALID })
+    await expect(store.fork(1)).rejects.toMatchObject({ code: ERROR_CODES.ES_FORK_BOUNDARY_INVALID })
+  })
+
   it('切点必须落在已关闭的轮内', async () => {
     const store = makeStore()
     store.append({ type: 'turn/start', data: { turn: 1 } })

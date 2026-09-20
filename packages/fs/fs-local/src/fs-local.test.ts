@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { normalizePath } from '@lcode/fs'
-import { createLocalFs } from './fs-local.ts'
+import { createFsMutationAuthority, createLocalFs } from './fs-local.ts'
 import type { FsService } from '@lcode/fs'
 
 /**
@@ -76,15 +76,52 @@ describe('read：行窗口与行号', () => {
 describe('write：created 标记', () => {
   it('新建 → created=true；覆盖 → created=false', async () => {
     const first = await fs.write('new.ts', 'hello')
-    expect(first).toMatchObject({ created: true, bytesWritten: 5 })
+    expect(first).toMatchObject({ created: true, bytesWritten: 5, hunks: [{ oldLines: [], newLines: ['hello'] }] })
 
     const second = await fs.write('new.ts', 'hello world')
-    expect(second).toMatchObject({ created: false, bytesWritten: 11 })
+    expect(second).toMatchObject({ created: false, bytesWritten: 11, hunks: [{ oldLines: ['hello'], newLines: ['hello world'] }] })
   })
 
   it('默认自动建目录', async () => {
     await fs.write('deep/nested/x.ts', 'x')
     expect((await fs.read('deep/nested/x.ts')).lines[0]!.text).toBe('x')
+  })
+})
+
+describe('P5-00：一次性文件写入许可', () => {
+  it('许可只放行同一会话、同一调用和精确路径一次', async () => {
+    const authority = createFsMutationAuthority()
+    const guarded = createLocalFs({ workspaceRoot: root, mutationAuthority: authority })
+    const access = { sessionId: 'session-a', callId: 'call-a' }
+    authority.grant({ ...access, paths: [join(root, 'approved.txt')] })
+
+    await guarded.write('approved.txt', 'approved', { mutationAccess: access })
+    await expect(guarded.write('approved.txt', 'reused', { mutationAccess: access })).rejects.toMatchObject({ code: 'ET-DENIED' })
+    expect((await guarded.read('approved.txt')).lines[0]?.text).toBe('approved')
+  })
+
+  it('没有许可、跨调用或错路径都不能写入', async () => {
+    const authority = createFsMutationAuthority()
+    const guarded = createLocalFs({ workspaceRoot: root, mutationAuthority: authority })
+    await expect(guarded.write('no-grant.txt', 'x')).rejects.toMatchObject({ code: 'ET-DENIED' })
+
+    authority.grant({ sessionId: 'session-a', callId: 'call-a', paths: [join(root, 'approved.txt')] })
+    await expect(
+      guarded.write('other.txt', 'x', { mutationAccess: { sessionId: 'session-a', callId: 'call-a' } }),
+    ).rejects.toMatchObject({ code: 'ET-DENIED' })
+    await expect(
+      guarded.write('approved.txt', 'x', { mutationAccess: { sessionId: 'session-a', callId: 'call-b' } }),
+    ).rejects.toMatchObject({ code: 'ET-DENIED' })
+  })
+
+  it('edit 也必须消费同一类许可', async () => {
+    write('editable.txt', 'before')
+    const authority = createFsMutationAuthority()
+    const guarded = createLocalFs({ workspaceRoot: root, mutationAuthority: authority })
+    const access = { sessionId: 'session-a', callId: 'edit-a' }
+    authority.grant({ ...access, paths: [join(root, 'editable.txt')] })
+    await guarded.edit({ path: 'editable.txt', oldText: 'before', newText: 'after', mutationAccess: access })
+    expect((await guarded.read('editable.txt')).lines[0]?.text).toBe('after')
   })
 })
 

@@ -13,7 +13,10 @@
     "start": "tsx src/index.ts"
   },
   "dependencies": {
+    "@lcode/approval": "workspace:*",
     "@lcode/context": "workspace:*",
+    "@lcode/lcode-desktop": "workspace:*",
+    "@lcode/session": "workspace:*",
     "@lcode/session-api": "workspace:*",
     "@lcode/session-persistence-sqlite": "workspace:*",
     "@lcode/util": "workspace:*",

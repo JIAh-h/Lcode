@@ -46,6 +46,8 @@ export interface ShellRunOpts {
   readonly env?: Readonly<Record<string, string>> | undefined
   readonly timeoutMs?: number | undefined
   readonly signal?: AbortSignal | undefined
+  /** 后台作业的 owner；仅由受信任执行 scope 注入，模型参数不能指定它。 */
+  readonly ownerAgentId?: string | undefined
   /** 放到后台跑（立即返回 `jobId`，不等结果） */
   readonly runInBackground?: boolean | undefined
   /** 沙箱策略（由策略层从预设解出；执行器把它交给 `ctx.sandbox.wrap`） */

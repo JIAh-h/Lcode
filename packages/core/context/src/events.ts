@@ -38,6 +38,7 @@ export class EventBus {
     this.listeners.set(name, list)
     return () => {
       const cur = this.listeners.get(name)
+      /* c8 ignore next 2 -- disposer 只能由 on 创建，正常路径必然存在对应列表 */
       if (!cur) return
       const idx = cur.indexOf(entry)
       if (idx >= 0) cur.splice(idx, 1)

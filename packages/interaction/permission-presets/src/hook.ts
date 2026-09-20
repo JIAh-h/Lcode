@@ -1,10 +1,17 @@
 import type { Context } from '@lcode/context'
 import type { ApprovalService } from '@lcode/approval'
-import type { SessionService } from '@lcode/session'
+import { normalizePath } from '@lcode/fs'
+import type { FsMutationAuthority } from '@lcode/fs'
+import type { Impact, SessionService } from '@lcode/session'
+import '@lcode/sandbox'
+import type { SandboxService, SandboxStatus } from '@lcode/sandbox'
 import type { ToolActionIntent, ToolCall } from '@lcode/tools'
 import { ERROR_CODES } from '@lcode/util'
 import { evaluate } from './policy.ts'
-import type { PermissionPresetService } from './permission-presets.ts'
+import { knobsOf } from './permission-presets.ts'
+import type { PermissionPreset, PermissionPresetService } from './permission-presets.ts'
+import type { WorkspaceTrustService } from './workspace-trust.ts'
+import { resolve } from 'node:path'
 
 /**
  * 把权限判定接进工具流水线（12 §6.4；批次⑥）。
@@ -37,6 +44,8 @@ import type { PermissionPresetService } from './permission-presets.ts'
 /** 引擎传给每次工具执行的 scope（`ToolRegistry.execute` 的第三参） */
 export interface ToolExecutionScope {
   readonly sessionId: string
+  /** 发起这次工具调用的 agent；持久终端等资源用它作所有权边界。 */
+  readonly agentId: string
 }
 
 export interface PolicyHookOptions {
@@ -48,9 +57,21 @@ export interface PolicyHookOptions {
   readonly workspaceOf: (sessionId: string) => string | undefined
   /** 取会话（审批事件要落到它的日志里） */
   readonly getSession: (sessionId: string) => SessionService | undefined
+  /** 未明确可信的工作区只允许读取；此服务的持久化不属于工作区。 */
+  readonly workspaceTrust?: WorkspaceTrustService | undefined
+  /**
+   * 当前 OS 沙箱 Provider。它是可选依赖，便于纯策略测试；桌面运行时必须注入。
+   * Provider 报告降级时，策略层决定审批或拒绝，不能继续把裸执行当作受保护执行。
+   */
+  readonly sandbox?: SandboxService | undefined
   /** "项目已见命令集"（启发式；省略则不据它判定） */
   readonly seenCommands?: ReadonlySet<string> | undefined
   readonly seenDomains?: ReadonlySet<string> | undefined
+  /**
+   * 文件 Provider 的一次性写入许可。只在本 hook 最终放行之后签发，避免
+   * “审批已拒绝、底层却仍能直接写” 的能力旁路。
+   */
+  readonly mutationAuthority?: FsMutationAuthority | undefined
 }
 
 /**
@@ -66,7 +87,7 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
   const { ctx, approval, presets, workspaceOf } = options
 
   const handler = async (
-    payload: { call: ToolCall; intent?: ToolActionIntent; scope?: unknown; deny?: string },
+    payload: { call: ToolCall; intent?: ToolActionIntent; scope?: unknown; signal?: AbortSignal; deny?: string },
     next: () => Promise<unknown>,
   ): Promise<unknown> => {
     // 工具没申报意图 = 它声明自己无外部副作用（如纯计算的 todo_write）→ 放行
@@ -86,6 +107,13 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
     const workspaceRoot = workspaceOf(sessionId)
     if (workspaceRoot === undefined) {
       payload.deny = '拿不到这个会话的工作区根，无法判定路径边界（已按最保守方式拒绝）'
+      return next()
+    }
+
+    // 首次打开的目录默认不可信。读取仍可用于了解项目；写、shell 与终端等副作用
+    // 必须等用户在桌面弹窗/设置/CLI 显式授予精确目录信任后才进入后续策略与审批。
+    if (isMutationIntent(payload.intent) && options.workspaceTrust?.isTrusted(workspaceRoot) === false) {
+      payload.deny = '这个工作区尚未被信任；当前只允许读取。请先在工作区提示或设置中选择“信任此文件夹”。'
       return next()
     }
 
@@ -112,29 +140,154 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
       return next()
     }
 
+    const sandboxStatus = await statusForMutation(options.sandbox, payload.intent)
+    if (sandboxStatus?.degraded === true) {
+      const session = options.getSession(sessionId)
+      session?.append({
+        type: 'sandbox/degraded',
+        data: { reason: sandboxStatus.reason ?? '当前沙箱 Provider 未能强制约束此操作。', mechanism: sandboxStatus.mechanism },
+      })
+
+      // `never` 的含义不是“关闭询问就允许裸跑”。没有系统级边界时，不可询问
+      // 的自动/无人值守档必须拒绝；否则会把用户选择的“少打扰”变成“无防护”。
+      if (knobsOf(presets.get()).approvalPolicy === 'never') {
+        payload.deny = `当前沙箱不可用，${sandboxStatus.reason ?? '无法强制约束此操作'}；此预设不询问，已按最保守方式拒绝`
+        return next()
+      }
+
+      const degradation = sandboxImpact(sandboxStatus, presets.get())
+      const forced = verdict.kind === 'ask'
+        ? { kind: 'ask' as const, basis: { ...verdict.basis, reason: `${verdict.basis.reason}；${degradation.reason}` }, impact: mergeImpact(verdict.impact, degradation.impact) }
+        : { kind: 'ask' as const, basis: degradation.basis, impact: degradation.impact }
+      const result = await requestApproval({
+        approval,
+        call: payload.call,
+        intent: payload.intent,
+        session,
+        signal: payload.signal,
+        basis: forced.basis,
+        impact: forced.impact,
+      })
+      if (result !== 'allowed-once') payload.deny = denyReason(result)
+      else grantMutation(options.mutationAuthority, payload.call, sessionId, workspaceRoot, payload.intent)
+      return next()
+    }
+
     if (verdict.kind === 'ask') {
       // ── ask：问一次。**只有 allowed-once 才放行** ──
-      const result =
-        approval === undefined
-          ? ('unavailable' as const)
-          : await approval.ask({
-              callId: payload.call.callId,
-              action: {
-                tool: payload.call.name,
-                summary: payload.intent.summary,
-                ...(payload.intent.argv === undefined ? {} : { argv: payload.intent.argv }),
-              },
-              basis: verdict.basis,
-              impact: verdict.impact,
-            })
+      const result = await requestApproval({
+        approval,
+        call: payload.call,
+        intent: payload.intent,
+        session: options.getSession(sessionId),
+        signal: payload.signal,
+        basis: verdict.basis,
+        impact: verdict.impact,
+      })
       if (result !== 'allowed-once') payload.deny = denyReason(result)
     }
     // verdict.kind === 'allow' → 什么都不做
+
+    if (payload.deny === undefined) {
+      grantMutation(options.mutationAuthority, payload.call, sessionId, workspaceRoot, payload.intent)
+    }
 
     return next()
   }
 
   return ctx.on('tools/pre-execute', handler as never)
+}
+
+function isSandboxRelevant(intent: ToolActionIntent): boolean {
+  return isMutationIntent(intent)
+}
+
+async function statusForMutation(sandbox: SandboxService | undefined, intent: ToolActionIntent): Promise<SandboxStatus | undefined> {
+  if (sandbox === undefined || !isSandboxRelevant(intent)) return undefined
+  try {
+    return await sandbox.status()
+  } catch {
+    // 无法读取 Provider 状态和明确的 degraded 等价：不能把“状态查询出错”解释成安全。
+    return {
+      available: false,
+      mechanism: 'unknown',
+      knownEscapeSurfaces: ['沙箱状态不可读取'],
+      degraded: true,
+      reason: '无法读取当前沙箱状态，无法确认系统级约束是否生效。',
+      capabilities: {
+        platform: process.platform,
+        mechanism: 'unknown',
+        boundaries: {
+          filesystem: { state: 'unavailable', plannedMechanism: 'unknown', message: '沙箱状态不可读取' },
+          network: { state: 'unavailable', plannedMechanism: 'unknown', message: '沙箱状态不可读取' },
+          spawn: { state: 'unavailable', plannedMechanism: 'unknown', message: '沙箱状态不可读取' },
+        },
+        reason: '沙箱状态不可读取',
+      },
+    }
+  }
+}
+
+function sandboxImpact(status: SandboxStatus, preset: PermissionPreset): {
+  readonly basis: { readonly source: 'preset'; readonly reason: string; readonly presetName: PermissionPreset }
+  readonly impact: Impact
+  readonly reason: string
+} {
+  const reason = status.reason ?? `当前 ${status.mechanism} 沙箱未能强制约束此操作`
+  return {
+    basis: { source: 'preset', reason: `当前操作没有系统级沙箱约束：${reason}`, presetName: preset },
+    impact: { sandbox: { status: 'degraded', mechanism: status.mechanism, reason } },
+    reason,
+  }
+}
+
+function mergeImpact(left: Impact, right: Impact): Impact {
+  return { ...left, ...right }
+}
+
+async function requestApproval(input: {
+  readonly approval: ApprovalService | undefined
+  readonly call: ToolCall
+  readonly intent: ToolActionIntent
+  readonly session: SessionService | undefined
+  readonly signal: AbortSignal | undefined
+  readonly basis: Parameters<ApprovalService['ask']>[0]['basis']
+  readonly impact: Impact
+}): Promise<'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'> {
+  if (input.approval === undefined) return 'unavailable'
+  return input.approval.ask(
+    {
+      callId: input.call.callId,
+      action: {
+        tool: input.call.name,
+        summary: input.intent.summary,
+        ...(input.intent.argv === undefined ? {} : { argv: input.intent.argv }),
+      },
+      basis: input.basis,
+      impact: input.impact,
+    },
+    { session: input.session, ...(input.signal === undefined ? {} : { signal: input.signal }) },
+  )
+}
+
+function isMutationIntent(intent: ToolActionIntent): boolean {
+  return intent.argv !== undefined || intent.paths?.some((path) => path.mode === 'write') === true
+}
+
+/** 只签发 write 路径；read/shell 等其它能力不会借文件 broker 获得权限。 */
+function grantMutation(
+  authority: FsMutationAuthority | undefined,
+  call: ToolCall,
+  sessionId: string,
+  workspaceRoot: string,
+  intent: ToolActionIntent,
+): void {
+  if (authority === undefined) return
+  const paths = (intent.paths ?? [])
+    .filter((path) => path.mode === 'write')
+    .map((path) => normalizePath(resolve(workspaceRoot, path.path)))
+  if (paths.length === 0) return
+  authority.grant({ sessionId, callId: call.callId, paths })
 }
 
 /** 从 scope 里取出会话 id（形状由引擎保证；非本形状一律当作"拿不到"） */

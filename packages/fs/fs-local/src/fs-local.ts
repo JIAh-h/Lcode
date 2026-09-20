@@ -6,6 +6,8 @@ import type {
   FsGlobResult,
   FsGrepOpts,
   FsGrepResult,
+  FsMutationAccess,
+  FsMutationAuthority,
   FsReadOpts,
   FsReadResult,
   FsService,
@@ -39,6 +41,8 @@ import { dirname, join, relative, resolve } from 'node:path'
 export interface LocalFsOptions {
   /** 工作区根（**仅用于把相对路径解析成绝对路径**，不做边界判定） */
   readonly workspaceRoot: string
+  /** 配置后，所有 write/edit 都必须消费一次由策略层签发的精确写入许可。 */
+  readonly mutationAuthority?: FsMutationAuthority | undefined
 }
 
 const DEFAULT_READ_LIMIT = 2000
@@ -46,6 +50,42 @@ const DEFAULT_MAX_RESULTS = 500
 
 /** 目录遍历时跳过的名字（否则 `node_modules` 一项就能吃掉全部预算） */
 const SKIP_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.next', 'out', 'target'])
+
+/**
+ * 内存 broker：授权绑定至一次工具调用与精确规范化路径，consume 后立即删除。
+ * 它不替代 OS 沙箱；职责是把“策略已放行”安全传递到唯一的本机文件 Provider。
+ */
+export function createFsMutationAuthority(): FsMutationAuthority {
+  const grants = new Map<string, ReadonlySet<string>>()
+  const keyOf = (access: FsMutationAccess): string => `${access.sessionId}\u0000${access.callId}`
+  return {
+    grant(grant): void {
+      if (grant.sessionId === '' || grant.callId === '' || grant.paths.length === 0) return
+      grants.set(keyOf(grant), new Set(grant.paths.map((path) => normalizePath(resolve(path)))))
+    },
+    consume(access, path): void {
+      if (access === undefined || access.sessionId === '' || access.callId === '') {
+        throw new LcodeErrorImpl({
+          code: ERROR_CODES.ET_DENIED,
+          message: '文件写入缺少策略签发的一次性许可',
+          userMessage: '这次文件修改没有得到有效授权，已拒绝执行。',
+          retryable: false,
+        })
+      }
+      const key = keyOf(access)
+      const paths = grants.get(key)
+      grants.delete(key)
+      const target = normalizePath(resolve(path))
+      if (paths?.has(target) === true) return
+      throw new LcodeErrorImpl({
+        code: ERROR_CODES.ET_DENIED,
+        message: `文件写入不在本次授权范围内：${target}`,
+        userMessage: '这次文件修改不在已批准的路径范围内，已拒绝执行。',
+        retryable: false,
+      })
+    },
+  }
+}
 
 function invalid(message: string, userMessage: string): LcodeErrorImpl {
   return new LcodeErrorImpl({ code: ERROR_CODES.ET_INVALID_ARGS, message, userMessage, retryable: false })
@@ -93,18 +133,34 @@ export function createLocalFs(options: LocalFsOptions): FsService {
 
     async write(path: string, data: string, opts: FsWriteOpts = {}): Promise<FsWriteResult> {
       const file = abs(path)
+      options.mutationAuthority?.consume(opts.mutationAccess, file)
       const created = !(await exists(file))
+      let before = ''
+      if (!created) {
+        try {
+          before = await readFile(file, 'utf8')
+        } catch (err) {
+          throw ioFailed(`写入前读取失败：${file}`, err)
+        }
+      }
       try {
         if (opts.createDirs !== false) await mkdir(dirname(file), { recursive: true })
         await writeFile(file, data, 'utf8')
       } catch (err) {
         throw ioFailed(`写入失败：${file}`, err)
       }
-      return { path: file, bytesWritten: Buffer.byteLength(data, 'utf8'), created }
+      const oldLines = linesOf(before)
+      return {
+        path: file,
+        bytesWritten: Buffer.byteLength(data, 'utf8'),
+        created,
+        hunks: [{ start: 1, end: oldLines.length, oldLines, newLines: linesOf(data) }],
+      }
     },
 
     async edit(input: FsEditInput): Promise<FsEditResult> {
       const file = abs(input.path)
+      options.mutationAuthority?.consume(input.mutationAccess, file)
       let text: string
       try {
         text = await readFile(file, 'utf8')
@@ -240,6 +296,13 @@ function readFileSyncText(file: string): string {
   // 并不带来并发收益（真正的并发要按批 gather，那是性能优化之后再做的事）。
   // 注意要 `import { readFileSync } from 'node:fs'`，ESM 下没有 require。
   return readFileSync(file, 'utf8')
+}
+
+function linesOf(text: string): readonly string[] {
+  if (text === '') return []
+  const lines = text.split('\n')
+  if (lines.at(-1) === '') lines.pop()
+  return lines
 }
 
 function countOccurrences(text: string, needle: string): number {

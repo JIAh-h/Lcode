@@ -1,53 +1,205 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
+import type { SessionEvent } from '@lcode/session'
 import { t } from '../i18n/index.ts'
+import { ToolCard, type ToolCardCall, type ToolCardResult } from '../components/ToolCard.tsx'
+import { sessionBridge, type FileCheckpointMeta, type HistorySnapshot, type SessionMeta, type ReplayToolCall } from '../store/sessionBridge.ts'
 
-/**
- * P3 回放（文档 19 §3.3）：选中该步 → 看三快照（system / 工具 / 消息）。
- * 回到任意一步，看到当时**确切**的输入与输出（可解释优先于聪明）。
- *
- * 本页同时承载 **P7 的入口**：文档 19 §3.7 原本把「从这里重新开始」挂在
- * 时间轴脊柱上，该元素已于 2026-09-14 作废（[ADR-0106](../../../docs/17-架构决策记录ADR.md#adr-0106)），
- * 入口随之迁到本页——「选中一步 → 从这里重新开始」与原设计语义等价
- * （都是"从某个检查点分叉"，且旧会话完整保留）。
- */
+type Step = {
+  readonly turn: number
+  readonly step: number
+  readonly endSeq: number
+}
+
+function stepOf(event: SessionEvent): { turn: number; step: number } | null {
+  if (event.type !== 'step/start' && event.type !== 'step/end' && event.type !== 'tool/call') return null
+  const data = event.data as { turn?: unknown; step?: unknown }
+  return typeof data.turn === 'number' && typeof data.step === 'number' ? { turn: data.turn, step: data.step } : null
+}
+
 export function ReplayPage() {
   const { sessionId } = useParams()
   const navigate = useNavigate()
-  const [step, setStep] = useState(1)
-  const sid = sessionId ?? 'demo-1'
+  const [events, setEvents] = useState<readonly SessionEvent[]>([])
+  const [meta, setMeta] = useState<SessionMeta | null>(null)
+  const [selected, setSelected] = useState<string>('')
+  const [snapshot, setSnapshot] = useState<HistorySnapshot | null>(null)
+  const [checkpoints, setCheckpoints] = useState<readonly { readonly turn: number; readonly end_seq: number; readonly ended_at: number; readonly reason: string }[]>([])
+  const [fileCheckpoints, setFileCheckpoints] = useState<readonly FileCheckpointMeta[]>([])
+  const [restoring, setRestoring] = useState<string | null>(null)
+  const [restoreMessage, setRestoreMessage] = useState('')
 
+  useEffect(() => {
+    if (sessionId === undefined) return
+    const api = sessionBridge()
+    if (api === undefined) return
+    let alive = true
+    void Promise.all([api.open(sessionId), api.checkpoints({ session_id: sessionId }), api.fileCheckpoints({ session_id: sessionId })]).then(([opened, closed, files]) => {
+      if (!alive) return
+      setMeta(opened.meta)
+      setEvents(opened.events)
+      setCheckpoints(closed)
+      setFileCheckpoints(files)
+    }).catch(() => {
+      if (alive) {
+        setCheckpoints([])
+        setFileCheckpoints([])
+      }
+    })
+    return () => {
+      alive = false
+    }
+  }, [sessionId])
+
+  async function restoreCheckpoint(checkpoint: FileCheckpointMeta): Promise<void> {
+    if (sessionId === undefined || restoring !== null) return
+    if (!window.confirm(t('确定把工作区恢复到第 {n} 轮的文件状态吗？', { n: checkpoint.turn }))) return
+    const api = sessionBridge()
+    if (api === undefined) return
+    setRestoring(checkpoint.checkpointId)
+    setRestoreMessage('')
+    try {
+      const result = await api.restoreCheckpoint({ session_id: sessionId, checkpoint_id: checkpoint.checkpointId })
+      setRestoreMessage(t('已恢复 {n} 个文件，移除 {m} 个后续文件。', { n: result.restoredPaths.length, m: result.removedPaths.length }))
+      const [opened, files] = await Promise.all([api.open(sessionId), api.fileCheckpoints({ session_id: sessionId })])
+      setEvents(opened.events)
+      setMeta(opened.meta)
+      setFileCheckpoints(files)
+    } catch {
+      setRestoreMessage(t('恢复失败，工作区没有被标记为已恢复。'))
+    } finally {
+      setRestoring(null)
+    }
+  }
+
+  const steps = useMemo(() => {
+    const result: Step[] = []
+    for (const event of events) {
+      if (event.type !== 'step/end') continue
+      const value = stepOf(event)
+      if (value !== null) result.push({ ...value, endSeq: event.seq })
+    }
+    return result
+  }, [events])
+  const current = steps.find((step) => `${step.turn}:${step.step}` === selected) ?? steps[steps.length - 1]
+  const boundary = current === undefined ? events.length : current.endSeq + 1
+  const replayCards = useMemo(() => {
+    if (snapshot === null) return []
+    return snapshot.toolCalls.map((item: ReplayToolCall) => {
+      const resultEvent = events.find((event) => event.type === 'tool/result' && event.data.message.toolCallId === item.call.call_id && event.seq > item.call.seq)
+      const call: ToolCardCall = {
+        seq: item.call.seq,
+        callId: item.call.call_id,
+        name: item.call.name,
+        arguments: item.call.arguments,
+        ...(item.call.card === undefined ? {} : { card: item.call.card }),
+      }
+      const result: ToolCardResult | undefined = item.result === undefined
+        ? undefined
+        : {
+            message: item.result,
+            ...(resultEvent?.type === 'tool/result' && resultEvent.data.meta === undefined ? {} : resultEvent?.type === 'tool/result' ? { meta: resultEvent.data.meta } : {}),
+            ...(resultEvent?.type === 'tool/result' && resultEvent.data.error === undefined ? {} : resultEvent?.type === 'tool/result' ? { error: resultEvent.data.error } : {}),
+          }
+      return { call, result, resultSeq: resultEvent?.type === 'tool/result' ? resultEvent.seq : undefined }
+    })
+  }, [events, snapshot])
+
+  useEffect(() => {
+    if (sessionId === undefined || current === undefined) {
+      setSnapshot(null)
+      return
+    }
+    const api = sessionBridge()
+    if (api === undefined) return
+    let alive = true
+    void api
+      .history({ session_id: sessionId, up_to_seq: current.endSeq })
+      .then((next) => {
+        if (alive) setSnapshot(next)
+      })
+      .catch(() => {
+        // 没有模型请求（例如本轮在模型配置校验阶段失败）不是回放页崩溃条件。
+        if (alive) setSnapshot(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [sessionId, current?.endSeq])
+
+  if (sessionId === undefined) return null
   return (
     <main className="page replay">
-      <h2>{t('回放 · 第 {n} 步', { n: step })}</h2>
+      <h2>{t('回放 · {name}', { name: meta?.title || sessionId })}</h2>
       <div className="replay-layout">
         <div className="replay-list">
-          {[1, 2, 3, 4].map((s) => (
-            <button key={s} className={`replay-item${s === step ? ' active' : ''}`} onClick={() => setStep(s)}>
-              {t('第 {n} 步', { n: s })}
-            </button>
-          ))}
+          {steps.length === 0 && <div className="pickhint">{t('当前会话还没有完成的步骤')}</div>}
+          {steps.map((step) => {
+            const key = `${step.turn}:${step.step}`
+            return (
+              <button
+                key={key}
+                className={`replay-item${current?.turn === step.turn && current.step === step.step ? ' active' : ''}`}
+                onClick={() => setSelected(key)}
+              >
+                {t('第 {n} 步', { n: step.step })} · {t('第 {n} 轮', { n: step.turn })}
+              </button>
+            )
+          })}
         </div>
         <div className="replay-snapshots">
+          <section className="snap checkpoints">
+            <h4>{t('已闭合检查点')}</h4>
+            {checkpoints.length === 0 ? <div className="pickhint">{t('当前会话还没有可用检查点')}</div> : (
+              <div className="checkpoint-list">
+                {checkpoints.map((checkpoint) => <span className="checkpoint" key={checkpoint.end_seq}>{t('第 {n} 轮', { n: checkpoint.turn })} · {checkpoint.reason}</span>)}
+              </div>
+            )}
+            {fileCheckpoints.length > 0 && <div className="checkpoint-list file-checkpoints">
+              {fileCheckpoints.map((checkpoint) => <div className="checkpoint-row" key={checkpoint.checkpointId}>
+                <span className="checkpoint">{t('第 {n} 轮', { n: checkpoint.turn })} · {checkpoint.files.length} {t('个文件')}</span>
+                <button className="btn" disabled={restoring !== null || checkpoint.partial} onClick={() => void restoreCheckpoint(checkpoint)}>
+                  {restoring === checkpoint.checkpointId ? t('恢复中…') : t('恢复到此状态')}
+                </button>
+              </div>)}
+            </div>}
+            {restoreMessage !== '' && <div className="pickhint">{restoreMessage}</div>}
+          </section>
           <section className="snap">
             <h4>{t('系统提示（当时的确切内容）')}</h4>
-            <pre className="mono">{t('… 该步装配后的 system 快照 …')}</pre>
+            <pre className="mono">{snapshot === null ? t('该步骤没有记录模型请求') : JSON.stringify(snapshot.header, null, 2)}</pre>
           </section>
           <section className="snap">
             <h4>{t('工具调用')}</h4>
-            <pre className="mono">read src/parse.ts (1..80)</pre>
+            {replayCards.length === 0 ? <div className="pickhint">{t('该步骤没有工具调用')}</div> : (
+              <div className="replay-cards">
+                {replayCards.map((item) => <ToolCard key={item.call.callId} sessionId={sessionId} call={item.call} result={item.result} resultSeq={item.resultSeq} />)}
+              </div>
+            )}
+          </section>
+          <section className="snap">
+            <h4>{t('决策记录')}</h4>
+            <pre className="mono">{snapshot === null || snapshot.decisions.length === 0 ? t('该步骤没有权限决策记录') : JSON.stringify(snapshot.decisions, null, 2)}</pre>
           </section>
           <section className="snap">
             <h4>{t('模型可见消息')}</h4>
-            <pre className="mono">[user] 把 parse.ts 换成结构化解析</pre>
+            <pre className="mono">
+              {snapshot === null || snapshot.messages.length === 0 ? t('该步骤没有可见消息') : JSON.stringify(snapshot.messages, null, 2)}
+            </pre>
           </section>
         </div>
       </div>
-
-      {/* P7 入口：从当前选中的这一步重新开始（旧会话保留） */}
       <div className="page-actions">
-        <button className="btn primary" onClick={() => navigate(`/sessions/${sid}/fork`)}>
-          {t('从第 {n} 步重新开始', { n: step })}
+        <button
+          className="btn primary"
+          disabled={current === undefined}
+          onClick={() =>
+            navigate(`/sessions/${sessionId}/fork`, {
+              state: { boundary, step: current?.step ?? 0, title: meta?.title },
+            })
+          }
+        >
+          {t('从第 {n} 步重新开始', { n: current?.step ?? 0 })}
         </button>
       </div>
     </main>

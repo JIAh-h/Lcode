@@ -1,4 +1,5 @@
 import { createContext } from '@lcode/context'
+import { createDesktopModelFeature } from '@lcode/lcode-desktop'
 import { LocalSessionsApi } from '@lcode/session-api'
 import { initZstd } from '@lcode/session-persistence-jsonl'
 import { resolveLcodeHome } from '@lcode/util'
@@ -13,7 +14,7 @@ import { resolveLcodeHome } from '@lcode/util'
  * `--storage` 是**存储占用 + 保留策略维护**（22 §9.2 / T6.2）：报告分项占用，
  * 并清理到期的回收站条目与超限的缓存。**它绝不删会话。**
  *
- * `model` / `sandbox` 两档仍是占位：它们分别等批次 ④ 的六层配置与批次 ⑥ 的沙箱。
+ * `model` 已复用桌面端模型装配；`sandbox` 仍是占位，等待批次 ⑥ 的三平台实现。
  */
 
 export type DoctorMode = 'basic' | 'model' | 'sandbox' | 'index' | 'storage'
@@ -40,6 +41,7 @@ export async function runDoctor(mode: DoctorMode): Promise<number> {
   await initCliRuntime()
   if (mode === 'index') return runIndexDoctor()
   if (mode === 'storage') return runStorageDoctor()
+  if (mode === 'model') return runModelDoctor()
   return runEnvironmentDoctor(mode)
 }
 
@@ -158,10 +160,6 @@ async function runEnvironmentDoctor(mode: 'basic' | 'model' | 'sandbox'): Promis
   const ctx = createContext()
   console.log(`Lcode doctor · Node ${process.version} · ${process.platform} ${process.arch}`)
 
-  if (mode === 'model') {
-    console.log('\n[model] 骨架阶段：六层配置解析随批次 ④ 落地')
-    console.log('  生效来源将在此打印（与桌面端「设置 → 模型」一致，FR-MODEL-009）')
-  }
   if (mode === 'sandbox') {
     console.log('\n[sandbox] 骨架阶段：沙箱实现随批次 ⑥ 落地')
     console.log(
@@ -171,4 +169,29 @@ async function runEnvironmentDoctor(mode: 'basic' | 'model' | 'sandbox'): Promis
 
   void ctx
   return 0
+}
+
+/** 模型诊断与设置页共用同一套装配；只输出来源和引用，不输出凭据值。 */
+async function runModelDoctor(): Promise<number> {
+  const feature = await createDesktopModelFeature({ home: resolveLcodeHome() })
+  try {
+    const custom = await feature.listCustom()
+    const current = await feature.api.getDefault()
+    console.log(`Lcode doctor · 模型 · 配置来源：本机设置`)
+    console.log(`  已注册供应商：${custom.length}`)
+    for (const item of custom) {
+      const selected = current?.provider === item.name && current.model === item.model ? '（当前默认）' : ''
+      console.log(`  ${item.label} · ${item.model}${selected}`)
+      console.log(`    地址：${item.base_url}`)
+      console.log(`    密钥：引用 ${item.api_key_ref}（值不会显示）`)
+    }
+    if (current === undefined) {
+      console.log('  默认模型：未设置')
+      return 1
+    }
+    console.log(`  默认模型：${current.provider} / ${current.model}（来源：本机设置）`)
+    return 0
+  } finally {
+    feature.dispose()
+  }
 }

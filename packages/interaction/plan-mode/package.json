@@ -13,6 +13,8 @@
   "dependencies": {
     "@lcode/session": "workspace:*",
     "@lcode/context": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
+    "@lcode/tools": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {

@@ -1,1 +1,9 @@
-export type { JobHandle, JobsService } from './jobs.ts'
+export type {
+  JobCompletion,
+  JobReadResult,
+  JobRunContext,
+  JobSnapshot,
+  JobStartInput,
+  JobStatus,
+  JobsService,
+} from './jobs.ts'

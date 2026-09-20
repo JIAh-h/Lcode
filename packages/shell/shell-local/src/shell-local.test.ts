@@ -1,10 +1,14 @@
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { createLocalShell } from './shell-local.ts'
-import type { JobRegistry } from './shell-local.ts'
+import { createLocalJobs } from '@lcode/jobs-local'
+import type { JobsService } from '@lcode/jobs'
 import type { ShellService } from '@lcode/shell'
+import { createLocalSubprocess } from '@lcode/subprocess-local'
+import type { SpawnOpts, SpawnedProcess, SubprocessService } from '@lcode/subprocess'
 
 /**
  * `shell-local` 验收（04 §5.3 的 M-TOOL-04/05）。
@@ -17,29 +21,39 @@ import type { ShellService } from '@lcode/shell'
 
 let root = ''
 let shell: ShellService
-let jobs: JobRegistry & { list(): readonly string[] }
+let jobs: JobsService
 
 beforeEach(() => {
   root = mkdtempSync(join(tmpdir(), 'lcode-sh-'))
-  const reg = new Map<string, { argv: readonly string[]; kill: () => Promise<void> }>()
-  jobs = {
-    add: (e) => reg.set(e.jobId, { argv: e.argv, kill: e.kill }),
-    get: (id) => reg.get(id),
-    list: () => [...reg.keys()],
-  }
+  jobs = createLocalJobs()
   shell = createLocalShell({ workspaceRoot: root, jobs }).shell
 })
 
-afterEach(() => {
-  rmSync(root, { recursive: true, force: true })
+afterEach(async () => {
+  await jobs.dispose()
+  await removeTempDir(root)
 })
+
+async function removeTempDir(path: string): Promise<void> {
+  await rm(path, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  })
+}
 
 const node = process.execPath
 
 describe('前台执行：退出码与输出', () => {
   it('成功命令：exitCode 0，stdout 有内容', async () => {
     const r = await shell.run([node, '-e', 'process.stdout.write("hello")'])
-    expect(r).toMatchObject({ kind: 'foreground', exitCode: 0, timedOut: false, aborted: false })
+    expect(r).toMatchObject({
+      kind: 'foreground',
+      exitCode: 0,
+      timedOut: false,
+      aborted: false,
+    })
     if (r.kind !== 'foreground') throw new Error('应为前台')
     expect(r.stdout).toBe('hello')
     expect(r.stderr).toBe('')
@@ -69,7 +83,9 @@ describe('超时：必须杀掉整个进程树', () => {
     const started = Date.now()
     // 子进程挂 10s；超时 300ms 就该被杀掉。若只 kill 顶层而不杀树，
     // 这个 node 会继续跑到 10s —— 那会让这个断言"看起来通过"却留了孤儿。
-    const r = await shell.run([node, '-e', 'setTimeout(()=>{},10000)'], { timeoutMs: 300 })
+    const r = await shell.run([node, '-e', 'setTimeout(()=>{},10000)'], {
+      timeoutMs: 300,
+    })
     const elapsed = Date.now() - started
     if (r.kind !== 'foreground') throw new Error('应为前台')
     expect(r.timedOut).toBe(true)
@@ -88,7 +104,10 @@ describe('取消：aborted 与 timedOut 是两个不同的事实', () => {
   it('外部 abort → aborted=true', async () => {
     const ctrl = new AbortController()
     setTimeout(() => ctrl.abort(), 200)
-    const r = await shell.run([node, '-e', 'setTimeout(()=>{},10000)'], { signal: ctrl.signal, timeoutMs: 10000 })
+    const r = await shell.run([node, '-e', 'setTimeout(()=>{},10000)'], {
+      signal: ctrl.signal,
+      timeoutMs: 10000,
+    })
     if (r.kind !== 'foreground') throw new Error('应为前台')
     expect(r.aborted).toBe(true)
     // 被取消不是因为超时——两个字段分开正是为了让上层能区分
@@ -110,7 +129,10 @@ describe('沙箱：降级必须如实上报', () => {
       // 一个"假沙箱"：在 argv 前面插一段忽略参数的 node 脚本
       wrap: async (argv) => {
         wrapped.push([...argv])
-        return { enforced: true, wrappedArgv: [node, '-e', 'process.stdout.write("sandboxed")', ...argv] }
+        return {
+          enforced: true,
+          wrappedArgv: [node, '-e', 'process.stdout.write("sandboxed")', ...argv],
+        }
       },
     }).shell
     const r = await s.run([node, '-e', 'process.stdout.write("raw")'])
@@ -122,16 +144,37 @@ describe('沙箱：降级必须如实上报', () => {
   })
 })
 
+describe('执行 Provider', () => {
+  it('Shell 把包装后的 argv 委托给可替换的 subprocess Provider', async () => {
+    const local = createLocalSubprocess()
+    const seen: SpawnOpts[] = []
+    const subprocess: SubprocessService = {
+      async spawn(opts): Promise<SpawnedProcess> {
+        seen.push(opts)
+        return await local.spawn(opts)
+      },
+    }
+    const s = createLocalShell({ workspaceRoot: root, subprocess }).shell
+    const result = await s.run([node, '-e', 'process.stdout.write("provider")'])
+    if (result.kind !== 'foreground') throw new Error('应为前台')
+    expect(result.stdout).toBe('provider')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.argv).toEqual([node, '-e', 'process.stdout.write("provider")'])
+  })
+})
+
 describe('后台作业', () => {
   it('返回 jobId 并且**不阻塞**（毫秒级返回）', async () => {
     const started = Date.now()
-    const r = await shell.run([node, '-e', 'setTimeout(()=>{},5000)'], { runInBackground: true })
+    const r = await shell.run([node, '-e', 'setTimeout(()=>{},5000)'], {
+      runInBackground: true,
+    })
     const elapsed = Date.now() - started
     expect(r).toMatchObject({ kind: 'background' })
     expect(elapsed).toBeLessThan(2000)
     if (r.kind !== 'background') throw new Error('应为后台')
-    expect(jobs.list()).toContain(r.jobId)
-    await jobs.get(r.jobId)!.kill()
+    expect(jobs.list()).toEqual(expect.arrayContaining([expect.objectContaining({ jobId: r.jobId, status: 'running' })]))
+    await jobs.kill({ jobId: r.jobId })
   })
 
   it('没装配 jobs 时**报错**，而不是假装在跑', async () => {
@@ -140,11 +183,28 @@ describe('后台作业', () => {
       code: 'EC-NOT_READY',
     })
   })
+
+  it('外层调用取消不会停止已经发布的作业', async () => {
+    const outer = new AbortController()
+    const r = await shell.run([node, '-e', 'setTimeout(()=>{},10000)'], {
+      runInBackground: true,
+      signal: outer.signal,
+      ownerAgentId: 'agent-a',
+    })
+    if (r.kind !== 'background') throw new Error('应为后台')
+    outer.abort()
+    // 给外层 abort 一个事件循环；后台必须仍由 jobs 自己的 signal 管理。
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(jobs.status({ jobId: r.jobId, ownerAgentId: 'agent-a' }).status).toBe('running')
+    await jobs.kill({ jobId: r.jobId, ownerAgentId: 'agent-a' })
+  })
 })
 
 describe('边界', () => {
   it('空 argv → ET-INVALID_ARGS', async () => {
-    await expect(shell.run([])).rejects.toMatchObject({ code: 'ET-INVALID_ARGS' })
+    await expect(shell.run([])).rejects.toMatchObject({
+      code: 'ET-INVALID_ARGS',
+    })
   })
 
   it('cwd 生效', async () => {

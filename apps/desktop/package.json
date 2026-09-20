@@ -8,6 +8,8 @@
     "dev": "concurrently -k \"vite\" \"node scripts/build-main.mjs --watch\" \"wait-on http://localhost:5173 tcp:5173 && node scripts/dev-electron.mjs\"",
     "build:electron": "node scripts/build-main.mjs",
     "build": "npm run build:renderer && npm run build:electron",
+    "package:portable": "npm run build && node scripts/package-portable.mjs",
+    "smoke:portable": "node scripts/smoke-portable.mjs",
     "start": "electron .",
     "typecheck": "tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.json --noEmit",
     "build:main": "node scripts/build-main.mjs",

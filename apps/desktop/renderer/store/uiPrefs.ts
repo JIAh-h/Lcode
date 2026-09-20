@@ -37,9 +37,9 @@ export type PermissionPreset = (typeof PERMISSION_PRESETS)[number]
 export const PERMISSION_PRESET_HINT: Readonly<Record<PermissionPreset, string>> = {
   只读: '它只能看，不能改',
   标准: '能改我的项目，动手前问我',
-  自动: '工作区内自己干，不打扰我',
+  自动: '受系统级沙箱约束时，工作区内自行执行',
   完全访问: '哪里都能碰，但动手前问我',
-  无人值守: '用于自动化，不打扰我',
+  无人值守: '受系统级沙箱约束时用于自动化',
 }
 
 export interface UiPrefs {

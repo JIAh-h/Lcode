@@ -4,8 +4,11 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { ChipGroup, Seg, Select, Switch, SwitchRow, TextArea, TextInput } from '../components/controls.tsx'
 import { toast } from '../components/toast.ts'
 import { setLocale, t, useLocale } from '../i18n/index.ts'
-import { setPermissionPreset, useUiPrefs } from '../store/uiPrefs.ts'
+import { useUiPrefs } from '../store/uiPrefs.ts'
+import { choosePermissionPreset, syncPermissionPresetFromMain } from '../store/permissionSync.ts'
+import type { PermissionPresetState } from '../store/permissionSync.ts'
 import { chooseDefaultModel, syncModelsFromMain } from '../store/modelSync.ts'
+import { workspaceTrustBridge } from '../store/sessionBridge.ts'
 import type { PermissionPreset } from '../store/uiPrefs.ts' // 模型条目类型 ModelEntry 也定义在 store/uiPrefs
 
 /**
@@ -865,15 +868,28 @@ function hostOf(url: string): string {
 /** 五个产品层字面量，写死自文档 12 §3.3（底层是 sandbox/mode × approval/policy 的打包） */
 const PERM_PILLS: readonly { id: PermissionPreset; ic: string; pd: string }[] = [
   { id: '只读', ic: 'RO', pd: '不会改动任何文件，适合先让它看代码' },
-  { id: '标准', ic: 'ST', pd: '工作区内自动执行；改工作区外、跑有风险的命令前先问' },
-  { id: '自动', ic: 'AU', pd: '工作区内自己干，不打扰你' },
+  { id: '标准', ic: 'ST', pd: '受保护时可在工作区执行；沙箱降级时改动前确认' },
+  { id: '自动', ic: 'AU', pd: '仅在系统级沙箱可用时自动执行；否则拒绝改动' },
   { id: '完全访问', ic: 'FU', pd: '哪里都能碰，但动手前问你' },
-  { id: '无人值守', ic: 'CI', pd: '用于自动化，不打扰你；建议配合最严守卫' },
+  { id: '无人值守', ic: 'CI', pd: '仅在系统级沙箱可用时用于自动化；否则拒绝改动' },
 ]
 
 function PermSection() {
   const prefs = useUiPrefs()
   const cur = prefs.permissionPreset
+  const [state, setState] = useState<PermissionPresetState | undefined>()
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    void syncPermissionPresetFromMain().then(setState).catch(() => setState(undefined))
+  }, [])
+  const selectPreset = (preset: PermissionPreset): void => {
+    if (saving || preset === cur) return
+    setSaving(true)
+    void choosePermissionPreset(preset)
+      .then(setState)
+      .catch(() => toast(t('权限预设保存失败')))
+      .finally(() => setSaving(false))
+  }
   return (
     <>
       <h2>{t('权限预设')}</h2>
@@ -883,17 +899,35 @@ function PermSection() {
         <div className="srow">
           <div className="sr" style={{ gap: 10, flexWrap: 'wrap' }}>
             {PERM_PILLS.map((p) => (
-              <div key={p.id} className={'pill' + (cur === p.id ? ' on' : '')} onClick={() => setPermissionPreset(p.id)}>
+              <button key={p.id} type="button" className={'pill' + (cur === p.id ? ' on' : '')} onClick={() => selectPreset(p.id)} disabled={saving}>
                 <div className="pic">{p.ic}</div>
                 <div>
                   <div className="pn">{t(p.id)}</div>
                   <div className="pd">{t(p.pd)}</div>
                 </div>
                 <span className={'st2' + (cur === p.id ? ' ok' : '')}>{cur === p.id ? t('当前') : '　'}</span>
-              </div>
+              </button>
             ))}
           </div>
         </div>
+      </div>
+      <div className="sect">
+        <div className="sh2">{t('当前生效')}</div>
+        <div className="srow">
+          <div className="sl">{t('来源')}</div>
+          <div className="sr">
+            <span className="src">{state?.source === 'user' ? t('本机设置') : t('默认设置')}</span>
+            <span className="src">{t('策略在主进程执行；未信任的工作区仍保持只读。')}</span>
+          </div>
+        </div>
+        {state !== undefined && state.audit.length > 0 ? (
+          <div className="srow">
+            <div className="sl">{t('最近切换')}</div>
+            <div className="sr">
+              {state.audit.slice(0, 3).map((entry) => <span className="src" key={`${entry.changedAt}-${entry.to}`}>{entry.from} → {entry.to} · {new Date(entry.changedAt).toLocaleString()}</span>)}
+            </div>
+          </div>
+        ) : null}
       </div>
       <div className="sect">
         <div className="sh2">{t('细则')}</div>
@@ -916,10 +950,31 @@ function PermSection() {
 /* ───────── 分区：工作区信任 ───────── */
 
 function TrustSection() {
-  const [trusted, setTrusted] = useState([
-    { path: '~/code/web-app', files: '1,284 个文件', at: '2026-08-02 信任' },
-    { path: '~/code/api-server', files: '862 个文件', at: '2026-07-18 信任' },
-  ])
+  const [trusted, setTrusted] = useState<readonly { readonly path: string; readonly trustedAt: number }[]>([])
+  const refresh = (): void => {
+    void workspaceTrustBridge()?.list().then((items) => setTrusted(items)).catch(() => setTrusted([]))
+  }
+  useEffect(refresh, [])
+  const addFolder = async (): Promise<void> => {
+    const path = await window.lcode.chooseFolder(t('选择项目文件夹'))
+    if (!path) return
+    const api = workspaceTrustBridge()
+    if (api === undefined) {
+      toast(t('当前环境没有主进程桥，无法更新工作区信任'))
+      return
+    }
+    await api.set({ workspace: path, trusted: true })
+    refresh()
+    toast(t('已信任此文件夹'))
+  }
+  const revoke = (path: string): void => {
+    const api = workspaceTrustBridge()
+    if (api === undefined) return
+    void api.set({ workspace: path, trusted: false }).then(() => {
+      refresh()
+      toast(t('已移除信任'))
+    }).catch((err: unknown) => toast(err instanceof Error ? err.message : t('更新工作区信任失败')))
+  }
   return (
     <>
       <h2>{t('工作区信任')}</h2>
@@ -927,26 +982,24 @@ function TrustSection() {
       <div className="sect">
         <div className="sh2">
           {t('已信任的文件夹')}{' '}
-          <button className="mini" onClick={() => toast(t('演示：选择文件夹'))}>
+          <button className="mini" onClick={() => void addFolder()}>
             ＋ {t('添加文件夹')}
           </button>
         </div>
-        {trusted.map((item, i) => (
+        {trusted.map((item) => (
           <div className="trow" key={item.path}>
             <span className="tp">{item.path}</span>
             <span className="tm">
-              {t(item.files)} · {t(item.at)}
+              {new Date(item.trustedAt).toLocaleDateString()}
             </span>
             <button
-              onClick={() => {
-                setTrusted(trusted.filter((_, ix) => ix !== i))
-                toast(t('已移除信任（mock）'))
-              }}
+              onClick={() => revoke(item.path)}
             >
               {t('移除')}
             </button>
           </div>
         ))}
+        {trusted.length === 0 && <div className="pickhint">{t('还没有已信任的文件夹')}</div>}
       </div>
       <div className="warnrow" style={{ marginTop: 16 }}>
         <span className="wt">{t('提示')}</span>

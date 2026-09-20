@@ -54,7 +54,17 @@ function buildEvents(): EventFrame[] {
     f(
       'request/header',
       3,
-      { header: { provider: 'deepseek', model: 'deepseek-chat', systemFingerprint: 's1', toolsFingerprint: 't1' }, reason: 'new-epoch' },
+      {
+        header: {
+          provider: 'deepseek',
+          model: 'deepseek-chat',
+          system: 'test system',
+          tools: [],
+          systemFingerprint: 's1',
+          toolsFingerprint: 't1',
+        },
+        reason: 'new-epoch',
+      },
     ),
     f('tool/call', 4, {
       turn: 1,

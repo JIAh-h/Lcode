@@ -2,7 +2,8 @@ import { InMemoryAgentStore } from '@lcode/agent'
 import { createAgentLoop } from '@lcode/agent-loop'
 import type { AgentLoopRuntime } from '@lcode/agent-loop'
 import { LocalAgentsApi } from '@lcode/agents-api'
-import { LocalSessionsApi } from '@lcode/session-api'
+import { createLocalFileCheckpointService, LocalSessionsApi } from '@lcode/session-api'
+import type { FileCheckpointService } from '@lcode/session-api'
 import { InMemoryToolRegistry } from '@lcode/tools'
 import { createSystemPromptService } from '@lcode/system-prompt'
 import type { SessionService } from '@lcode/session'
@@ -53,14 +54,19 @@ export interface AgentRuntimeOptions {
 import type { Disposer } from '@lcode/util'
 import type { SessionEvent } from '@lcode/session'
 import type { ApprovalService } from '@lcode/approval'
-import { createLocalFs } from '@lcode/fs-local'
+import { createFsMutationAuthority, createLocalFs } from '@lcode/fs-local'
 import { createLocalShell } from '@lcode/shell-local'
 import { createLocalSandbox } from '@lcode/sandbox-local'
+import { createWindowsSandbox, createWindowsSandboxBridge } from '@lcode/sandbox-win32'
+import { createLocalSubprocess } from '@lcode/subprocess-local'
+import { createLocalJobs } from '@lcode/jobs-local'
 import { createShellTool } from '@lcode/tool-shell'
+import { createTerminalTool } from '@lcode/tool-terminal'
+import { createLocalTerminal } from '@lcode/terminal-pty'
 import { createFsTools } from '@lcode/tool-fs'
-import type { ToolDefinition } from '@lcode/tools'
 import type { SandboxService } from '@lcode/sandbox'
-import { DEFAULT_PRESET, InMemoryPermissionPresets, installPolicyHook } from '@lcode/permission-presets'
+import { createLocalPermissionPresets, createLocalWorkspaceTrust, installPolicyHook } from '@lcode/permission-presets'
+import { createPlanModeService } from '@lcode/plan-mode'
 
 export interface AgentRuntime {
   readonly services: DesktopServices
@@ -70,6 +76,8 @@ export interface AgentRuntime {
   readonly agents: LocalAgentsApi
   readonly loop: AgentLoopRuntime
   readonly ctx: DesktopServices['ctx']
+  /** P6-01 文件检查点；恢复会追加审计事件，不会修改既有会话历史。 */
+  readonly checkpoints: FileCheckpointService
   /**
    * 订阅某个会话的事件流（UI 的数据源，06 §5.1 步骤⑤）。
    *
@@ -100,6 +108,7 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
 
   // ① sessions：事件日志的唯一 owner（+ JSONL 持久化 + SQLite 索引）
   const sessions = new LocalSessionsApi({ home })
+  const checkpoints = createLocalFileCheckpointService({ home })
 
   // ② 引擎与 sessions 共享同一条日志（见文件头注释）
   const getSession = (sessionId: string): SessionService => sessions.sessionServiceFor(sessionId)
@@ -117,10 +126,6 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
    * 这两件事**必须一起装**（14 §3.5）：只装工具就是"能改文件却没人拦"，
    * 只装权限则没有任何东西可拦。所以它们在这一段里成对出现。
    */
-  const sandbox: SandboxService = options.sandbox ?? createLocalSandbox()
-  ctx.set('sandbox', sandbox)
-  const approval = options.approval
-
   /*
    * 工作区根取两处之一：显式传入的，或**第一个已打开会话**的 cwd。
    *
@@ -129,6 +134,11 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
    * 不能拿一个进程级的基准去代替（见 `PolicyHookOptions.workspaceOf` 的说明）。
    */
   const workspaceRoot = options.workspaceRoot ?? process.cwd()
+  const subprocess = createLocalSubprocess()
+  ctx.set('subprocess', subprocess)
+  const sandbox: SandboxService = options.sandbox ?? defaultSandbox(subprocess, workspaceRoot)
+  ctx.set('sandbox', sandbox)
+  const approval = options.approval
 
   /*
    * `fs` 是**单例**，而工作区是**每会话**的（一个进程里可以开着多个项目）。
@@ -136,30 +146,68 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
    * 之前就被解成绝对路径（20 §6.1）。少了这一步，A 项目里说 `read hello.txt`
    * 会去进程启动目录找（实测踩过）。
    */
-  const fsService = createLocalFs({ workspaceRoot })
+  const fsMutationAuthority = createFsMutationAuthority()
+  const fsService = createLocalFs({ workspaceRoot, mutationAuthority: fsMutationAuthority })
   ctx.set('fs', fsService)
+  const jobs = createLocalJobs()
+  ctx.set('jobs', jobs)
   const { shell } = createLocalShell({
     workspaceRoot,
+    subprocess,
     wrap: (argv, policy) => sandbox.wrap(argv, policy),
+    jobs,
   })
   ctx.set('shell', shell)
+  const terminals = createLocalTerminal({ workspaceRoot, subprocess, sandbox })
+  ctx.set('terminals', terminals)
+
+  // 检查点只在 `turn/end` 已写入后串行生成。agent-loop 不依赖具体快照实现，
+  // 通过此协作点保持“一切皆插件”的装配方向。
+  const uninstallCheckpoints = ctx.on('agent/turn-ended', async (payload) => {
+    const workspace = sessions.workspaceOf(payload.sessionId)
+    if (workspace === undefined) return
+    const checkpoint = await checkpoints.capture({
+      sessionId: payload.sessionId,
+      workspaceRoot: workspace,
+      session: payload.session,
+      turn: payload.turn,
+      endSeq: payload.endSeq,
+    })
+    payload.session.append({
+      type: 'checkpoint/created',
+      data: {
+        checkpointId: checkpoint.checkpointId,
+        turn: checkpoint.turn,
+        endSeq: checkpoint.endSeq,
+        files: checkpoint.files.length,
+        partial: checkpoint.partial,
+        ...(checkpoint.skipped.length === 0 ? {} : { skipped: checkpoint.skipped }),
+      },
+    })
+  })
 
   for (const tool of createFsTools({
     fs: fsService,
     workspaceRoot,
     workspaceOf: (sessionId) => sessions.workspaceOf(sessionId),
   })) {
-    tools.register(tool as ToolDefinition)
+    tools.register(tool)
   }
   tools.register(createShellTool({ shell, workspaceRoot, workspaceOf: (sessionId) => sessions.workspaceOf(sessionId) }))
+  tools.register(createTerminalTool({ terminals, workspaceRoot, workspaceOf: (sessionId) => sessions.workspaceOf(sessionId) }))
 
   // 策略钩子：判定 → 需要则审批 → 只有 allowed-once 才放行
-  const presets = new InMemoryPermissionPresets(DEFAULT_PRESET)
+  const presets = createLocalPermissionPresets({ home })
   ctx.set('permissionPresets', presets)
+  const workspaceTrust = createLocalWorkspaceTrust({ home })
+  ctx.set('workspaceTrust', workspaceTrust)
   const uninstallPolicy = installPolicyHook({
     ctx,
     ...(approval === undefined ? {} : { approval }),
+    sandbox,
     presets,
+    workspaceTrust,
+    mutationAuthority: fsMutationAuthority,
     workspaceOf: (sessionId) => sessions.workspaceOf(sessionId),
     getSession: (sessionId) => {
       try {
@@ -171,12 +219,21 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
     },
   })
 
+  // 计划模式是会话级策略，不进入循环本体：请求时仅暴露只读工具，执行前再次拒绝写类工具。
+  const planMode = createPlanModeService({ ctx, getSession, systemPrompt, tools, approval })
+  ctx.set('planMode', planMode)
+
   // ④ 循环（唯一的具体循环）
   const loop = createAgentLoop({ ctx, getSession })
   ctx.set('agentLoop', loop)
 
   // ⑤ 活体 agent 注册表（依赖 ctx 与 getSession）
   ctx.set('agents', new InMemoryAgentStore(ctx, getSession))
+  // 发布中的后台作业归属到 agent。对话回合取消不碰它；只有 agent 被销毁时才清理。
+  const uninstallJobOwnerCleanup = ctx.on('agent/disposed', async ({ agentId }) => {
+    await jobs.disposeOwner(agentId)
+    await terminals.disposeOwner(agentId)
+  })
 
   // ⑥ 边界层：`agents.*`（对话入口）
   const agents = new LocalAgentsApi({ ctx, getSession })
@@ -187,17 +244,29 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
     agents,
     loop,
     ctx,
+    checkpoints,
     watchSession(sessionId, handler) {
       // `sessionServiceFor` 会校验"会话已打开"并抛 ES-SESSION_NOT_FOUND——
       // 那正是我们要的行为：未开放的会话没有内存镜像，也没有事件可订阅。
       return sessions.sessionServiceFor(sessionId).onEvent(handler)
     },
     async dispose() {
+      planMode.dispose()
+      uninstallCheckpoints()
       uninstallPolicy()
+      uninstallJobOwnerCleanup()
+      await jobs.dispose()
+      await terminals.dispose()
       await sessions.close()
       if (ownsServices) services.dispose()
     },
   }
+}
+
+function defaultSandbox(subprocess: ReturnType<typeof createLocalSubprocess>, workspaceRoot: string): SandboxService {
+  return process.platform === 'win32'
+    ? createWindowsSandbox({ bridge: createWindowsSandboxBridge({ subprocess, workspaceRoot }) })
+    : createLocalSandbox()
 }
 
 /**
@@ -225,8 +294,10 @@ const BASE_SYSTEM_PROMPT = [
   '',
   '## 关于权限',
   '',
-  '工作区内的读写可以直接做。改动工作区之外的文件、跑项目里没出现过的命令、',
-  '读取疑似凭据的文件（.env / id_rsa / .ssh 等）会**先询问用户**。',
+  '是否需要询问由当前权限预设和实际沙箱状态共同决定。当前没有系统级沙箱约束时，',
+  '任何改写文件或执行命令都会把“沙箱降级”作为影响面向用户询问；不询问的预设会拒绝这些操作。',
+  '改动工作区之外的文件、跑项目里没出现过的命令、读取疑似凭据的文件（.env / id_rsa / .ssh 等）',
+  '也会**先询问用户**。',
   '如果某个操作被拒绝，那不是 bug —— 那是用户或策略的决定。',
   '不要试图绕过它（比如换一条等价命令），把情况如实告诉用户。',
   '',

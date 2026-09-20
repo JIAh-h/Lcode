@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
 import type { PreparedCall } from '@lcode/llm'
 import type { ToolSchema } from '@lcode/tools'
-import type { EpochHeader, ModelMessage, RequestHeaderReason, SessionEvent } from '@lcode/session'
+import type { EpochHeader, ModelMessage, RequestHeaderReason, RequestToolSnapshot, SessionEvent } from '@lcode/session'
+import type { JsonValue } from '@lcode/util'
 
 /**
  * 请求快照的确定性部分（文档 06 §2.2 `request/header`、09 EpochHeader 骨架）。
@@ -13,9 +14,20 @@ export function fingerprintOf(text: string): string {
   return createHash('sha256').update(text).digest('hex').slice(0, 16)
 }
 
-/** 工具清单指纹（只含名字与描述——schema 顺序由装配器保证稳定） */
+/** 把工具装配结果变成可持久化的、与运行时无关的请求快照。 */
+export function snapshotTools(tools: readonly ToolSchema[]): readonly RequestToolSnapshot[] {
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    // `ToolInputSchema` 是 JSON 子集，但接口本身没有索引签名；深拷贝后作为
+    // 会话层的 JSON 事实保存，避免 session 反向依赖 `@lcode/tools`。
+    inputSchema: structuredCopy(tool.inputSchema) as unknown as JsonValue,
+  }))
+}
+
+/** 工具清单指纹（包含 schema，任何模型可见变化都会开启新 epoch）。 */
 export function toolsFingerprintOf(tools: readonly ToolSchema[]): string {
-  return fingerprintOf(tools.map((t) => `${t.name}:${t.description}`).join('\n'))
+  return fingerprintOf(JSON.stringify(snapshotTools(tools)))
 }
 
 /** 组装一次调用的最终请求体（I1：system / messages 一律来自日志派生，不得从内存拼装） */

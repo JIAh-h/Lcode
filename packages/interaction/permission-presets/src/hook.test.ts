@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
+import { normalizePath } from '@lcode/fs'
+import { resolve } from 'node:path'
 import { createContext } from '@lcode/context'
 import { createApprovalService } from '@lcode/approval'
 import type { ApprovalChannel } from '@lcode/approval'
-import type { ApprovalResult } from '@lcode/session'
+import type { ApprovalResult, SessionService } from '@lcode/session'
+import type { SandboxService, SandboxStatus } from '@lcode/sandbox'
 import { InMemoryToolRegistry } from '@lcode/tools'
 import type { ToolCall } from '@lcode/tools'
 import { InMemoryPermissionPresets } from './permission-presets.ts'
@@ -27,6 +30,7 @@ interface Harness {
   /** 被实际执行过的调用（用来断言"副作用有没有发生"） */
   executed: string[]
   setPreset(p: Parameters<InMemoryPermissionPresets['set']>[0]): Promise<void>
+  grants: Array<{ sessionId: string; callId: string; paths: readonly string[] }>
 }
 
 function harness(opts: {
@@ -34,11 +38,14 @@ function harness(opts: {
   hasChannel?: boolean
   preset?: '只读' | '标准' | '自动' | '完全访问' | '无人值守'
   workspaceRoot?: string
+  sandbox?: SandboxService
+  withMutationAuthority?: boolean
 }): Harness {
   const ctx = createContext()
   const tools = new InMemoryToolRegistry(ctx)
   const presets = new InMemoryPermissionPresets(opts.preset ?? '标准')
   const executed: string[] = []
+  const grants: Array<{ sessionId: string; callId: string; paths: readonly string[] }> = []
 
   // 一个"会写文件"的假工具：describeAction 如实申报 write
   tools.register({
@@ -74,8 +81,12 @@ function harness(opts: {
     ctx,
     ...(approval === undefined ? {} : { approval }),
     presets,
+    ...(opts.sandbox === undefined ? {} : { sandbox: opts.sandbox }),
     workspaceOf: () => opts.workspaceRoot ?? ROOT,
     getSession: () => undefined,
+    ...(opts.withMutationAuthority === true
+      ? { mutationAuthority: { grant: (grant) => { grants.push(grant) }, consume: () => undefined } }
+      : {}),
   })
 
   return {
@@ -83,7 +94,32 @@ function harness(opts: {
     tools,
     presets,
     executed,
+    grants,
     setPreset: (p) => presets.set(p),
+  }
+}
+
+function degradedSandbox(reason = 'Windows 原生隔离尚未接入'): SandboxService {
+  const status: SandboxStatus = {
+    available: false,
+    mechanism: 'none',
+    knownEscapeSurfaces: ['文件系统（无约束）', '进程（无约束）'],
+    degraded: true,
+    reason,
+    capabilities: {
+      platform: 'win32',
+      mechanism: 'none',
+      boundaries: {
+        filesystem: { state: 'unavailable', plannedMechanism: 'AppContainer', message: '未受约束' },
+        network: { state: 'unavailable', plannedMechanism: 'AppContainer', message: '未受约束' },
+        spawn: { state: 'unavailable', plannedMechanism: 'Job Object', message: '未受约束' },
+      },
+      reason,
+    },
+  }
+  return {
+    status: async () => status,
+    wrap: async (argv) => ({ enforced: false, wrappedArgv: argv, degradationReason: reason }),
   }
 }
 
@@ -99,6 +135,95 @@ describe('工作区内写：「标准」档放行，且**真的执行了**', () 
     const r = await run(h, 'write', { path: 'src/a.ts' })
     expect(r.ok).toBe(true)
     expect(h.executed).toEqual(['src/a.ts'])
+  })
+})
+
+describe('P5-00：策略放行才签发文件能力', () => {
+  it('工作区内 allow 会签发规范化后的精确写路径', async () => {
+    const h = harness({ preset: '标准', withMutationAuthority: true })
+    await run(h, 'write', { path: 'src/../approved.ts' })
+    expect(h.grants).toEqual([
+      { sessionId: 'sess_1', callId: 'c1', paths: [normalizePath(resolve(ROOT, 'approved.ts'))] },
+    ])
+  })
+
+  it('审批拒绝、缺少通道和不可信工作区都不会签发', async () => {
+    const rejected = harness({ answer: 'rejected', withMutationAuthority: true })
+    await run(rejected, 'write', { path: '/etc/passwd' })
+    expect(rejected.grants).toEqual([])
+
+    const unavailable = harness({ hasChannel: false, withMutationAuthority: true })
+    await run(unavailable, 'write', { path: '/etc/passwd' })
+    expect(unavailable.grants).toEqual([])
+  })
+})
+
+describe('P5-00：沙箱降级不能静默放行', () => {
+  it('标准档：工作区内写也带着降级影响进入一次审批', async () => {
+    const ctx = createContext()
+    const tools = new InMemoryToolRegistry(ctx)
+    const executed: string[] = []
+    const seen: unknown[] = []
+    tools.register({
+      name: 'write',
+      description: '写',
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+      describeAction: (parsed) => ({ summary: '写入工作区', paths: [{ path: (parsed as { path: string }).path, mode: 'write' as const }] }),
+      execute: () => {
+        executed.push('write')
+        return { ok: true }
+      },
+    })
+    installPolicyHook({
+      ctx,
+      approval: createApprovalService({ channel: { ask: async (request) => { seen.push(request); return 'allowed-once' } } }),
+      presets: new InMemoryPermissionPresets('标准'),
+      sandbox: degradedSandbox(),
+      workspaceOf: () => ROOT,
+      getSession: () => undefined,
+    })
+    const result = await tools.execute(
+      { callId: 'degraded-standard', name: 'write', arguments: JSON.stringify({ path: 'src/a.ts' }) },
+      { signal: new AbortController().signal, scope: { sessionId: 's1' } },
+    )
+    expect(result.ok).toBe(true)
+    expect(executed).toEqual(['write'])
+    expect(seen).toMatchObject([{ impact: { sandbox: { status: 'degraded', mechanism: 'none' } } }])
+  })
+
+  it('自动档：降级的工作区内写直接拒绝且不执行', async () => {
+    const h = harness({ preset: '自动', sandbox: degradedSandbox() })
+    const result = await run(h, 'write', { path: 'src/a.ts' })
+    expect(result.ok).toBe(false)
+    expect(JSON.stringify(result.meta)).toContain('沙箱不可用')
+    expect(h.executed).toEqual([])
+  })
+
+  it('受影响动作落 sandbox/degraded 审计事件', async () => {
+    const ctx = createContext()
+    const tools = new InMemoryToolRegistry(ctx)
+    const audit: unknown[] = []
+    tools.register({
+      name: 'write',
+      description: '写',
+      inputSchema: { type: 'object', properties: {}, required: [] },
+      describeAction: () => ({ summary: '写', paths: [{ path: 'a.ts', mode: 'write' as const }] }),
+      execute: () => ({ ok: true }),
+    })
+    const session = { append: (event: unknown) => { audit.push(event); return event } } as unknown as SessionService
+    installPolicyHook({
+      ctx,
+      approval: createApprovalService({ channel: { ask: async () => 'rejected' } }),
+      presets: new InMemoryPermissionPresets('标准'),
+      sandbox: degradedSandbox('AppContainer 未启用'),
+      workspaceOf: () => ROOT,
+      getSession: () => session,
+    })
+    await tools.execute(
+      { callId: 'degraded-audit', name: 'write', arguments: '{}' },
+      { signal: new AbortController().signal, scope: { sessionId: 's1' } },
+    )
+    expect(audit).toContainEqual({ type: 'sandbox/degraded', data: { reason: 'AppContainer 未启用', mechanism: 'none' } })
   })
 })
 
@@ -131,6 +256,42 @@ describe('工作区外写：审批通过才执行（M-SEC-02）', () => {
     const r = await run(h, 'write', { path: '/etc/passwd' })
     expect(r.ok).toBe(false)
     expect(h.executed).toEqual([])
+  })
+
+  it('暂停执行会中断正在等待的审批，且工具不执行', async () => {
+    const ctx = createContext()
+    const tools = new InMemoryToolRegistry(ctx)
+    const executed: string[] = []
+    tools.register({
+      name: 'write',
+      description: '写',
+      inputSchema: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+      describeAction: (parsed) => ({
+        summary: '写',
+        paths: [{ path: (parsed as { path: string }).path, mode: 'write' as const }],
+      }),
+      execute: () => {
+        executed.push('write')
+        return { ok: true }
+      },
+    })
+    installPolicyHook({
+      ctx,
+      approval: createApprovalService({
+        channel: { ask: async () => new Promise<never>(() => {}) },
+      }),
+      presets: new InMemoryPermissionPresets('标准'),
+      workspaceOf: () => ROOT,
+      getSession: () => undefined,
+    })
+    const controller = new AbortController()
+    const pending = tools.execute(
+      { callId: 'wait-approval', name: 'write', arguments: JSON.stringify({ path: '/etc/passwd' }) },
+      { signal: controller.signal, scope: { sessionId: 's1' } },
+    )
+    controller.abort()
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'ET-DENIED' } })
+    expect(executed).toEqual([])
   })
 })
 

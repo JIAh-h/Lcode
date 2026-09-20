@@ -74,6 +74,13 @@ export interface Impact {
   readonly env?: readonly string[] | undefined
   /** 沙箱档位变化（放宽档位本身是需要审批的动作之一，12 §9.3 ⑤） */
   readonly sandboxChange?: { readonly from: string; readonly to: string } | undefined
+  /**
+   * 当前动作无法获得系统级沙箱约束时的实际状态。
+   *
+   * 它与 `sandboxChange` 不同：前者描述“本次根本没有强制边界”，后者描述“用户
+   * 请求把某个档位调宽”。两者混为一谈会让审批界面把降级误读成用户主动提权。
+   */
+  readonly sandbox?: { readonly status: 'degraded'; readonly mechanism: string; readonly reason: string } | undefined
   readonly processScope?: string | undefined
 }
 
@@ -127,6 +134,13 @@ export interface TodoItem {
   readonly status: 'pending' | 'in-progress' | 'done'
 }
 
+/** 用户可确认、可回放的实施计划。计划本身不产生文件或进程副作用。 */
+export interface PlanArtifact {
+  readonly summary: string
+  readonly steps: readonly string[]
+  readonly risks?: readonly string[] | undefined
+}
+
 // ─────────── 流协议（闭合联合） ───────────
 
 /**
@@ -140,10 +154,29 @@ export type StreamChunk =
   | { readonly type: 'usage'; readonly usage: TokenUsage }
   | { readonly type: 'done'; readonly message: AssistantMessage; readonly usage?: TokenUsage }
 
-/** 请求快照（request/header 事件，09 文档 EpochHeader 的骨架简化） */
+/**
+ * 一次模型请求中模型可见的工具定义。
+ *
+ * 它有意不复用 `@lcode/tools` 的 `ToolSchema`：session 是更底层的事实层，
+ * 只能持有无损 JSON 快照，不能反向依赖工具运行时。
+ */
+export interface RequestToolSnapshot {
+  readonly name: string
+  readonly description: string
+  readonly inputSchema: JsonValue
+}
+
+/**
+ * 请求快照（`request/header` 事件）。
+ *
+ * 指纹负责快速比较 epoch；`system` / `tools` 是审计重放所需的权威副本。
+ * 只保存指纹会让历史界面只能证明"配置变过"，却无法还原模型实际看到的输入。
+ */
 export interface EpochHeader {
   readonly provider: string
   readonly model: string
+  readonly system: string
+  readonly tools: readonly RequestToolSnapshot[]
   readonly systemFingerprint: string
   readonly toolsFingerprint: string
 }
@@ -197,6 +230,8 @@ export interface SessionEventMap {
     readonly step: number
     readonly callId: string
     readonly name: string
+    /** 工具声明的 UI 卡片类型；旧日志缺省时由 UI 按工具名回退。 */
+    readonly card?: CardType | undefined
     /** ⚠️ 未解析的原始 JSON 字符串，不是对象（D9：参数不可被改写） */
     readonly arguments: string
   }
@@ -206,8 +241,30 @@ export interface SessionEventMap {
   'session/end-seed': Record<string, never>
   /** 待办整表快照，last-write-wins */
   'todo/write': { readonly todos: readonly TodoItem[] }
-  /** 计划模式：整值替换 */
-  'plan/mode': { readonly active: boolean }
+  /** 计划模式：整值替换；退出原因让“确认执行”和“取消”在回放中可区分。 */
+  'plan/mode': {
+    readonly active: boolean
+    readonly reason?: 'entered' | 'confirmed' | 'cancelled' | undefined
+  }
+  /** 计划模式中的模型提交了一份结构化计划，等待用户批准。 */
+  'plan/proposed': {
+    readonly plan: PlanArtifact
+  }
+  /** 用户批准某一份计划；随后由宿主创建正常执行回合。 */
+  'plan/approved': {
+    readonly proposedSeq: number
+  }
+  /** 已批准计划发生实质变更；批准记录仍由 approval/* 事件保存。 */
+  'plan/changed': {
+    readonly previousProposedSeq: number
+    readonly plan: PlanArtifact
+    readonly reason: string
+  }
+  /** 当前会话工作区的信任结论；全局状态由宿主配置文件持久化。 */
+  'workspace/trust': {
+    readonly workspace: string
+    readonly trusted: boolean
+  }
   /**
    * 提了一个审批问题（12 §5.5）。
    *
@@ -232,6 +289,25 @@ export interface SessionEventMap {
      */
     readonly decidedBy: 'human' | 'auto-denied' | 'cancelled'
     readonly decidedAt: number
+  }
+  /** 当前动作没有系统级沙箱约束；必须保留，即使用户批准了此次动作。 */
+  'sandbox/degraded': { readonly reason: string; readonly mechanism: string }
+  /** 某次执行生成的原生约束配置，供回放解释当时的实际边界。 */
+  'sandbox/profile': { readonly profile: string; readonly mode: string }
+  /** 已闭合回合的文件检查点；快照内容独立保存，日志只保存可审计的索引。 */
+  'checkpoint/created': {
+    readonly checkpointId: string
+    readonly turn: number
+    readonly endSeq: number
+    readonly files: number
+    readonly partial: boolean
+    readonly skipped?: readonly { readonly path: string; readonly reason: string }[] | undefined
+  }
+  /** 恢复文件检查点的事实；追加而非篡改此前的工具或文件事件。 */
+  'checkpoint/restored': {
+    readonly checkpointId: string
+    readonly restoredPaths: readonly string[]
+    readonly removedPaths: readonly string[]
   }
   'compaction/start': { readonly compactionId: string }
   'compaction/summary': { readonly compactionId: string; readonly summary: string }

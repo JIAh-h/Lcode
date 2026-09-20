@@ -22,7 +22,14 @@ export interface EnqueueReceipt {
   readonly accepted: true
   readonly session_id: string
   readonly seq: number
+  /** 尚未开始的消息在当前运行时队列中的标识。 */
+  readonly queue_id: string
   readonly enqueued_at: number
+}
+
+export interface QueuedMessage {
+  readonly queue_id: string
+  readonly content: readonly ContentBlock[]
 }
 
 /** docs/21 §2.0 `CancellationCause` */

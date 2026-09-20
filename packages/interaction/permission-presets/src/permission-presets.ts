@@ -1,4 +1,6 @@
 import type { SandboxMode } from '@lcode/sandbox'
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { dirname, resolve } from 'node:path'
 
 /**
  * 权限预设（12 §3.3；22 §6.4）。
@@ -14,9 +16,9 @@ import type { SandboxMode } from '@lcode/sandbox'
  * |---|---|---|---|
  * | 只读 | `read-only` | `ask` | 它只能看，不能改 |
  * | **标准**（默认） | `workspace-write` | `ask` | 能改我的项目，动手前问我 |
- * | 自动 | `workspace-write` | `never` | 工作区内自己干，不打扰我 |
+ * | 自动 | `workspace-write` | `never` | 受系统级沙箱约束时，工作区内自行执行 |
  * | 完全访问 | `danger-full-access` | `ask` | 哪里都能碰，但动手前问我 |
- * | 无人值守 | `workspace-write` | `never` | 用于自动化，不打扰你 |
+ * | 无人值守 | `workspace-write` | `never` | 受系统级沙箱约束时用于自动化 |
  *
  * ## `never` **不等于**"默认允许"
  *
@@ -51,9 +53,9 @@ export const DEFAULT_PRESET: PermissionPreset = '标准'
 export const PRESET_HINT: Readonly<Record<PermissionPreset, string>> = {
   只读: '它只能看，不能改',
   标准: '能改我的项目，动手前问我',
-  自动: '工作区内自己干，不打扰我',
+  自动: '受系统级沙箱约束时，工作区内自行执行',
   完全访问: '哪里都能碰，但动手前问我',
-  无人值守: '用于自动化，不打扰我',
+  无人值守: '受系统级沙箱约束时用于自动化',
 }
 
 export function isPermissionPreset(value: unknown): value is PermissionPreset {
@@ -88,12 +90,31 @@ export interface PermissionPresetService {
   get(): PermissionPreset
   set(preset: PermissionPreset): Promise<void>
   watch(fn: (preset: PermissionPreset) => void): () => void
+  snapshot(): PermissionPresetSnapshot
+  audit(): readonly PermissionPresetAudit[]
+}
+
+/** 当前值及其来源；renderer 只显示这层语义，不暴露底层两条策略轴。 */
+export interface PermissionPresetSnapshot {
+  readonly preset: PermissionPreset
+  readonly source: 'default' | 'user'
+  readonly changedAt?: number | undefined
+}
+
+/** 最近的切换记录。它是设置审计，不包含工作区路径、命令或任何密钥。 */
+export interface PermissionPresetAudit {
+  readonly from: PermissionPreset
+  readonly to: PermissionPreset
+  readonly changedAt: number
 }
 
 /** 内存实现（骨架阶段；持久化由装配层接到 settings，与默认模型同一套做法） */
 export class InMemoryPermissionPresets implements PermissionPresetService {
   private current: PermissionPreset
   private readonly watchers = new Set<(preset: PermissionPreset) => void>()
+  private readonly changes: PermissionPresetAudit[] = []
+  private source: PermissionPresetSnapshot['source'] = 'default'
+  private changedAt: number | undefined
 
   constructor(initial: PermissionPreset = DEFAULT_PRESET) {
     this.current = initial
@@ -104,7 +125,12 @@ export class InMemoryPermissionPresets implements PermissionPresetService {
   }
 
   async set(preset: PermissionPreset): Promise<void> {
+    if (preset === this.current) return
+    const from = this.current
     this.current = preset
+    this.source = 'user'
+    this.changedAt = Date.now()
+    this.changes.unshift({ from, to: preset, changedAt: this.changedAt })
     for (const fn of this.watchers) fn(preset)
   }
 
@@ -114,4 +140,96 @@ export class InMemoryPermissionPresets implements PermissionPresetService {
       this.watchers.delete(fn)
     }
   }
+
+  snapshot(): PermissionPresetSnapshot {
+    return { preset: this.current, source: this.source, ...(this.changedAt === undefined ? {} : { changedAt: this.changedAt }) }
+  }
+
+  audit(): readonly PermissionPresetAudit[] {
+    return [...this.changes]
+  }
+}
+
+interface PersistedPermissionPresets {
+  readonly version: 1
+  readonly preset: PermissionPreset
+  readonly source: 'default' | 'user'
+  readonly changedAt?: number | undefined
+  readonly audit: readonly PermissionPresetAudit[]
+}
+
+export interface LocalPermissionPresetsOptions {
+  readonly home: string
+  readonly now?: (() => number) | undefined
+}
+
+/**
+ * 权限预设的宿主侧持久化实现。
+ *
+ * 放在 LCODE_HOME 而非工作区：项目不能通过提交配置文件来抬高本机权限；写入采用
+ * 临时文件 rename，进程中断时仍保留上一份有效配置。审计只留最近 20 次，避免设置文件
+ * 无限增长。
+ */
+export function createLocalPermissionPresets(options: LocalPermissionPresetsOptions): PermissionPresetService {
+  const file = resolve(options.home, 'permission-preset.json')
+  const now = options.now ?? (() => Date.now())
+  let state = loadPersisted(file)
+  const watchers = new Set<(preset: PermissionPreset) => void>()
+
+  return {
+    get: () => state.preset,
+    async set(preset) {
+      if (preset === state.preset) return
+      const changedAt = now()
+      const next: PersistedPermissionPresets = {
+        version: 1,
+        preset,
+        source: 'user',
+        changedAt,
+        audit: [{ from: state.preset, to: preset, changedAt }, ...state.audit].slice(0, 20),
+      }
+      persist(file, next)
+      state = next
+      for (const watcher of watchers) watcher(preset)
+    },
+    watch(fn) {
+      watchers.add(fn)
+      return () => watchers.delete(fn)
+    },
+    snapshot() {
+      return {
+        preset: state.preset,
+        source: state.source,
+        ...(state.changedAt === undefined ? {} : { changedAt: state.changedAt }),
+      }
+    },
+    audit: () => [...state.audit],
+  }
+}
+
+function loadPersisted(file: string): PersistedPermissionPresets {
+  const fallback: PersistedPermissionPresets = { version: 1, preset: DEFAULT_PRESET, source: 'default', audit: [] }
+  if (!existsSync(file)) return fallback
+  try {
+    const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<PersistedPermissionPresets>
+    if (value.version !== 1 || !isPermissionPreset(value.preset) || value.source !== 'user' || typeof value.changedAt !== 'number' || !Array.isArray(value.audit)) {
+      return fallback
+    }
+    const audit = value.audit.flatMap((entry) =>
+      isPermissionPreset(entry?.from) && isPermissionPreset(entry?.to) && typeof entry.changedAt === 'number'
+        ? [{ from: entry.from, to: entry.to, changedAt: entry.changedAt }]
+        : [],
+    ).slice(0, 20)
+    return { version: 1, preset: value.preset, source: 'user', changedAt: value.changedAt, audit }
+  } catch {
+    // 损坏配置不能变成更宽松的权限，安全回落到默认“标准”。
+    return fallback
+  }
+}
+
+function persist(file: string, value: PersistedPermissionPresets): void {
+  mkdirSync(dirname(file), { recursive: true })
+  const temp = `${file}.tmp`
+  writeFileSync(temp, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  renameSync(temp, file)
 }

@@ -66,7 +66,7 @@ export function createApprovalService(options: ApprovalServiceOptions = {}): App
 
   /** 落 `approval/asked`、拿答案、落 `approval/decided`——三条出口共用这一条路 */
   async function settle(request: ApprovalRequest, opts: ApprovalAskOpts): Promise<ApprovalResult> {
-    const session = options.getSession?.()
+    const session = opts.session ?? options.getSession?.()
 
     // ① **先落 `approval/asked`**：否则中止重启后看不到"当时问过什么"
     session?.append({

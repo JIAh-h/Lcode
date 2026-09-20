@@ -29,12 +29,22 @@ describe('T6.1 纯函数：不闭合结构判定', () => {
     const frames = [
       ev('turn/start', 0, { turn: 1 }),
       ev('step/start', 1, { turn: 1, step: 1 }),
-      ev('tool/call', 2, { turn: 1, step: 1, callId: 'a', name: 'read', arguments: '{}' }),
+      ev('tool/call', 2, {
+        turn: 1,
+        step: 1,
+        callId: 'a',
+        name: 'read',
+        arguments: '{}',
+      }),
       ev('tool/result', 3, { turn: 1, step: 1, message: { toolCallId: 'a' } }),
       ev('step/end', 4, { turn: 1, step: 1 }),
       ev('turn/end', 5, { turn: 1, reason: 'completed' }),
     ]
-    expect(findOpenStructures(frames)).toMatchObject({ openTurn: null, openStep: null, unpairedToolCalls: [] })
+    expect(findOpenStructures(frames)).toMatchObject({
+      openTurn: null,
+      openStep: null,
+      unpairedToolCalls: [],
+    })
     const result = planRecovery(frames, NOW)
     expect(result.repaired).toBe(false)
     expect(result.closers).toEqual([])
@@ -44,19 +54,41 @@ describe('T6.1 纯函数：不闭合结构判定', () => {
     const frames = [
       ev('turn/start', 0, { turn: 1 }),
       ev('step/start', 1, { turn: 1, step: 1 }),
-      ev('tool/call', 2, { turn: 1, step: 1, callId: 'a', name: 'read', arguments: '{}' }),
-      ev('tool/call', 3, { turn: 1, step: 1, callId: 'b', name: 'glob', arguments: '{}' }),
+      ev('tool/call', 2, {
+        turn: 1,
+        step: 1,
+        callId: 'a',
+        name: 'read',
+        arguments: '{}',
+      }),
+      ev('tool/call', 3, {
+        turn: 1,
+        step: 1,
+        callId: 'b',
+        name: 'glob',
+        arguments: '{}',
+      }),
       ev('tool/result', 4, { turn: 1, step: 1, message: { toolCallId: 'a' } }),
     ]
     const open = findOpenStructures(frames)
     expect(open.unpairedToolCalls.map((c) => c.callId)).toEqual(['b'])
-    expect(open.unpairedToolCalls[0]).toMatchObject({ name: 'glob', turn: 1, step: 1 })
+    expect(open.unpairedToolCalls[0]).toMatchObject({
+      name: 'glob',
+      turn: 1,
+      step: 1,
+    })
   })
 
   it('轮已闭合 → 孤儿 tool/call 不算欠账（上一世残骸，11 §7.2）', () => {
     const frames = [
       ev('turn/start', 0, { turn: 1 }),
-      ev('tool/call', 1, { turn: 1, step: 1, callId: 'stale', name: 'read', arguments: '{}' }),
+      ev('tool/call', 1, {
+        turn: 1,
+        step: 1,
+        callId: 'stale',
+        name: 'read',
+        arguments: '{}',
+      }),
       ev('turn/end', 2, { turn: 1, reason: 'completed' }),
     ]
     expect(findOpenStructures(frames).unpairedToolCalls).toEqual([])
@@ -77,7 +109,16 @@ describe('T6.1 纯函数：不闭合结构判定', () => {
       ev('myplugin/custom', 2, { foo: 1 }),
       ev('turn/end', 3, { turn: 1, reason: 'completed' }),
     ]
-    expect(findOpenStructures(frames)).toMatchObject({ openTurn: null, openStep: null, unpairedToolCalls: [] })
+    expect(findOpenStructures(frames)).toMatchObject({
+      openTurn: null,
+      openStep: null,
+      unpairedToolCalls: [],
+    })
+  })
+
+  it('未闭合轮里的 approval/asked 必须识别为悬挂审批', () => {
+    const frames = [ev('turn/start', 0, { turn: 1 }), ev('approval/asked', 1, { callId: 'approval-1' })]
+    expect(findOpenStructures(frames).unpairedApprovals).toEqual([{ callId: 'approval-1' }])
   })
 })
 
@@ -85,21 +126,35 @@ describe('T6.1 纯函数：合成收尾的顺序与内容', () => {
   const crashed = [
     ev('turn/start', 0, { turn: 1 }),
     ev('step/start', 1, { turn: 1, step: 1 }),
-    ev('tool/call', 2, { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{}' }),
+    ev('tool/call', 2, {
+      turn: 1,
+      step: 1,
+      callId: 'c1',
+      name: 'read',
+      arguments: '{}',
+    }),
   ]
 
   it('顺序固定为 tool/result → step/end → turn/end → session/end-seed', () => {
-    expect(synthesizeClosers(crashed, NOW).closers.map((c) => c.type)).toEqual([
-      'tool/result',
-      'step/end',
-      'turn/end',
-    ])
-    expect(planRecovery(crashed, NOW).closers.map((c) => c.type)).toEqual([
-      'tool/result',
-      'step/end',
-      'turn/end',
-      'session/end-seed',
-    ])
+    expect(synthesizeClosers(crashed, NOW).closers.map((c) => c.type)).toEqual(['tool/result', 'step/end', 'turn/end'])
+    expect(planRecovery(crashed, NOW).closers.map((c) => c.type)).toEqual(['tool/result', 'step/end', 'turn/end', 'session/end-seed'])
+  })
+
+  it('悬挂审批补 approval/decided(cancelled)，并排在 turn/end 之前', () => {
+    const frames = [
+      ev('turn/start', 1, { turn: 1 }),
+      ev('step/start', 2, { turn: 1, step: 1 }),
+      ev('approval/asked', 3, { callId: 'approval-1' }),
+    ]
+    const result = planRecovery(frames, NOW)
+    expect(result.closers.map((closer) => closer.type)).toEqual(['approval/decided', 'step/end', 'turn/end', 'session/end-seed'])
+    expect(result.closers[0]).toMatchObject({
+      data: {
+        callId: 'approval-1',
+        result: 'cancelled',
+        decidedBy: 'cancelled',
+      },
+    })
   })
 
   it('未派发的工具结果是 isError + ABORTED_BEFORE_DISPATCH，并标记 repaired', () => {
@@ -140,7 +195,16 @@ describe('T6.1 纯函数：合成收尾的顺序与内容', () => {
 
 describe('T6.1 纯函数：编号（I2 与 time 单调）', () => {
   it('seq 从 startSeq 起连续，且覆盖撕裂尾场景（startSeq ≠ frames.length）', () => {
-    const kept = [ev('turn/start', 0, { turn: 1 }), ev('tool/call', 1, { turn: 1, step: 1, callId: 'c', name: 'read', arguments: '{}' })]
+    const kept = [
+      ev('turn/start', 0, { turn: 1 }),
+      ev('tool/call', 1, {
+        turn: 1,
+        step: 1,
+        callId: 'c',
+        name: 'read',
+        arguments: '{}',
+      }),
+    ]
     const closers = planRecovery(kept, NOW).closers
     // 模拟"磁盘上有 4 条、但只有前 2 条可解析"：补记必须接在 2 之后
     const { appended } = appendClosers(kept, closers, 2)

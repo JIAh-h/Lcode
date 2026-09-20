@@ -22,18 +22,20 @@ export class Context {
     const scope = opts?.scope
     const list = this.services.get(key) ?? []
     // 同 scope 覆盖
-    const idx = list.findIndex((e) => e.scope === scope)
+    const idx = list.findIndex((e) => e !== undefined && e.scope === scope)
+    const entry = { scope, value }
     if (idx >= 0) {
-      list[idx] = { scope, value }
+      list[idx] = entry
     } else {
-      list.push({ scope, value })
+      list.push(entry)
     }
     this.services.set(key, list)
     const myIndex = idx >= 0 ? idx : list.length - 1
     return () => {
       const cur = this.services.get(key)
+      /* c8 ignore next -- the disposer is created together with this service list */
       if (!cur) return
-      cur[myIndex] = undefined as unknown as { scope: ScopeKey | undefined; value: unknown }
+      if (cur[myIndex] === entry) cur[myIndex] = undefined as unknown as { scope: ScopeKey | undefined; value: unknown }
     }
   }
 
@@ -52,13 +54,13 @@ export class Context {
       })
     }
     if (scope === undefined) {
-      const global = list.find((e) => e.scope === undefined)
+      const global = list.find((e) => e !== undefined && e.scope === undefined)
       if (global) return global.value as Services[K]
     } else {
       // 最内层优先：先查精确 scope，再查全局
-      const exact = list.find((e) => e.scope === scope)
+      const exact = list.find((e) => e !== undefined && e.scope === scope)
       if (exact) return exact.value as Services[K]
-      const global = list.find((e) => e.scope === undefined)
+      const global = list.find((e) => e !== undefined && e.scope === undefined)
       if (global) return global.value as Services[K]
     }
     throw new LcodeErrorImpl({

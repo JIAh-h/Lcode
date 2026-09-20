@@ -1,5 +1,6 @@
 import type { Context } from '@lcode/context'
 import type { ModelSelection as CoreModelSelection } from '@lcode/agent-default-model'
+import type { LlmAdapter } from '@lcode/llm'
 import { ERROR_CODES, LcodeErrorImpl, withTimeout, TimeoutError } from '@lcode/util'
 import { ValueStream } from './types.ts'
 import type { ModelInfo, ModelSelection, ProbeFailure, ProbeResult, ProviderInfo } from './types.ts'
@@ -160,21 +161,20 @@ export class LocalModelApi {
     void input.base_url
     try {
       const adapter = this.requireAdapter(input.provider)
-      let models: readonly ModelInfo[]
       try {
-        models = await withTimeout((signal) => adapter.listModels(signal), this.timeoutMs)
+        const model = input.model
+        if (model !== undefined) {
+          // `/models` 是目录接口，不是模型调用能力的权威来源。部分专属网关会漏列
+          // 可实际调用的新模型；若据此直接报“模型不存在”，会产生假阴性。已选模型
+          // 因此用同一适配器发最小 chat 请求来验证端点、凭据和模型 ID 的组合。
+          await withTimeout((signal) => probeInvocation(adapter, input.provider, model, signal), this.timeoutMs)
+          return { ok: true, models: [{ id: model }] }
+        }
+        const models = await withTimeout((signal) => adapter.listModels(signal), this.timeoutMs)
+        return { ok: true, models }
       } catch (err) {
         throw this.mapTimeout(err, `${input.provider} 探测超时`)
       }
-      if (input.model !== undefined && !models.some((m) => m.id === input.model)) {
-        throw new LcodeErrorImpl({
-          code: ERROR_CODES.EL_UNKNOWN_MODEL,
-          message: `模型不在 ${input.provider} 的可用清单里：${input.model}`,
-          userMessage: '这个模型名不存在，请检查拼写。',
-          retryable: false,
-        })
-      }
-      return { ok: true, models }
     } catch (err) {
       return { ok: false, failure: toProbeFailure(err) }
     }
@@ -334,6 +334,31 @@ export class LocalModelApi {
       })
     }
     return err
+  }
+}
+
+/** 以最小用户消息验证“这个模型能否经当前适配器实际调用”。不记录结果，也不复用会话。 */
+async function probeInvocation(
+  adapter: LlmAdapter,
+  provider: string,
+  model: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const call = await adapter.prepareCall({ provider, model }, { signal })
+  const probeCall = {
+    ...call,
+    request: {
+      ...call.request,
+      body: {
+        system: 'You are a connectivity probe. Reply with OK.',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'ping' }] }],
+        tools: [],
+      },
+    },
+  }
+  for await (const _chunk of adapter.stream(probeCall, signal)) {
+    // 收到任一合法流片段即足以证明服务端接受了这次调用；不继续生成，避免测试连接耗费输出。
+    return
   }
 }
 
