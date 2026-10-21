@@ -45,7 +45,7 @@
 .snrow { position: relative; display: flex; align-items: center; border-radius: var(--r2); }
 .snrow:hover, .snrow:focus-within { background: var(--bg-inset); }
 .snrow.on { background: var(--accent-weak); }
-.snrow .sitem { flex: 1; min-width: 0; padding-right: 30px; }
+.snrow .sitem { flex: 1; min-width: 0; padding-left: 24px; padding-right: 30px; }
 .snrow > .pickwrap, .snrow > .sact { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); opacity: 0; transition: opacity 0.1s ease; }
 .snrow:hover > .pickwrap, .snrow:hover > .sact, .snrow:focus-within > .pickwrap, .snrow:focus-within > .sact { opacity: 1; }
 .sempty { padding: 12px; font-size: 12px; color: var(--text-muted); }
