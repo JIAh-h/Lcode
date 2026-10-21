@@ -98,11 +98,11 @@ export const EN: Readonly<Record<string, string>> = {
     'Archived sessions are kept until you restore or permanently archive them.',
   '回收站（不可恢复）': 'Trash (not recoverable)',
   清空回收站: 'Empty trash',
-  '永久归档的文件先进入回收站，7 天后清除；清空后无法恢复。':
-    'Permanently archived files go to the trash, are cleared after 7 days, and cannot be recovered once emptied.',
+  '永久归档的文件先进入回收站，保留 7 天；到期后需手动清空（或运行 lcode doctor --storage）才会真正删除，清空后无法恢复。':
+    'Permanently archived files stay in the trash for 7 days. After that they are still not removed automatically — empty the trash (or run lcode doctor --storage) to delete them. Emptied files cannot be recovered.',
   '回收站是空的。': 'Trash is empty.',
   '已过期，可清理': 'Expired — can be cleaned',
-  '{n} 天后清除': 'Cleared in {n} days',
+  '{n} 天后可清理': 'Can be cleaned in {n} days',
   '回收站里的 {n} 个文件（{size}）将被永久删除，无法恢复。':
     'The {n} file(s) in the trash ({size}) will be permanently deleted and cannot be recovered.',
   清空: 'Empty',

@@ -1362,7 +1362,7 @@ function ArchiveSection() {
           )}
         </div>
         <div className="hint" style={{ padding: '10px 16px' }}>
-          {t('永久归档的文件先进入回收站，7 天后清除；清空后无法恢复。')}
+          {t('永久归档的文件先进入回收站，保留 7 天；到期后需手动清空（或运行 lcode doctor --storage）才会真正删除，清空后无法恢复。')}
         </div>
         {trash.length === 0 ? (
           <div className="srow">
@@ -1377,7 +1377,7 @@ function ArchiveSection() {
                   {formatBytes(item.bytes)} · {new Date(item.deleted_at).toLocaleString()} ·{' '}
                   {item.expires_in_ms === 0
                     ? t('已过期，可清理')
-                    : t('{n} 天后清除', { n: Math.ceil(item.expires_in_ms / 86_400_000) })}
+                    : t('{n} 天后可清理', { n: Math.ceil(item.expires_in_ms / 86_400_000) })}
                 </span>
               </div>
             </div>
