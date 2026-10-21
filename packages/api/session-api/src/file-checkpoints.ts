@@ -127,12 +127,12 @@ export class LocalFileCheckpointService implements FileCheckpointService {
       if (!inside(workspaceRoot, path)) throw conflict(`检查点包含工作区外路径：${path}`)
       const bytes = await this.readBlob(input.sessionId, file.blob)
       if (bytes.length !== file.bytes || digest(bytes) !== file.blob) throw conflict(`检查点文件校验失败：${path}`)
-      await assertSafeDestination(path)
+      await assertSafeDestination(workspaceRoot, path)
       contents.set(path, bytes)
     }
     for (const path of removePaths) {
       if (!inside(workspaceRoot, path)) throw conflict(`检查点包含工作区外路径：${path}`)
-      await assertSafeDestination(path)
+      await assertSafeDestination(workspaceRoot, path)
     }
 
     for (const path of restorePaths) {
@@ -256,7 +256,21 @@ function parseManifest(raw: unknown, sessionId: string, checkpointId: string): F
   return { checkpointId, sessionId, workspaceRoot: absolute(raw.workspaceRoot), turn: raw.turn, endSeq: raw.endSeq, createdAt: raw.createdAt, files, trackedPaths, partial: raw.partial, skipped }
 }
 
-async function assertSafeDestination(path: string): Promise<void> {
+/** Reject a final target *and every existing parent* that is a symlink. */
+async function assertSafeDestination(workspaceRoot: string, path: string): Promise<void> {
+  let current = path
+  while (true) {
+    await assertNotSymlink(current)
+    if (current === workspaceRoot) return
+    if (!inside(workspaceRoot, current)) break
+    const parent = dirname(current)
+    if (parent === current) break
+    current = parent
+  }
+  throw conflict(`检查点目标不在工作区内：${path}`)
+}
+
+async function assertNotSymlink(path: string): Promise<void> {
   try {
     const info = await lstat(path)
     if (info.isSymbolicLink()) throw conflict(`拒绝经符号链接恢复：${path}`)

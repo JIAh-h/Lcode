@@ -363,6 +363,26 @@ describe('sessions.export', () => {
       code: 'ES-SESSION_NOT_FOUND',
     })
   })
+
+  it('JSONL 导出可导入为全新会话，连续重排 seq 且不覆盖源会话', async () => {
+    const sourceId = await seedClosedTurn('源会话')
+    const exported = await api.export({ session_id: sourceId, format: 'jsonl' })
+    const imported = await api.import({ path: exported.path })
+
+    expect(imported.session_id).not.toBe(sourceId)
+    expect(imported.imported_events).toBe(4)
+    expect(imported.last_seq).toBe(3)
+    expect((await api.meta({ session_id: imported.session_id })).header.title).toBe('导入的共享会话')
+    expect((await api.derive({ session_id: imported.session_id })).messages).toEqual((await api.derive({ session_id: sourceId })).messages)
+    expect((await api.list()).items).toHaveLength(2)
+  })
+
+  it('Markdown 或不存在路径不能当作可恢复分享包导入', async () => {
+    const sourceId = await seedClosedTurn()
+    const markdown = await api.export({ session_id: sourceId, format: 'md' })
+    await expect(api.import({ path: markdown.path })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
+    await expect(api.import({ path: join(home, 'missing.jsonl') })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
+  })
 })
 
 describe('索引侧跟得上（派生层，不阻塞会话）', () => {

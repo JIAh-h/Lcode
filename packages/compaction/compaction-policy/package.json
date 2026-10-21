@@ -1,0 +1,18 @@
+{
+  "name": "@lcode/compaction-policy",
+  "version": "0.1.0",
+  "description": "预算候选到可审计压缩事务的显式策略 provider",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/agent": "workspace:*",
+    "@lcode/agent-loop": "workspace:*",
+    "@lcode/compaction": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/context-budget": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

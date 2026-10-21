@@ -5,6 +5,7 @@ import type {
   EpochHeader,
   Impact,
   ModelMessage,
+  SessionService,
   SessionEvent,
   StreamChunk,
   SurfaceOp,
@@ -170,6 +171,18 @@ export interface ExportResult {
   readonly path: string
   readonly bytes: number
   readonly sha256: string
+}
+
+/** 从用户选择的 JSONL 分享文件导入为新的本地会话；Markdown 不可逆，不支持导入。 */
+export interface ImportSessionInput {
+  readonly path: string
+  readonly title?: string | undefined
+}
+
+export interface ImportSessionResult {
+  readonly session_id: string
+  readonly last_seq: number
+  readonly imported_events: number
 }
 
 /**
@@ -466,6 +479,8 @@ export interface SessionsApi {
   derive(input: DeriveInput): Promise<DeriveResult>
   flush(input: FlushInput): Promise<FlushResult>
   export(input: ExportInput): Promise<ExportResult>
+  /** 导入 JSONL 分享副本；永远生成新 session_id，不覆盖已有会话。 */
+  import(input: ImportSessionInput): Promise<ImportSessionResult>
   /** 全量导出 + `manifest.json`（22 §9.5；对应 `lcode export --all`） */
   exportAll(input?: ExportAllInput): Promise<ExportAllResult>
   /** 软删：从列表隐藏，文件不动（22 §9.3） */
@@ -484,4 +499,16 @@ export interface SessionsApi {
   archive(input?: ArchiveInput): Promise<ArchiveResult>
   /** 索引体检（22 §1.3；`lcode doctor --index` 的进程内入口，T6.4） */
   doctorIndex(): Promise<IndexDoctorReport>
+}
+
+/**
+ * 运行时会话 provider。它保留 `SessionsApi` 的进程内边界，并补上 Agent Loop
+ * 与策略层需要的已打开会话句柄和按会话工作区解析能力。
+ *
+ * 这是受发行包信任的内置服务契约；第三方插件不会从 Context 取得它。
+ */
+export interface RuntimeSessionsService extends SessionsApi {
+  sessionServiceFor(sessionId: string): SessionService
+  workspaceOf(sessionId: string): string | undefined
+  close(): Promise<void>
 }

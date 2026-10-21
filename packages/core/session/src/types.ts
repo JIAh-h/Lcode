@@ -309,9 +309,47 @@ export interface SessionEventMap {
     readonly restoredPaths: readonly string[]
     readonly removedPaths: readonly string[]
   }
-  'compaction/start': { readonly compactionId: string }
-  'compaction/summary': { readonly compactionId: string; readonly summary: string }
-  'compaction/end': { readonly compactionId: string }
+  /** P6-05：预设的最终纯数据快照；重放可解释该会话采用了哪些来源与覆盖顺序。 */
+  'preset/snapshot': {
+    readonly sessionId: string
+    readonly ids: readonly string[]
+    readonly sources: readonly ('user' | 'workspace')[]
+    readonly config: JsonValue
+  }
+  'compaction/start': { readonly compactionId: string; readonly trigger: 'manual' | 'threshold' }
+  'compaction/summary': {
+    readonly compactionId: string
+    readonly summary: string
+    readonly sourceEventSeqs: readonly number[]
+    readonly originalChars: number
+    readonly summaryChars: number
+  }
+  'compaction/end': { readonly compactionId: string; readonly outcome: 'completed' | 'abandoned' }
+  /** 大型工具结果已外置；原始 tool/result 仍保留在日志中。 */
+  'spill/created': {
+    readonly locator: string
+    readonly sourceEventSeq: number
+    readonly originalChars: number
+    readonly storedBytes: number
+  }
+  /** 子代理的父会话审计事实；子会话仍保留自己的完整事件日志。 */
+  'subagent/delegated': {
+    readonly delegationId: string
+    readonly childSessionId: string
+    readonly task: string
+    readonly depth: number
+    readonly allowedToolIds: readonly string[]
+    readonly profileId: string
+  }
+  'subagent/completed': {
+    readonly delegationId: string
+    readonly childSessionId: string
+    readonly outcome: 'completed' | 'failed' | 'depth-denied'
+    readonly result?: string | undefined
+    readonly error?: string | undefined
+    readonly depth?: number | undefined
+    readonly task?: string | undefined
+  }
 }
 
 export type SessionEventType = keyof SessionEventMap
@@ -333,6 +371,10 @@ export interface SessionEventEnvelope<K extends SessionEventType = SessionEventT
   readonly surfaceOp?: SurfaceOp
   /** 血缘：更早的 seq 列表（06 §6.2） */
   readonly sourceEventSeqs?: readonly number[]
+  /** 压缩事务关联 id；只允许压缩摘要 replace 事件携带。 */
+  readonly compactionId?: string
+  /** 被该摘要完整遮蔽的原始表面事件 seq。 */
+  readonly shadowedSeqs?: readonly number[]
   /** 向前兼容标记 */
   readonly ignorable?: true
 }

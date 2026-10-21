@@ -241,15 +241,42 @@ importers:
       '@lcode/agent-loop':
         specifier: workspace:*
         version: link:../../core/agent-loop
+      '@lcode/agent-presets':
+        specifier: workspace:*
+        version: link:../../preset/agent-presets
       '@lcode/agents-api':
         specifier: workspace:*
         version: link:../../api/agents-api
       '@lcode/approval':
         specifier: workspace:*
         version: link:../../interaction/approval
+      '@lcode/code-runtime':
+        specifier: workspace:*
+        version: link:../../code/code-runtime
+      '@lcode/code-runtime-subprocess':
+        specifier: workspace:*
+        version: link:../../code/code-runtime-subprocess
+      '@lcode/compaction':
+        specifier: workspace:*
+        version: link:../../compaction/compaction
+      '@lcode/compaction-policy':
+        specifier: workspace:*
+        version: link:../../compaction/compaction-policy
+      '@lcode/compaction-prune':
+        specifier: workspace:*
+        version: link:../../compaction/compaction-prune
+      '@lcode/compaction-summary':
+        specifier: workspace:*
+        version: link:../../compaction/compaction-summary
       '@lcode/context':
         specifier: workspace:*
         version: link:../../core/context
+      '@lcode/context-budget':
+        specifier: workspace:*
+        version: link:../../context/context-budget
+      '@lcode/context-local':
+        specifier: workspace:*
+        version: link:../../context/context-local
       '@lcode/credentials':
         specifier: workspace:*
         version: link:../../credentials/credentials
@@ -268,21 +295,42 @@ importers:
       '@lcode/llm-openai-compatible':
         specifier: workspace:*
         version: link:../../llm/llm-openai-compatible
+      '@lcode/lsp':
+        specifier: workspace:*
+        version: link:../../lsp/lsp
       '@lcode/model-api':
         specifier: workspace:*
         version: link:../../api/model-api
+      '@lcode/model-router':
+        specifier: workspace:*
+        version: link:../../model/model-router
       '@lcode/permission-presets':
         specifier: workspace:*
         version: link:../../interaction/permission-presets
       '@lcode/plan-mode':
         specifier: workspace:*
         version: link:../../interaction/plan-mode
+      '@lcode/plugin-host':
+        specifier: workspace:*
+        version: link:../../extension/plugin-host
+      '@lcode/plugin-registry':
+        specifier: workspace:*
+        version: link:../../extension/plugin-registry
+      '@lcode/runtime-composition':
+        specifier: workspace:*
+        version: link:../../core/runtime-composition
       '@lcode/sandbox':
         specifier: workspace:*
         version: link:../../sandbox/sandbox
+      '@lcode/sandbox-linux':
+        specifier: workspace:*
+        version: link:../../sandbox/sandbox-linux
       '@lcode/sandbox-local':
         specifier: workspace:*
         version: link:../../sandbox/sandbox-local
+      '@lcode/sandbox-macos':
+        specifier: workspace:*
+        version: link:../../sandbox/sandbox-macos
       '@lcode/sandbox-win32':
         specifier: workspace:*
         version: link:../../sandbox/sandbox-win32
@@ -304,6 +352,15 @@ importers:
       '@lcode/shell-local':
         specifier: workspace:*
         version: link:../../shell/shell-local
+      '@lcode/skill-filesystem':
+        specifier: workspace:*
+        version: link:../../skill/skill-filesystem
+      '@lcode/spill-local':
+        specifier: workspace:*
+        version: link:../../compaction/spill-local
+      '@lcode/subagent-inprocess':
+        specifier: workspace:*
+        version: link:../../subagent/subagent-inprocess
       '@lcode/subprocess-local':
         specifier: workspace:*
         version: link:../../subprocess/subprocess-local
@@ -313,27 +370,45 @@ importers:
       '@lcode/terminal-pty':
         specifier: workspace:*
         version: link:../../terminal/terminal-pty
+      '@lcode/tool-code':
+        specifier: workspace:*
+        version: link:../../code/tool-code
       '@lcode/tool-fs':
         specifier: workspace:*
         version: link:../../fs/tool-fs
+      '@lcode/tool-lsp':
+        specifier: workspace:*
+        version: link:../../lsp/tool-lsp
       '@lcode/tool-shell':
         specifier: workspace:*
         version: link:../../shell/tool-shell
+      '@lcode/tool-skill':
+        specifier: workspace:*
+        version: link:../../skill/tool-skill
+      '@lcode/tool-subagent':
+        specifier: workspace:*
+        version: link:../../subagent/tool-subagent
       '@lcode/tool-terminal':
         specifier: workspace:*
         version: link:../../terminal/tool-terminal
+      '@lcode/tool-web':
+        specifier: workspace:*
+        version: link:../../web/tool-web
       '@lcode/tools':
         specifier: workspace:*
         version: link:../../core/tools
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util
+      '@lcode/web':
+        specifier: workspace:*
+        version: link:../../web/web
     devDependencies:
       '@lcode/llm-replay':
         specifier: workspace:*
         version: link:../../llm/llm-replay
 
-  packages/compaction/compaction:
+  packages/code/code-runtime:
     dependencies:
       '@lcode/context':
         specifier: workspace:*
@@ -342,8 +417,82 @@ importers:
         specifier: workspace:*
         version: link:../../util
 
+  packages/code/code-runtime-subprocess:
+    dependencies:
+      '@lcode/code-runtime':
+        specifier: workspace:*
+        version: link:../code-runtime
+      '@lcode/sandbox':
+        specifier: workspace:*
+        version: link:../../sandbox/sandbox
+      '@lcode/subprocess':
+        specifier: workspace:*
+        version: link:../../subprocess/subprocess
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+    devDependencies:
+      '@lcode/subprocess-local':
+        specifier: workspace:*
+        version: link:../../subprocess/subprocess-local
+
+  packages/code/tool-code:
+    dependencies:
+      '@lcode/code-runtime':
+        specifier: workspace:*
+        version: link:../code-runtime
+      '@lcode/tools':
+        specifier: workspace:*
+        version: link:../../core/tools
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+    devDependencies:
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../../core/context
+
+  packages/compaction/compaction:
+    dependencies:
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../../core/context
+      '@lcode/session':
+        specifier: workspace:*
+        version: link:../../core/session
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
+  packages/compaction/compaction-policy:
+    dependencies:
+      '@lcode/agent':
+        specifier: workspace:*
+        version: link:../../core/agent
+      '@lcode/agent-loop':
+        specifier: workspace:*
+        version: link:../../core/agent-loop
+      '@lcode/compaction':
+        specifier: workspace:*
+        version: link:../compaction
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../../core/context
+      '@lcode/context-budget':
+        specifier: workspace:*
+        version: link:../../context/context-budget
+      '@lcode/session':
+        specifier: workspace:*
+        version: link:../../core/session
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
   packages/compaction/compaction-prune:
     dependencies:
+      '@lcode/agent-loop':
+        specifier: workspace:*
+        version: link:../../core/agent-loop
       '@lcode/compaction':
         specifier: workspace:*
         version: link:../compaction
@@ -374,6 +523,9 @@ importers:
 
   packages/compaction/spill-local:
     dependencies:
+      '@lcode/agent-loop':
+        specifier: workspace:*
+        version: link:../../core/agent-loop
       '@lcode/context':
         specifier: workspace:*
         version: link:../../core/context
@@ -384,11 +536,59 @@ importers:
         specifier: workspace:*
         version: link:../../util
 
+  packages/context/context-budget:
+    dependencies:
+      '@lcode/agent':
+        specifier: workspace:*
+        version: link:../../core/agent
+      '@lcode/agent-loop':
+        specifier: workspace:*
+        version: link:../../core/agent-loop
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../../core/context
+      '@lcode/session':
+        specifier: workspace:*
+        version: link:../../core/session
+      '@lcode/system-prompt':
+        specifier: workspace:*
+        version: link:../../core/system-prompt
+      '@lcode/tools':
+        specifier: workspace:*
+        version: link:../../core/tools
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
   packages/context/context-instructions:
     dependencies:
       '@lcode/context':
         specifier: workspace:*
         version: link:../../core/context
+      '@lcode/system-prompt':
+        specifier: workspace:*
+        version: link:../../core/system-prompt
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
+  packages/context/context-local:
+    dependencies:
+      '@lcode/agent':
+        specifier: workspace:*
+        version: link:../../core/agent
+      '@lcode/agent-loop':
+        specifier: workspace:*
+        version: link:../../core/agent-loop
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../../core/context
+      '@lcode/session':
+        specifier: workspace:*
+        version: link:../../core/session
+      '@lcode/session-api':
+        specifier: workspace:*
+        version: link:../../api/session-api
       '@lcode/system-prompt':
         specifier: workspace:*
         version: link:../../core/system-prompt
@@ -514,6 +714,12 @@ importers:
         specifier: workspace:*
         version: link:../../util
 
+  packages/core/runtime-composition:
+    dependencies:
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../context
+
   packages/core/scope:
     dependencies:
       '@lcode/util':
@@ -591,9 +797,25 @@ importers:
       '@lcode/plugin-manifest':
         specifier: workspace:*
         version: link:../plugin-manifest
+      '@lcode/plugin-sdk':
+        specifier: workspace:*
+        version: link:../plugin-sdk
+      '@lcode/subprocess':
+        specifier: workspace:*
+        version: link:../../subprocess/subprocess
+      '@lcode/system-prompt':
+        specifier: workspace:*
+        version: link:../../core/system-prompt
+      '@lcode/tools':
+        specifier: workspace:*
+        version: link:../../core/tools
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util
+    devDependencies:
+      '@lcode/subprocess-local':
+        specifier: workspace:*
+        version: link:../../subprocess/subprocess-local
 
   packages/extension/plugin-manifest:
     dependencies:
@@ -992,6 +1214,21 @@ importers:
         specifier: workspace:*
         version: link:../../util
 
+  packages/model/model-router:
+    dependencies:
+      '@lcode/agent-default-model':
+        specifier: workspace:*
+        version: link:../../core/agent-default-model
+      '@lcode/agent-loop':
+        specifier: workspace:*
+        version: link:../../core/agent-loop
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../../core/context
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
   packages/preset/agent-presets:
     dependencies:
       '@lcode/context':
@@ -1003,6 +1240,9 @@ importers:
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util
+      js-yaml:
+        specifier: 4.3.2
+        version: 4.3.2
 
   packages/preset/preset:
     dependencies:
@@ -1264,12 +1504,27 @@ importers:
 
   packages/subagent/subagent-inprocess:
     dependencies:
+      '@lcode/agent-loop':
+        specifier: workspace:*
+        version: link:../../core/agent-loop
       '@lcode/context':
         specifier: workspace:*
         version: link:../../core/context
+      '@lcode/runtime-composition':
+        specifier: workspace:*
+        version: link:../../core/runtime-composition
+      '@lcode/session':
+        specifier: workspace:*
+        version: link:../../core/session
+      '@lcode/session-api':
+        specifier: workspace:*
+        version: link:../../api/session-api
       '@lcode/subagent':
         specifier: workspace:*
         version: link:../subagent
+      '@lcode/system-prompt':
+        specifier: workspace:*
+        version: link:../../core/system-prompt
       '@lcode/tools':
         specifier: workspace:*
         version: link:../../core/tools

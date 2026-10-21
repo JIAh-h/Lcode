@@ -1,3 +1,5 @@
+import type {} from '@lcode/context'
+
 import type { SessionEvent } from '@lcode/session'
 import type { Disposer, SessionId } from '@lcode/util'
 

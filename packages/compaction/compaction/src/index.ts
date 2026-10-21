@@ -1,1 +1,1 @@
-export type { CompactionPlan, CompactionService } from './compaction.ts'
+export type { CompactionResult, CompactionService } from './compaction.ts'

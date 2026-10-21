@@ -6,6 +6,7 @@ import type {
   UserInput,
 } from "@lcode/agent";
 import type { Context } from "@lcode/context";
+import type {} from "@lcode/system-prompt";
 import type { LlmAdapter, PreparedCall } from "@lcode/llm";
 import type { ModelSelection } from "@lcode/agent-default-model";
 import type { SessionService } from "@lcode/session";
@@ -415,10 +416,33 @@ export class TurnEngine {
           retryable: false,
         });
       }
-      const turnSelection: ModelSelection = {
+      const initialSelection: ModelSelection = {
         provider: selectedModel.provider,
         model: selectedModel.model,
         ...(selectedModel.params === undefined ? {} : { params: { ...selectedModel.params } }),
+      };
+      // 模型路由必须发生在解析 Adapter 之前。结果在本回合开始即冻结，后续步骤不能
+      // 因设置变化或临时降级混用另一家 Provider，保证 request/header 可重放。
+      const selectionArgs: { agentId: string; sessionId: string; turn: number; selection: ModelSelection } = {
+        agentId: this.inner.id,
+        sessionId: this.inner.sessionId,
+        turn,
+        selection: initialSelection,
+      };
+      const routedSelection = await this.deps.ctx.waterfall<
+        "agent/model-selection",
+        { agentId: string; sessionId: string; turn: number; selection: ModelSelection },
+        ModelSelection
+      >(
+        "agent/model-selection",
+        selectionArgs,
+        undefined,
+        async () => selectionArgs.selection,
+      );
+      const turnSelection: ModelSelection = {
+        provider: routedSelection.provider,
+        model: routedSelection.model,
+        ...(routedSelection.params === undefined ? {} : { params: { ...routedSelection.params } }),
       };
 
       for (;;) {
@@ -569,7 +593,7 @@ export class TurnEngine {
             sessionId: this.inner.sessionId,
             agentId: this.inner.id,
           });
-          session.append({
+          const toolResultEvent = session.append({
             type: "tool/result",
             data: {
               turn,
@@ -583,6 +607,14 @@ export class TurnEngine {
               ...(result.error !== undefined ? { error: result.error } : {}),
               ...(result.meta !== undefined ? { meta: result.meta } : {}),
             },
+          });
+          await this.deps.ctx.emit('agent/tool-result-appended', {
+            agentId: this.inner.id,
+            sessionId: this.inner.sessionId,
+            session,
+            sourceEventSeq: toolResultEvent.seq,
+            tool: { callId: call.callId, name: call.name },
+            message: toolResultEvent.data.message,
           });
           if (signal.aborted) {
             reason = "cancelled";

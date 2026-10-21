@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@lcode/compaction": "workspace:*",
+    "@lcode/agent-loop": "workspace:*",
     "@lcode/session": "workspace:*",
     "@lcode/context": "workspace:*",
     "@lcode/util": "workspace:*"

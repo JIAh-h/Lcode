@@ -160,11 +160,20 @@ try {
       history: typeof l?.session?.history === 'function',
       body: typeof l?.session?.body === 'function',
       why: typeof l?.session?.why === 'function',
+      plugins: typeof l?.plugins?.list === 'function' && typeof l?.plugins?.inspect === 'function',
+      composition: typeof l?.runtime?.composition === 'function',
     }
   })()`);
   console.log("① preload 桥:", JSON.stringify(bridge));
-  if (!bridge.session || !bridge.agent || !bridge.history || !bridge.body || !bridge.why)
+  if (!bridge.session || !bridge.agent || !bridge.history || !bridge.body || !bridge.why || !bridge.plugins || !bridge.composition)
     throw new Error("preload 桥不完整");
+
+  const plugins = await cdp.eval(`(async () => await window.lcode.plugins.list())()`);
+  if (!Array.isArray(plugins)) throw new Error("插件列表 IPC 返回不完整");
+  const composition = await cdp.eval(`(async () => await window.lcode.runtime.composition())()`);
+  if (composition?.profile !== 'desktop-default' || !Array.isArray(composition?.entries)) {
+    throw new Error("运行时组合 IPC 返回不完整");
+  }
 
   // ── ② 先配好模型（**自包含**：不依赖跑之前恰好配过什么）──
   // 以前这一步是隐含的：脚本假设 LCODE_HOME 里已经有一个配好的模型。

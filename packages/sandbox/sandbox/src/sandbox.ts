@@ -1,3 +1,5 @@
+import type {} from '@lcode/context'
+
 /**
  * SandboxService —— OS 原生沙箱约束（文档 12 §4.7 / D13）。
  *

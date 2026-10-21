@@ -1,0 +1,25 @@
+{
+  "name": "@lcode/context-budget",
+  "version": "0.1.0",
+  "description": "上下文 token 估算与摘要收益判定 provider",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/agent": "workspace:*",
+    "@lcode/agent-loop": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

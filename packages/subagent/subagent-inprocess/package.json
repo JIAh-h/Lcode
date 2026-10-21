@@ -12,6 +12,11 @@
   },
   "dependencies": {
     "@lcode/subagent": "workspace:*",
+    "@lcode/agent-loop": "workspace:*",
+    "@lcode/runtime-composition": "workspace:*",
+    "@lcode/session-api": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
     "@lcode/tools": "workspace:*",
     "@lcode/context": "workspace:*",
     "@lcode/util": "workspace:*"

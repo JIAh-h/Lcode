@@ -1482,6 +1482,52 @@ settings → credentials → llm-deepseek → subprocess → bash-local
 
 **记住这个骨架**：**spine bundle（核心服务 + 循环）+ 可替换的 LLM adapter + 可替换的 shell executor + 持久化**。这就是"一个能跑的 code agent"的最小集合。
 
+#### Lcode 的渐进迁移：内部 Bundle 与外部插件分轨
+
+运行时首先把会话能力以 `ctx.sessions` 注册为内置 provider。它是已打开会话的唯一 owner，向
+Agent Loop、检查点、上下文工程和子代理提供同一条可审计日志；外部插件不获得该服务句柄，仍只能
+通过声明过的 RPC 能力目录工作。这样长会话工程可以替换或叠加 session provider，而不需要反向依赖
+桌面装配层。
+
+Lcode 当前已经有 `Service Definition / Provider / Consumer` 接缝和 `ctx`，但 `createAgentRuntime()` 仍直接调用各个 `createLocal*()` 工厂。这意味着服务**可以替换**，却尚未由 Profile/Bundle 统一**装配**。不能为了追求“全插件化”而把现有会话日志、审批或沙箱直接开放给第三方代码。
+
+目标结构分三层：
+
+| 层 | 负责内容 | 信任与运行位置 | 约束 |
+|---|---|---|---|
+| 组合内核 | bundle 解析、服务依赖排序、重复 provider 拒绝、effect/disposer 反向释放、装配快照与 `dump` | 主进程，最小可信内核 | 不提供业务能力；只管理已声明的内部模块 |
+| 内置 Bundle | `desktop-default` / `cli-default` 选择会话、模型、工具、审批策略和沙箱 provider | 主进程 Context，随发行包审计 | 只依赖 Service Definition；替换 provider 必须通过同一契约和验收 |
+| 第三方插件 | 本地安装的工具、提示段、事件订阅和未来受控服务扩展 | 独立 utility process | manifest 快照、RPC capability、沙箱、无凭据投影；不能取得 root Context 或覆盖核心 provider |
+
+这里的“插件”有两种不同含义：**内置 Bundle 行**是受发行包信任的装配单位，能提供一个已声明的服务；**外部插件**是不可信扩展，当前只能经 RPC 请求 core 代理登记能力。两者共享生命周期术语，但不能共享权限模型。
+
+Lcode 的 Profile/Bundle 第一版使用 TypeScript 的静态声明，不急于引入可任意执行表达式的 YAML patch：
+
+```ts
+interface InternalBundleEntry {
+  readonly id: string
+  readonly provides: readonly string[]
+  readonly requires?: readonly string[]
+  mount(ctx: RuntimeContext): Promise<Disposer> | Disposer
+}
+
+interface RuntimeProfile {
+  readonly id: 'desktop-default' | 'cli-default'
+  readonly bundles: readonly InternalBundleEntry[]
+}
+```
+
+装配器必须按依赖顺序 mount；任何缺失或重复的 service key 都在启动前失败；若中途失败，则按逆序执行已得到的 disposer。它还必须生成不含凭据、路径和句柄的 `RuntimeCompositionSnapshot`，供 `lcode --dump-config`、桌面诊断和测试断言当前实际组合。**同一个 profile 的已运行快照**才可被后续 session/agent 继承，不能在运行途中重新读取可变配置来拼出另一代组合。
+
+迁移顺序以行为等价为前提：
+
+1. 先实现组合内核和 `desktop-default`，把现有直接装配原样包进内置 entries，测试输出与现状一致。
+2. 迁移替换价值高、状态较少的 provider：模型、`fs`、`subprocess`、sandbox、shell、terminal/jobs、审批策略和工具集合。
+3. 再迁移 `systemPrompt`、会话持久化、`agents` 与 `agentLoop`。这些服务携带历史/活体状态，迁移时必须保留同一 session 的运行中实例与事件不变量。
+4. 最后让 Agent Preset 以 session scope 组合已声明的工具、提示段和上下文 provider；它不得替换 root 的 sessions、approval、credentials 或 sandbox。
+
+验收底线：默认 profile 与当前 `createAgentRuntime()` 的工具目录、请求头、审批结果、会话事件和退出释放结果相同；替换 provider 的测试必须证明 consumer 未 import 具体 provider；外部插件即使声明同名 service 也只能被拒绝，不能覆盖内置服务。
+
 ### 7.5 对外暴露：SDK 与 ACP
 
 - **JSON-RPC SDK**（`sdk/protocol` + `server` + `client`）：ndjson JSON-RPC 2.0。

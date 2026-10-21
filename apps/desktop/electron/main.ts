@@ -407,6 +407,61 @@ ipcMain.handle('lcode:permissions.set', async (_e: IpcMainInvokeEvent, input: un
   return { ...presets.snapshot(), audit: presets.audit() };
 });
 
+// ─────────────── 插件（P6 产品入口；renderer 只拿安全投影） ───────────────
+
+interface PluginRef {
+  readonly id: string;
+  readonly version: string;
+}
+
+function pluginRef(input: unknown): PluginRef {
+  if (typeof input !== 'object' || input === null) throw new Error('插件参数必须是对象');
+  const record = input as Record<string, unknown>;
+  if (typeof record.id !== 'string' || record.id === '') throw new Error('插件 id 必填');
+  if (typeof record.version !== 'string' || record.version === '') throw new Error('插件 version 必填');
+  return { id: record.id, version: record.version };
+}
+
+function publicPlugins(rt: AgentRuntime) {
+  const active = new Set(rt.plugins.inspect().map((entry) => `${entry.id}@${entry.version}`));
+  return rt.plugins.list().map((entry) => ({
+    id: entry.id,
+    version: entry.version,
+    state: entry.state,
+    active: active.has(`${entry.id}@${entry.version}`),
+    source: entry.source,
+    installedAt: entry.installedAt,
+    permissions: entry.permissions,
+    contributes: entry.contributes,
+  }));
+}
+
+ipcMain.handle('lcode:plugins.list', async () => publicPlugins(await agentRuntime()));
+ipcMain.handle('lcode:plugins.inspect', async () => (await agentRuntime()).plugins.inspect());
+ipcMain.handle('lcode:runtime.composition', async () => (await agentRuntime()).composition);
+ipcMain.handle('lcode:plugins.install', async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const path = (input as { path?: unknown } | null)?.path;
+  if (typeof path !== 'string' || path.trim() === '') throw new Error('插件目录 path 必填');
+  const rt = await agentRuntime();
+  const installed = await rt.plugins.installLocal(path);
+  return { installed, plugins: publicPlugins(rt) };
+});
+ipcMain.handle('lcode:plugins.activate', async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const rt = await agentRuntime();
+  await rt.plugins.activate(pluginRef(input));
+  return publicPlugins(rt);
+});
+ipcMain.handle('lcode:plugins.deactivate', async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const rt = await agentRuntime();
+  await rt.plugins.deactivate(pluginRef(input));
+  return publicPlugins(rt);
+});
+ipcMain.handle('lcode:plugins.uninstall', async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const rt = await agentRuntime();
+  await rt.plugins.uninstall(pluginRef(input));
+  return publicPlugins(rt);
+});
+
 /** 把一条消息推给所有窗口 */
 function pushToRenderer(channel: string, payload: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
@@ -604,6 +659,21 @@ ipcMain.handle(
     return (await agentRuntime()).sessions.export({
       session_id: sessionId,
       format,
+    });
+  },
+);
+
+ipcMain.handle(
+  "lcode:session.import",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    const path = record["path"];
+    const title = record["title"];
+    if (typeof path !== "string" || path === "") throw new Error("path 必填");
+    if (title !== undefined && typeof title !== "string") throw new Error("title 必须是字符串");
+    return (await agentRuntime()).sessions.import({
+      path,
+      ...(typeof title === "string" && title !== "" ? { title } : {}),
     });
   },
 );
@@ -1157,4 +1227,19 @@ app.on("window-all-closed", () => {
    */
   abortPendingApprovals();
   if (process.platform !== "darwin") app.quit();
+});
+
+let runtimeDisposing = false;
+app.on('before-quit', (event) => {
+  if (runtime === null || runtimeDisposing) return;
+  // Electron 不会等待 async 监听器。阻止这一次退出，等宿主反向释放 utility
+  // process，再以无回调的 exit 收尾，避免 Windows 上留下插件 Node 子进程。
+  event.preventDefault();
+  runtimeDisposing = true;
+  void runtime.dispose().catch((error: unknown) => {
+    console.error('[lcode] 退出时释放 runtime 失败：', error);
+  }).finally(() => {
+    runtime = null;
+    app.exit(0);
+  });
 });

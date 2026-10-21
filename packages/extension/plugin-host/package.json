@@ -13,9 +13,16 @@
   "dependencies": {
     "@lcode/context": "workspace:*",
     "@lcode/plugin-manifest": "workspace:*",
+    "@lcode/plugin-sdk": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
+    "@lcode/subprocess": "workspace:*",
+    "@lcode/tools": "workspace:*",
     "@lcode/util": "workspace:*"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@lcode/subprocess-local": "workspace:*"
   }
 }

@@ -22,7 +22,7 @@ export interface FileHeaderFrame {
   readonly keyId: string | null
 }
 
-/** 事件帧（22 §4.1：seq/time/data/surfaceOp/sourceEventSeqs/ignorable） */
+/** 事件帧（22 §4.1：seq/time/data/surfaceOp/sourceEventSeqs/compaction/ignorable） */
 export interface EventFrame {
   readonly type: string
   readonly seq: number
@@ -30,6 +30,8 @@ export interface EventFrame {
   readonly data: unknown
   readonly surfaceOp?: 'append' | { readonly op: 'replace'; readonly start: number; readonly end: number }
   readonly sourceEventSeqs?: readonly number[]
+  readonly compactionId?: string
+  readonly shadowedSeqs?: readonly number[]
   readonly ignorable?: boolean
 }
 

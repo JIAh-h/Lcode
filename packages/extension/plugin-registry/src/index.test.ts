@@ -124,4 +124,37 @@ describe("LocalPluginRegistry", () => {
     ).rejects.toMatchObject({ code: ERROR_CODES.EX_MANIFEST_INVALID });
     expect(registry().list()).toHaveLength(1);
   });
+
+  it("只向生命周期提供仍与安装哈希一致的 entry，并持久化 enabled 状态", async () => {
+    const source = await createLocalPlugin();
+    await registry().install({ source: { kind: "local", path: source } });
+
+    await expect(
+      registry().activationSource({ id: "com.example.line-tools", version: "1.2.0" }),
+    ).resolves.toMatchObject({
+      manifest: { id: "com.example.line-tools", entry: "./dist/index.js" },
+      entryPath: join(home, "plugins", "com.example.line-tools", "1.2.0", "dist", "index.js"),
+    });
+    await registry().setEnabled({ id: "com.example.line-tools", version: "1.2.0", enabled: true });
+    expect(registry().list()[0]).toMatchObject({ state: "enabled" });
+
+    await writeFile(
+      join(home, "plugins", "com.example.line-tools", "1.2.0", "dist", "index.js"),
+      "export const changed = true\n",
+    );
+    await expect(
+      registry().activationSource({ id: "com.example.line-tools", version: "1.2.0" }),
+    ).rejects.toMatchObject({ code: ERROR_CODES.EX_MANIFEST_INVALID });
+  });
+
+  it("卸载会删除安装记录和快照", async () => {
+    const source = await createLocalPlugin();
+    await registry().install({ source: { kind: "local", path: source } });
+    await registry().uninstall({ id: "com.example.line-tools", version: "1.2.0" });
+
+    expect(registry().list()).toEqual([]);
+    await expect(
+      readFile(join(home, "plugins", "com.example.line-tools", "1.2.0", "lcode.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
 });

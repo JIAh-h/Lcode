@@ -308,6 +308,26 @@ describe("批次③ · 无密钥跑通一次循环", () => {
     });
   });
 
+  it("模型路由在选择 Adapter 前发生，并把整轮选择固定进 request/header", async () => {
+    const h = await makeHarness(textScript("默认模型不应被调用"));
+    const routed = new ReplayLlmAdapter({ ...textScript("已由路由模型完成"), provider: "routed" });
+    h.ctx.get("llm").register(routed);
+    h.ctx.on("agent/model-selection", (async (
+      args: { selection: { provider: string; model: string } },
+      next: () => Promise<{ provider: string; model: string }>,
+    ) => {
+      const value = args;
+      value.selection = { provider: "routed", model: "routed-model" };
+      return await next();
+    }) as never);
+    const handle = await h.loop.create({ sessionId: asSessionId("s1"), id: asAgentId("a1") });
+    await handle.followup({ kind: "text", text: "路由一次" });
+    expect(routed.served).toHaveLength(1);
+    expect(h.session.events().find((event) => event.type === "request/header")).toMatchObject({
+      data: { header: { provider: "routed", model: "routed-model" } },
+    });
+  });
+
   it("每轮复制模型采样参数，避免后续设置改写当前请求", async () => {
     const base = new ReplayLlmAdapter(textScript("参数已应用"));
     const selections: unknown[] = [];

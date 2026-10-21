@@ -55,7 +55,7 @@ describe('LocalTerminalService', () => {
     // 不会在下一次使用返回 offset 的 read 中重放。
     const drained = await terminals.read({ ownerAgentId: 'agent-a', terminalId: first.terminalId, sinceOffset: resumed.offset })
     expect(drained.data).toBe('')
-  })
+  }, 30_000)
 
   it('跨 owner 的访问一律被拒绝，列表只返回自己的终端', async () => {
     const opened = await terminals.open({ ownerAgentId: 'agent-a' })

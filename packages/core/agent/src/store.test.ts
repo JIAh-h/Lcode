@@ -69,6 +69,8 @@ describe('InMemoryAgentStore', () => {
     await handle.dispose()
     await handle.dispose()
     await handle.cancel('user')
+    expect(store.get(handle.id)).toBeUndefined()
+    expect(store.list()).toEqual([])
     expect(events).toContain('inbox:steer')
     await expect(handle.followup({ kind: 'text', text: 'after' })).rejects.toMatchObject({ code: 'EC-NOT_RUNNING' })
     await expect(handle.inject({ content: 'after', source: 'test' })).rejects.toMatchObject({ code: 'EC-NOT_RUNNING' })

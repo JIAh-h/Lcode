@@ -1,0 +1,19 @@
+{
+  "name": "@lcode/runtime-composition",
+  "version": "0.1.0",
+  "description": "Lcode 内部运行时组合：Profile、Bundle 依赖校验、逆序释放与脱敏快照",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/context": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

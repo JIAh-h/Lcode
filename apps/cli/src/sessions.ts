@@ -20,6 +20,7 @@ const USAGE = `lcode sessions — 会话操作
   lcode sessions show <id>
   lcode export <id> [--format jsonl|md] [--out <dir>]
   lcode export --all [--format jsonl|md] [--out <dir>]
+  lcode import <file.jsonl> [--title <name>]  导入为新的本地会话
   lcode delete <id>            软删（从列表隐藏，文件保留）
   lcode restore <id>           撤销软删
   lcode purge <id> --exported  硬删（移入回收站，7 天后清除）
@@ -135,6 +136,16 @@ export async function runSessionsCommand(argv: readonly string[]): Promise<numbe
         const result = await api.export({ session_id: id, format })
         console.log(`已导出 → ${result.path}`)
         console.log(`  ${formatBytes(result.bytes)}  sha256=${result.sha256}`)
+        return 0
+      }
+
+      case 'import': {
+        const source = positional[0]
+        if (source === undefined) return usageError('import 需要一个 JSONL 文件路径')
+        const title = flags.get('title')
+        const result = await api.import({ path: source, ...(typeof title === 'string' ? { title } : {}) })
+        console.log(`已导入为新会话：${result.session_id}`)
+        console.log(`  ${result.imported_events} 个事件，最后序号 ${result.last_seq}`)
         return 0
       }
 

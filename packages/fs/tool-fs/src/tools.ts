@@ -42,6 +42,10 @@ export interface ToolFsDeps {
   readonly workspaceOf?: ((sessionId: string) => string | undefined) | undefined
   /** 从 `ExecuteOpts.scope` 里取出会话 id（默认认 `{ sessionId }`） */
   readonly sessionIdOf?: ((scope: unknown) => string | undefined) | undefined
+  /** 会话范围内的 spill 读取；普通文件系统不会获得 `lcode://` 的解释权。 */
+  readonly spill?: {
+    read(input: { readonly sessionId: string; readonly locator: string; readonly offset?: number; readonly limit?: number }): Promise<{ readonly text: string; readonly totalLines: number; readonly truncated: boolean }>
+  } | undefined
 }
 
 /** 把一个路径按工作区解析成绝对路径（POSIX 分隔符，与接口层判定口径一致） */
@@ -96,10 +100,29 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
     },
     describeAction: (parsed) => {
       const p = parsed as { path: string }
+      if (isSpillLocator(p.path)) return { summary: `读取会话中的溢出结果 ${p.path}` }
       return { summary: `读取 ${p.path}`, paths: [{ path: p.path, mode: 'read' }] }
     },
     execute: async (call, opts) => {
       const p = call.parsed as { path: string; offset?: number; limit?: number }
+      if (isSpillLocator(p.path)) {
+        const sessionId = sessionIdOf(opts.scope)
+        if (sessionId === undefined || deps.spill === undefined) throw new Error('spill locator requires an active session')
+        const result = await deps.spill.read({
+          sessionId,
+          locator: p.path,
+          ...(p.offset === undefined ? {} : { offset: p.offset }),
+          ...(p.limit === undefined ? {} : { limit: p.limit }),
+        })
+        const offset = Math.max(1, p.offset ?? 1)
+        return {
+          path: p.path,
+          offset,
+          lines: result.text === '' ? [] : result.text.split('\n').map((text, index) => ({ number: offset + index, text })),
+          totalLines: result.totalLines,
+          truncated: result.truncated,
+        } as never
+      }
       return (await fs.read(absolute(rootFor(opts), p.path), {
         ...(p.offset === undefined ? {} : { offset: p.offset }),
         ...(p.limit === undefined ? {} : { limit: p.limit }),
@@ -280,6 +303,10 @@ function defaultSessionIdOf(scope: unknown): string | undefined {
   if (typeof scope !== 'object' || scope === null) return undefined
   const id = (scope as { sessionId?: unknown }).sessionId
   return typeof id === 'string' && id !== '' ? id : undefined
+}
+
+function isSpillLocator(path: string): boolean {
+  return /^lcode:\/\/spill\/[0-9a-f-]{36}$/i.test(path)
 }
 
 /**

@@ -1,1 +1,1 @@
-export type { PresetService } from './preset.ts'
+export type { PresetCatalogEntry, PresetService } from './preset.ts'

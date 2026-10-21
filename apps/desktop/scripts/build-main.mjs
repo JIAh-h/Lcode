@@ -135,8 +135,18 @@ async function copyZstdWasm() {
   console.log(`  dist\\zstd.wasm     ${(await stat(dest)).size} B`)
 }
 
+/** The plugin runner must remain a standalone ESM file for `node <runner> <entry>`. */
+async function copyPluginUtilityRunner() {
+  const src = join(desktopRoot, '..', '..', 'packages', 'extension', 'plugin-host', 'src', 'utility-runner.mjs')
+  const dest = join(desktopRoot, 'dist', 'utility-runner.mjs')
+  await mkdir(join(desktopRoot, 'dist'), { recursive: true })
+  await copyFile(src, dest)
+  console.log(`  dist\\utility-runner.mjs     ${(await stat(dest)).size} B`)
+}
+
 if (watch) {
   await copyZstdWasm()
+  await copyPluginUtilityRunner()
   const contexts = await Promise.all(
     TARGETS.map((t) => context({ ...SHARED, ...t.extra, entryPoints: [t.entry], outfile: t.out })),
   )
@@ -147,4 +157,5 @@ if (watch) {
     TARGETS.map((t) => build({ ...SHARED, ...t.extra, entryPoints: [t.entry], outfile: t.out })),
   )
   await copyZstdWasm()
+  await copyPluginUtilityRunner()
 }

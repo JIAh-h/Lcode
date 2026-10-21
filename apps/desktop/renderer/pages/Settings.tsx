@@ -1009,6 +1009,98 @@ function TrustSection() {
   )
 }
 
+/* ───────── 分区：插件 ───────── */
+
+interface PluginEntry {
+  readonly id: string
+  readonly version: string
+  readonly state: 'installed' | 'enabled'
+  readonly active: boolean
+  readonly source: 'builtin' | 'local' | 'market'
+  readonly installedAt: number
+  readonly permissions: Record<string, unknown>
+  readonly contributes: { readonly tools?: readonly string[]; readonly services?: readonly string[]; readonly promptSections?: readonly string[] }
+}
+
+function PluginSection() {
+  const [plugins, setPlugins] = useState<readonly PluginEntry[]>([])
+  const [busy, setBusy] = useState<string | undefined>()
+  const refresh = (): void => {
+    void window.lcode.plugins.list().then((value) => setPlugins(Array.isArray(value) ? value as PluginEntry[] : [])).catch((error: unknown) => {
+      toast(error instanceof Error ? error.message : t('读取插件失败'))
+    })
+  }
+  useEffect(refresh, [])
+  const install = async (): Promise<void> => {
+    const path = await window.lcode.chooseFolder(t('选择插件文件夹'))
+    if (!path) return
+    setBusy('install')
+    try {
+      await window.lcode.plugins.install({ path })
+      refresh()
+      toast(t('插件已安装，尚未启动'))
+    } catch (error) {
+      toast(error instanceof Error ? error.message : t('插件安装失败'))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+  const operate = async (action: 'activate' | 'deactivate' | 'uninstall', plugin: PluginEntry): Promise<void> => {
+    const key = `${action}:${plugin.id}@${plugin.version}`
+    if (action === 'uninstall' && !window.confirm(t('卸载后会删除本地快照，是否继续？'))) return
+    setBusy(key)
+    try {
+      await window.lcode.plugins[action]({ id: plugin.id, version: plugin.version })
+      refresh()
+      toast(t(action === 'activate' ? '插件已启动' : action === 'deactivate' ? '插件已停用' : '插件已卸载'))
+    } catch (error) {
+      toast(error instanceof Error ? error.message : t('插件操作失败'))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+  return (
+    <>
+      <h2>{t('插件')}</h2>
+      <div className="sub">{t('插件在独立受控进程中运行。只有声明的工具、提示段和事件订阅可以注册；沙箱不可用时不会启动。')}</div>
+      <div className="sect">
+        <div className="sh2">
+          {t('已安装插件')}
+          <button className="mini" disabled={busy !== undefined} onClick={() => void install()}>
+            ＋ {busy === 'install' ? t('正在安装…') : t('从文件夹安装')}
+          </button>
+        </div>
+        {plugins.map((plugin) => {
+          const key = `${plugin.id}@${plugin.version}`
+          const tools = plugin.contributes.tools ?? []
+          const prompts = plugin.contributes.promptSections ?? []
+          return (
+            <div className="plugin-row" key={key}>
+              <div className="plugin-main">
+                <div className="plugin-title"><code>{plugin.id}</code><span>v{plugin.version}</span>{plugin.active ? <b>{t('运行中')}</b> : <em>{t('未启动')}</em>}</div>
+                <div className="src">{t('工具')}：{tools.length === 0 ? t('无') : tools.join('、')} · {t('提示段')}：{prompts.length === 0 ? t('无') : prompts.join('、')}</div>
+              </div>
+              <div className="plugin-actions">
+                {plugin.active ? (
+                  <button title={t('停用插件')} disabled={busy !== undefined} onClick={() => void operate('deactivate', plugin)}>{t('停用')}</button>
+                ) : (
+                  <button title={t('启动插件')} disabled={busy !== undefined} onClick={() => void operate('activate', plugin)}>{t('启动')}</button>
+                )}
+                <button title={t('卸载插件')} disabled={busy !== undefined} onClick={() => void operate('uninstall', plugin)}>{t('卸载')}</button>
+              </div>
+            </div>
+          )
+        })}
+        {plugins.length === 0 ? <div className="pickhint">{t('还没有安装插件')}</div> : null}
+      </div>
+      <div className="warnrow">
+        <span className="wt">{t('安全')}</span>
+        <span>{t('安装只复制和校验插件快照，不会执行代码；首次启动也必须通过当前系统沙箱。')}</span>
+      </div>
+    </>
+  )
+}
+
 /* ───────── 分区：历史与保留 ───────── */
 
 function HistorySection() {
@@ -1123,6 +1215,8 @@ const SECTIONS: { g?: string; id?: string; label?: string }[] = [
   { id: 'account', label: '账户' },
   { g: '模型' },
   { id: 'providers', label: '模型' },
+  { g: '扩展' },
+  { id: 'plugins', label: '插件' },
   { g: '权限' },
   { id: 'perm', label: '权限预设' },
   { id: 'trust', label: '工作区信任' },
@@ -1143,6 +1237,8 @@ function SectionBody({ id }: { id: string }) {
       return <AccountSection />
     case 'providers':
       return <ModelSection />
+    case 'plugins':
+      return <PluginSection />
     case 'perm':
       return <PermSection />
     case 'trust':

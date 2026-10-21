@@ -21,6 +21,13 @@ export interface SurfaceItem {
   readonly hidden: boolean
 }
 
+/** 当前模型真正可见的表面项。它按 `surfaceOp.replace` 的逻辑位置重建，
+ * 与用于历史审计的 `deriveSurfaceItems` 区分开来。 */
+export interface VisibleSurfaceItem {
+  readonly message: ModelMessage
+  readonly sourceSeq: number
+}
+
 /**
  * 从事件日志派生表面项序列。
  * replace 区间按**表面项索引**计（[start, end)，左闭右开），必须落在当前 surface 范围内（I4）。
@@ -55,11 +62,36 @@ export function deriveSurfaceItems(log: readonly SessionEvent[]): SurfaceItem[] 
   return items
 }
 
+/**
+ * 重建当前可见的表面。replace 在当前可见数组中原地替换，而不是把摘要排到日志末尾。
+ * 原始事件仍由 `deriveSurfaceItems` 保留为可审计的 hidden 项；模型历史和后续压缩则
+ * 必须使用本函数，避免多次压缩时把已经遮蔽的事件重新计入区间。
+ */
+export function deriveVisibleSurfaceItems(log: readonly SessionEvent[]): readonly VisibleSurfaceItem[] {
+  const items: VisibleSurfaceItem[] = []
+  for (const event of log) {
+    const replacement = isReplace(event.surfaceOp) ? event.surfaceOp : undefined
+    if (replacement !== undefined) {
+      const { start, end } = replacement
+      if (start < 0 || end > items.length || start >= end) {
+        throw new RangeError(
+          `surface replace 区间越界：start=${start} end=${end} 当前表面长度=${items.length}（不变量 I4 违规）`,
+        )
+      }
+      const item = isSurfaceEvent(event)
+        ? [{ message: eventToMessage(event), sourceSeq: event.seq }]
+        : []
+      items.splice(start, end - start, ...item)
+    } else if (isSurfaceEvent(event)) {
+      items.push({ message: eventToMessage(event), sourceSeq: event.seq })
+    }
+  }
+  return items
+}
+
 /** 派生模型可见消息：隐藏项被过滤（用户最终看到的是"压缩后"的序列） */
 export function deriveMessages(log: readonly SessionEvent[]): ModelMessage[] {
-  return deriveSurfaceItems(log)
-    .filter((item) => !item.hidden)
-    .map((item) => item.message)
+  return deriveVisibleSurfaceItems(log).map((item) => item.message)
 }
 
 /** 事件 → 模型可见消息（06 §4.1 投影规则：仅三类表面事件可投影，其余返回 null） */

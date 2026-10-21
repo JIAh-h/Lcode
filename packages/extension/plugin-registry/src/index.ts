@@ -35,13 +35,19 @@ export interface PluginInstallResult {
 export interface PluginInfo {
   readonly id: string;
   readonly version: string;
-  readonly state: "installed";
+  /** enabled is persisted intent; active is owned by the runtime lifecycle. */
+  readonly state: "installed" | "enabled";
   readonly hash: string;
   readonly permissions: PluginPermissions;
   readonly contributes: PluginContributes;
   readonly source: "builtin" | "local" | "market";
   readonly installPath: string;
   readonly installedAt: number;
+}
+
+export interface PluginActivationSource {
+  readonly manifest: PluginManifest;
+  readonly entryPath: string;
 }
 
 export interface LocalPluginRegistryOptions {
@@ -60,6 +66,7 @@ interface PluginRow {
   readonly install_path: string;
   readonly source: "builtin" | "local" | "market";
   readonly installed_at: number;
+  readonly enabled: number;
 }
 
 /**
@@ -82,7 +89,7 @@ export class LocalPluginRegistry {
     const includeBuiltin = input.includeBuiltin ?? true;
     const rows = this.db
       .prepare(
-        `SELECT id, version, content_hash, permissions_json, contributes_json, install_path, source, installed_at
+        `SELECT id, version, content_hash, permissions_json, contributes_json, install_path, source, installed_at, enabled
          FROM plugins ${includeBuiltin ? "" : "WHERE source <> 'builtin'"} ORDER BY id ASC, version ASC`,
       )
       .all() as PluginRow[];
@@ -102,6 +109,71 @@ export class LocalPluginRegistry {
     return await this.enqueue(
       async () => await this.installLocal(input.source.path),
     );
+  }
+
+  /** Re-check the immutable snapshot before lifecycle code ever receives its entry path. */
+  async activationSource(input: {
+    readonly id: string;
+    readonly version: string;
+  }): Promise<PluginActivationSource> {
+    const row = this.row(input);
+    const manifest = await readManifest(row.install_path);
+    await validatePackage(row.install_path, manifest);
+    if ((await hashDirectory(row.install_path)) !== row.content_hash) {
+      throw manifestInvalid(`${input.id}@${input.version} 的安装快照已被修改`);
+    }
+    if (
+      JSON.stringify(manifest.permissions) !== row.permissions_json ||
+      JSON.stringify(manifest.contributes) !== row.contributes_json
+    ) {
+      throw manifestInvalid(`${input.id}@${input.version} 的清单声明与安装记录不一致`);
+    }
+    return { manifest, entryPath: resolve(row.install_path, manifest.entry) };
+  }
+
+  async setEnabled(input: {
+    readonly id: string;
+    readonly version: string;
+    readonly enabled: boolean;
+  }): Promise<void> {
+    await this.enqueue(async () => {
+      this.row(input);
+      this.db
+        .prepare(
+          "UPDATE plugins SET enabled = ?, activated_at = ? WHERE id = ? AND version = ?",
+        )
+        .run(input.enabled ? 1 : 0, input.enabled ? this.now() : null, input.id, input.version);
+    });
+  }
+
+  async uninstall(input: {
+    readonly id: string;
+    readonly version: string;
+  }): Promise<void> {
+    await this.enqueue(async () => {
+      const row = this.row(input);
+      const root = join(this.options.home, "plugins");
+      if (!isInside(root, row.install_path)) {
+        throw manifestInvalid("安装记录指向插件目录之外，拒绝删除");
+      }
+      const trash = await mkdtemp(join(root, ".removing-"));
+      const moved = join(trash, "snapshot");
+      try {
+        await rename(row.install_path, moved);
+        try {
+          this.db
+            .prepare("DELETE FROM plugins WHERE id = ? AND version = ?")
+            .run(input.id, input.version);
+        } catch (error) {
+          await rename(moved, row.install_path);
+          throw error;
+        }
+        await rm(trash, { recursive: true, force: true });
+      } catch (error) {
+        await rm(trash, { recursive: true, force: true });
+        throw error;
+      }
+    });
   }
 
   private async installLocal(sourcePath: string): Promise<PluginInstallResult> {
@@ -194,6 +266,17 @@ export class LocalPluginRegistry {
       () => undefined,
     );
     return await result;
+  }
+
+  private row(input: { readonly id: string; readonly version: string }): PluginRow {
+    const row = this.db
+      .prepare(
+        `SELECT id, version, content_hash, permissions_json, contributes_json, install_path, source, installed_at, enabled
+         FROM plugins WHERE id = ? AND version = ?`,
+      )
+      .get(input.id, input.version) as PluginRow | undefined;
+    if (row === undefined) throw notFound(`${input.id}@${input.version} 未安装`);
+    return row;
   }
 }
 
@@ -364,7 +447,7 @@ function toPluginInfo(row: PluginRow): PluginInfo {
   return {
     id: row.id,
     version: row.version,
-    state: "installed",
+    state: row.enabled === 1 ? "enabled" : "installed",
     hash: row.content_hash,
     permissions: JSON.parse(row.permissions_json) as PluginPermissions,
     contributes: JSON.parse(row.contributes_json) as PluginContributes,
@@ -410,6 +493,15 @@ function invalidParams(message: string): LcodeErrorImpl {
     code: ERROR_CODES.EC_INVALID_PARAMS,
     message,
     userMessage: "这个请求的参数不对。",
+    retryable: false,
+  });
+}
+
+function notFound(message: string): LcodeErrorImpl {
+  return new LcodeErrorImpl({
+    code: ERROR_CODES.EC_NOT_FOUND,
+    message,
+    userMessage: "找不到这个扩展。",
     retryable: false,
   });
 }

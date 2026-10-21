@@ -1,14 +1,23 @@
-/** 压缩计划：声明要替换的表面区间（D5：追加声明，不删除） */
-export interface CompactionPlan {
-  readonly compactionId: string
-  readonly replaceSurface: { readonly start: number; readonly end: number }
-  /** 摘要内容（compaction-summary）或剪枝说明（compaction-prune） */
-  readonly summary: string
+import type { SessionService } from '@lcode/session'
+import type {} from '@lcode/context'
+
+export interface CompactionResult {
+  readonly status: 'compacted' | 'not-beneficial' | 'invalid-range' | 'tool-boundary' | 'active-transaction'
+  readonly compactionId?: string | undefined
+  readonly originalChars: number
+  readonly summaryChars: number
+  readonly shadowedSeqs: readonly number[]
 }
 
-/** CompactionService —— 生成压缩计划（执行 = 追加 surfaceOp: replace 事件） */
+/** CompactionService —— 执行可审计的追加式 surface replace 事务。 */
 export interface CompactionService {
-  plan(input: { readonly surface: unknown; readonly tokens: number }): Promise<CompactionPlan | undefined>
+  compact(input: {
+    readonly session: SessionService
+    readonly summary: string
+    readonly start?: number | undefined
+    readonly end?: number | undefined
+    readonly trigger?: 'manual' | 'threshold' | undefined
+  }): CompactionResult
 }
 
 /** ctx key 声明（合并进 @lcode/context） */

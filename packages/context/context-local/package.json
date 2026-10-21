@@ -1,0 +1,18 @@
+{
+  "name": "@lcode/context-local",
+  "version": "0.1.0",
+  "description": "本地上下文来源 provider：指令、仓库地图、时间与显式引用",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/agent": "workspace:*",
+    "@lcode/agent-loop": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/session": "workspace:*",
+    "@lcode/session-api": "workspace:*",
+    "@lcode/system-prompt": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

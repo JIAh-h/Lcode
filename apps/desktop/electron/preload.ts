@@ -47,6 +47,7 @@ const api = {
     delete: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.delete', input),
     restore: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.restore', input),
     export: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.export', input),
+    import: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.import', input),
     fork: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.fork', input),
     /** 回放时的精确请求快照；主进程只接受 session id 与事件序号。 */
     history: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.history', input),
@@ -113,6 +114,17 @@ const api = {
   permissions: {
     get: (): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.get'),
     set: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.set', input),
+  },
+  plugins: {
+    list: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.list'),
+    inspect: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.inspect'),
+    install: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.install', input),
+    activate: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.activate', input),
+    deactivate: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.deactivate', input),
+    uninstall: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.uninstall', input),
+  },
+  runtime: {
+    composition: (): Promise<unknown> => ipcRenderer.invoke('lcode:runtime.composition'),
   },
   tasks: {
     list: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:tasks.list', input),

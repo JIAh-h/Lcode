@@ -1,9 +1,11 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReplayLlmAdapter } from '@lcode/llm-replay'
 import type { ReplayScript } from '@lcode/llm-replay'
 import type { SandboxService } from '@lcode/sandbox'
+import type { LspService } from '@lcode/lsp'
+import type { WebService } from '@lcode/web'
 import { createApprovalService } from '@lcode/approval'
 import type { ApprovalService } from '@lcode/approval'
 import { loadLog } from '@lcode/session-persistence-jsonl'
@@ -151,8 +153,9 @@ async function makeRuntime(
   scripts: readonly ReplayScript[],
   sandbox: SandboxService = enforcedSandbox,
   approval?: ApprovalService,
+  workspaceRoot?: string,
 ): Promise<AgentRuntime> {
-  const rt = await createAgentRuntime({ home, sandbox, ...(approval === undefined ? {} : { approval }) })
+  const rt = await createAgentRuntime({ home, sandbox, ...(approval === undefined ? {} : { approval }), ...(workspaceRoot === undefined ? {} : { workspaceRoot }) })
   const llm = rt.ctx.get('llm')
   // 用 replay 顶掉真实适配器：`ctx.llm` 是注册表，按 provider 名查找（消费方不知道实现）
   llm.register(new ReplayLlmAdapter(scripts))
@@ -212,6 +215,7 @@ describe('A. 对话闭环：一句话 → 回复 → 落盘 → 可查', () => {
     expect(events.map((e) => e.type)).toEqual([
       'turn/start',
       'user/message',
+      'request/context',
       'step/start',
       'request/header', // 可重放审计点（06 §6.1）
       'assistant/chunk',
@@ -287,6 +291,87 @@ describe('A. 对话闭环：一句话 → 回复 → 落盘 → 可查', () => {
 })
 
 describe('A. 装配的接线正确性', () => {
+  it('默认以 desktop-default profile 装配，并只公开脱敏服务关系', async () => {
+    const rt = await makeRuntime([textScript])
+    expect(rt.composition).toEqual({
+      profile: 'desktop-default',
+      entries: [
+        { id: 'sessions-local', requires: [], adopts: [], provides: ['sessions'] },
+        {
+          id: 'execution-local',
+          adopts: [],
+          requires: ['sessions'],
+          provides: expect.arrayContaining(['subprocess', 'sandbox', 'fs', 'jobs', 'shell', 'terminals', 'spill']),
+        },
+        {
+          id: 'tooling-local',
+          adopts: [],
+          requires: ['sessions', 'fs', 'shell', 'terminals', 'spill'],
+          provides: ['tools', 'systemPrompt'],
+        },
+        {
+          id: 'model-local',
+          requires: ['llm', 'agentDefaultModel'],
+          adopts: ['llm', 'agentDefaultModel'],
+          provides: [],
+        },
+        {
+          id: 'model-routing-local',
+          adopts: [],
+          requires: ['llm', 'agentDefaultModel'],
+          provides: ['modelRouting'],
+        },
+        {
+          id: 'policy-local',
+          adopts: [],
+          requires: ['sessions', 'tools', 'systemPrompt', 'sandbox', 'fs'],
+          provides: ['permissionPresets', 'workspaceTrust', 'planMode', 'subagents'],
+        },
+        {
+          id: 'extensions-local',
+          adopts: [],
+          requires: ['tools', 'systemPrompt', 'subprocess', 'sandbox', 'workspaceTrust'],
+          provides: ['skills', 'presets', 'plugins'],
+        },
+        {
+          id: 'code-runtime-local',
+          adopts: [],
+          requires: ['tools', 'subprocess', 'sandbox'],
+          provides: ['codeRuntime'],
+        },
+        {
+          id: 'agent-local',
+          adopts: [],
+          requires: ['llm', 'agentDefaultModel', 'modelRouting', 'sessions', 'tools', 'systemPrompt', 'jobs', 'terminals'],
+          provides: ['agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'autoCompaction'],
+        },
+        {
+          id: 'lcode-spine',
+          adopts: [],
+          requires: ['sessions', 'agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'autoCompaction', 'skills', 'presets', 'plugins'],
+          provides: [],
+        },
+      ],
+    })
+    expect(rt.ctx.get('sessions')).toBe(rt.sessions)
+    expect(JSON.stringify(rt.composition)).not.toContain(home)
+  })
+
+  it('P7-05：已配置 Web/LSP 才作为可信 Profile entry 挂载，并复用工具权限流水线', async () => {
+    const web: WebService = {
+      async fetch(input) { return { url: input.url, finalUrl: input.url, status: 200, title: 'test', contentType: 'text/plain', text: 'external', truncated: false, fetchedAt: 1 } },
+      async search(input) { return { query: input.query, results: [], truncated: false } },
+    }
+    const lsp: LspService = { async query() { return [] } }
+    const rt = await createAgentRuntime({ home, sandbox: enforcedSandbox, web, lsp })
+    runtime = rt
+    expect(rt.composition.entries).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'web-provider', requires: ['tools'], provides: ['web'] }),
+      expect.objectContaining({ id: 'lsp-provider', requires: ['tools', 'subprocess', 'sandbox'], provides: ['lsp'] }),
+    ]))
+    expect(rt.ctx.get('tools').schemas().map((tool) => tool.name)).toEqual(expect.arrayContaining(['web_fetch', 'web_search', 'lsp_query', 'run_code']))
+  })
+
   it('引擎与 sessions 共用同一条日志：引擎写的事件 sessions 读得到', async () => {
     const rt = await makeRuntime([textScript])
     const sessionId = await runTurn(rt)
@@ -301,6 +386,37 @@ describe('A. 装配的接线正确性', () => {
     const prompt = rt.ctx.get('systemPrompt')
     const assembled = await prompt.assemble({})
     expect(assembled.system).toContain('Lcode')
+  })
+
+  it('P7-01：上下文来源预计算、限于工作区并写入请求审计', async () => {
+    const workspace = join(home, 'workspace')
+    mkdirSync(join(workspace, '.lcode'), { recursive: true })
+    mkdirSync(join(workspace, 'src'), { recursive: true })
+    writeFileSync(join(workspace, 'AGENTS.md'), 'Use the project formatter.', 'utf8')
+    writeFileSync(join(workspace, 'src', 'example.txt'), 'untrusted file payload', 'utf8')
+    const rt = await makeRuntime([textScript], enforcedSandbox, undefined, workspace)
+
+    const referenced = await rt.sessions.create({ cwd: workspace })
+    rt.sessions.sessionServiceFor(referenced.session_id).append({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: 'Referenced session fact.' }] },
+    })
+    const { session_id } = await rt.sessions.create({ cwd: workspace })
+    const { agent_id } = await rt.agents.create({ session_id })
+    await sendAndWait(rt, agent_id, `Check @src/example.txt @session:${referenced.session_id}`)
+    await rt.sessions.flush({ session_id })
+
+    const events = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events
+    const context = events.find((event) => event.type === 'request/context')
+    expect(context).toMatchObject({
+      data: { sources: expect.arrayContaining(['time:iso-8601', 'instructions:AGENTS.md', 'repo-map:root', 'file:src/example.txt', `session:${referenced.session_id}`]) },
+    })
+    const header = events.find((event) => event.type === 'request/header')
+    expect(header).toMatchObject({
+      data: { header: { system: expect.stringContaining('Use the project formatter.') } },
+    })
+    expect(JSON.stringify(header)).toContain('[UNTRUSTED DATA]')
+    expect(rt.ctx.get('contextSources').inspect(session_id)).toMatchObject({ sessionId: session_id })
   })
 
   it('`request/header` 记下完整模型输入配置（可重放审计点）', async () => {
@@ -324,14 +440,18 @@ describe('A. 装配的接线正确性', () => {
 
   it('工具已接：注册表含计划提交工具，但正常请求不暴露它', async () => {
     const rt = await makeRuntime([textScript])
-    // 五个文件工具 + shell + owner 隔离的持久 terminal + 两个计划工具
+    // 五个文件工具 + shell + terminal + 子代理 + 代码模式 + 两个计划工具
     expect(rt.ctx.get('tools').schemas().map((s) => s.name).sort()).toEqual([
+      'delegate',
       'edit',
       'glob',
       'grep',
       'read',
       'request_plan_change',
+      'run_code',
       'shell',
+      'skill_list',
+      'skill_load',
       'submit_plan',
       'terminal',
       'write',
@@ -344,6 +464,31 @@ describe('A. 装配的接线正确性', () => {
     expect(assembled.system).toContain('edit')
     expect(assembled.tools.some((tool) => tool.name === 'submit_plan')).toBe(false)
     expect(assembled.tools.some((tool) => tool.name === 'request_plan_change')).toBe(false)
+  })
+
+  it('P7-04：子代理继承组合快照，创建独立会话且只能看到只读工具', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id: parentSessionId } = await rt.sessions.create({ cwd: home, title: '父任务' })
+
+    const delegated = await rt.subagents.run({ parentSessionId, task: '只调查当前项目的入口文件。' })
+    expect(delegated).toMatchObject({ outcome: 'completed', depth: 1, result: '改完了，测试也过了。' })
+    expect(delegated.childSessionId).toEqual(expect.any(String))
+
+    const parentEvents = rt.sessions.sessionServiceFor(parentSessionId).events()
+    expect(parentEvents.find((event) => event.type === 'subagent/delegated')).toMatchObject({
+      data: {
+        childSessionId: delegated.childSessionId,
+        depth: 1,
+        allowedToolIds: ['read', 'glob', 'grep'],
+        profileId: 'desktop-default',
+      },
+    })
+    expect(parentEvents.find((event) => event.type === 'subagent/completed')).toMatchObject({ data: { outcome: 'completed' } })
+
+    const childEvents = rt.sessions.sessionServiceFor(delegated.childSessionId!).events()
+    const header = childEvents.find((event) => event.type === 'request/header')
+    expect(header).toMatchObject({ data: { header: { tools: [{ name: 'read' }, { name: 'glob' }, { name: 'grep' }] } } })
+    expect(rt.ctx.get('agents').list().some((agent) => agent.sessionId === delegated.childSessionId)).toBe(false)
   })
 
   it('计划模式：请求只暴露只读工具，写调用被拒绝且不落盘', async () => {
@@ -463,6 +608,45 @@ describe('A. 装配的接线正确性', () => {
     expect(rt.ctx.get('jobs')).toBeDefined()
     expect(rt.ctx.get('sandbox')).toBeDefined()
     expect(rt.ctx.get('permissionPresets').get()).toBe('标准')
+  })
+
+  it('P6 产品接入：本地插件、Skill 和预设都经 Runtime 装配且可追溯', async () => {
+    const plugin = join(home, 'plugin-source')
+    mkdirSync(join(plugin, 'dist'), { recursive: true })
+    writeFileSync(join(plugin, 'package.json'), JSON.stringify({ type: 'module' }), 'utf8')
+    writeFileSync(join(plugin, 'lcode.json'), JSON.stringify({
+      $schema: 'https://lcode.dev/schema/plugin-1.json',
+      id: 'com.example.runtime-demo',
+      name: 'Runtime Demo',
+      version: '1.0.0',
+      engines: { lcode: '^0.1.0' },
+      entry: './dist/index.js',
+      permissions: {},
+      contributes: { tools: ['demo/runtime'] },
+    }), 'utf8')
+    writeFileSync(join(plugin, 'dist', 'index.js'), "export async function activate(ctx) { await ctx.registerTool({ name: 'demo/runtime', description: 'runtime', inputSchema: { type: 'object', properties: {} } }, async () => ({ ok: true })) }", 'utf8')
+    mkdirSync(join(home, 'skills', 'review'), { recursive: true })
+    writeFileSync(join(home, 'skills', 'review', 'SKILL.md'), '# Review\nInspect the active diff.', 'utf8')
+    mkdirSync(join(home, 'presets'), { recursive: true })
+    writeFileSync(join(home, 'presets', 'review.yml'), 'id: review\nname: Review\nmodel:\n  maxTokens: 4096\n', 'utf8')
+
+    const rt = await makeRuntime([textScript])
+    await rt.plugins.installLocal(plugin)
+    await rt.plugins.activate({ id: 'com.example.runtime-demo', version: '1.0.0' })
+    expect(rt.plugins.inspect()).toMatchObject([{ id: 'com.example.runtime-demo', state: 'active', contributes: { tools: ['demo/runtime'] } }])
+    expect(rt.ctx.get('tools').schemas().map((tool) => tool.name)).toContain('demo/runtime')
+    await expect(rt.skills.catalog()).resolves.toEqual([{ id: 'review', name: 'Review', description: 'Inspect the active diff.', source: 'user' }])
+
+    const { session_id } = await rt.sessions.create({ cwd: home })
+    await expect(rt.presets.snapshot({ sessionId: session_id, ids: ['review'] })).resolves.toMatchObject({
+      sessionId: session_id,
+      ids: ['review'],
+      sources: ['user'],
+      config: { model: { maxTokens: 4096 } },
+    })
+    await rt.sessions.flush({ session_id })
+    const events = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events
+    expect(events.at(-1)).toMatchObject({ type: 'preset/snapshot', data: { ids: ['review'] } })
   })
 
   it('agent 销毁会终止其已发布的后台作业（不是取消任意一个对话回合）', async () => {

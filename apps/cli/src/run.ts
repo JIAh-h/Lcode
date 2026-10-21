@@ -29,6 +29,7 @@ export async function runTaskCommand(argv: readonly string[]): Promise<number> {
       home,
       services: modelFeature.services,
       approval: createApprovalService({ channel: approval }),
+      profile: 'cli-default',
     })
     let sessionId = parsed.session
     let agentId: string | undefined

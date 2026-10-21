@@ -29,6 +29,7 @@ const IMPL_LIKE = [
   /-replay$/,
   /-prune$/,
   /-summary$/,
+  /-policy$/,
   /-deepseek$/,
   /-anthropic$/,
   /-openai$/,

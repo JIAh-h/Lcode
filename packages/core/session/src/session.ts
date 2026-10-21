@@ -79,9 +79,8 @@ export class InMemorySessionStore implements SessionService {
     let surfaceCount = this.surfaceCount
     for (const ev of materialized) {
       assertSurfaceOpInRange(ev as unknown as SessionEvent, surfaceCount)
-      if (isSurfaceEventType(ev.type)) surfaceCount += 1
+      surfaceCount = nextSurfaceCount(ev as unknown as SessionEvent, surfaceCount)
     }
-    this.surfaceCount = surfaceCount
     for (const ev of materialized) {
       this.commit(ev as unknown as SessionEvent)
     }
@@ -90,7 +89,7 @@ export class InMemorySessionStore implements SessionService {
 
   private commit(event: SessionEvent): void {
     this.log.push(event)
-    if (isSurfaceEventType(event.type)) this.surfaceCount += 1
+    this.surfaceCount = nextSurfaceCount(event, this.surfaceCount)
     this.broadcast(event)
   }
 
@@ -149,6 +148,8 @@ export class InMemorySessionStore implements SessionService {
     }
     if (input.surfaceOp !== undefined) (event as unknown as Record<string, unknown>).surfaceOp = input.surfaceOp
     if (input.sourceEventSeqs !== undefined) (event as unknown as Record<string, unknown>).sourceEventSeqs = [...input.sourceEventSeqs]
+    if (input.compactionId !== undefined) (event as unknown as Record<string, unknown>).compactionId = input.compactionId
+    if (input.shadowedSeqs !== undefined) (event as unknown as Record<string, unknown>).shadowedSeqs = [...input.shadowedSeqs]
     if (input.ignorable === true) (event as unknown as Record<string, unknown>).ignorable = true
     return event
   }
@@ -181,14 +182,22 @@ export class InMemorySessionStore implements SessionService {
 function assertSurfaceOpInRange(event: SessionEvent, surfaceBefore: number): void {
   const op = event.surfaceOp
   if (op === undefined || op === 'append') return
-  // 表面事件会先入表面、再应用 replace，所以当前这条若是表面事件要算进去
-  const surfaceLength = surfaceBefore + (isSurfaceEventType(event.type) ? 1 : 0)
+  // replace 以替换前的当前可见表面为坐标；摘要本身会被插入 start，而不是先追加到末尾。
+  const surfaceLength = surfaceBefore
   const { start, end } = op
   if (start < 0 || end > surfaceLength || start >= end) {
     throw new RangeError(
       `surface replace 区间越界：start=${start} end=${end} surface 长度=${surfaceLength}（不变量 I4 违规）`,
     )
   }
+}
+
+function nextSurfaceCount(event: SessionEvent, surfaceBefore: number): number {
+  const op = event.surfaceOp
+  if (op !== undefined && op !== 'append') {
+    return surfaceBefore - (op.end - op.start) + (isSurfaceEventType(event.type) ? 1 : 0)
+  }
+  return surfaceBefore + (isSurfaceEventType(event.type) ? 1 : 0)
 }
 
 /** 切点安全判定：最后一个 turn/start 必须有配对的 turn/end（骨架简化版） */

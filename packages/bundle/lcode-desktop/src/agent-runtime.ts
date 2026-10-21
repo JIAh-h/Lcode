@@ -3,7 +3,7 @@ import { createAgentLoop } from '@lcode/agent-loop'
 import type { AgentLoopRuntime } from '@lcode/agent-loop'
 import { LocalAgentsApi } from '@lcode/agents-api'
 import { createLocalFileCheckpointService, LocalSessionsApi } from '@lcode/session-api'
-import type { FileCheckpointService } from '@lcode/session-api'
+import type { FileCheckpointService, RuntimeSessionsService } from '@lcode/session-api'
 import { InMemoryToolRegistry } from '@lcode/tools'
 import { createSystemPromptService } from '@lcode/system-prompt'
 import type { SessionService } from '@lcode/session'
@@ -49,6 +49,18 @@ export interface AgentRuntimeOptions {
   readonly sandbox?: SandboxService | undefined
   /** 会话的初始工作区根（新会话默认落在这里） */
   readonly workspaceRoot?: string | undefined
+  /** 受发行包信任的内部装配 profile；外部插件不在此选择范围内。 */
+  readonly profile?: BuiltinRuntimeProfileId | undefined
+  /** 显式注入的网页 Provider；省略时默认 Profile 不暴露联网工具。 */
+  readonly web?: WebService | undefined
+  /** 显式注入的语言服务 Provider；省略时默认 Profile 不启动语言服务进程。 */
+  readonly lsp?: LspService | undefined
+  /** 可替换的模型路由策略；省略时仍挂载空规则 provider，保持整轮冻结语义。 */
+  readonly modelRouting?: ModelRoutingService | undefined
+  /** 可替换的代码运行器；默认 provider 仅在真实只读沙箱下运行。 */
+  readonly codeRuntime?: CodeRuntime | undefined
+  /** 显式摘要器；省略时自动压缩只记录候选，绝不隐藏额外模型调用。 */
+  readonly compactionSummarizer?: CompactionSummarizer | undefined
 }
 
 import type { Disposer } from '@lcode/util'
@@ -56,8 +68,9 @@ import type { SessionEvent } from '@lcode/session'
 import type { ApprovalService } from '@lcode/approval'
 import { createFsMutationAuthority, createLocalFs } from '@lcode/fs-local'
 import { createLocalShell } from '@lcode/shell-local'
-import { createLocalSandbox } from '@lcode/sandbox-local'
 import { createWindowsSandbox, createWindowsSandboxBridge } from '@lcode/sandbox-win32'
+import { createMacosSandbox } from '@lcode/sandbox-macos'
+import { createLinuxSandbox } from '@lcode/sandbox-linux'
 import { createLocalSubprocess } from '@lcode/subprocess-local'
 import { createLocalJobs } from '@lcode/jobs-local'
 import { createShellTool } from '@lcode/tool-shell'
@@ -67,6 +80,39 @@ import { createFsTools } from '@lcode/tool-fs'
 import type { SandboxService } from '@lcode/sandbox'
 import { createLocalPermissionPresets, createLocalWorkspaceTrust, installPolicyHook } from '@lcode/permission-presets'
 import { createPlanModeService } from '@lcode/plan-mode'
+import { LocalPluginRegistry, type PluginInfo } from '@lcode/plugin-registry'
+import { createPluginHost, InstalledPluginLifecycleService, PluginLifecycleManager, pluginUtilityRunnerPath } from '@lcode/plugin-host'
+import { createLocalSkillFilesystem } from '@lcode/skill-filesystem'
+import { registerSkillTools } from '@lcode/tool-skill'
+import { createLocalAgentPresets, type PresetSnapshot } from '@lcode/agent-presets'
+import { composeRuntimeProfile, type InternalBundleEntry, type RuntimeCompositionSnapshot } from '@lcode/runtime-composition'
+import { registerLocalContextSources } from '@lcode/context-local'
+import { registerContextBudget } from '@lcode/context-budget'
+import { createLocalCompactionSummary } from '@lcode/compaction-summary'
+import type { CompactionService } from '@lcode/compaction'
+import { registerAutoCompactionPolicy, type CompactionSummarizer } from '@lcode/compaction-policy'
+import { registerCompactionPrune } from '@lcode/compaction-prune'
+import { registerLocalSpill } from '@lcode/spill-local'
+import { registerInprocessSubagents } from '@lcode/subagent-inprocess'
+import type { InprocessSubagentService } from '@lcode/subagent-inprocess'
+import { createSubagentTool } from '@lcode/tool-subagent'
+import type { WebService } from '@lcode/web'
+import { createWebTools } from '@lcode/tool-web'
+import type { LspService } from '@lcode/lsp'
+import { createLspTools } from '@lcode/tool-lsp'
+import { createModelRouter, registerModelRouter, type ModelRoutingService } from '@lcode/model-router'
+import type { CodeRuntime } from '@lcode/code-runtime'
+import { createSubprocessCodeRuntime } from '@lcode/code-runtime-subprocess'
+import { createCodeTool } from '@lcode/tool-code'
+import { join } from 'node:path'
+import { createBuiltinRuntimeProfile, type BuiltinRuntimeProfileId } from './runtime-profile.ts'
+
+declare module '@lcode/context' {
+  interface Services {
+    /** `session-api` 发布契约，desktop bundle 负责把本地 provider 挂进 root Context。 */
+    sessions: RuntimeSessionsService
+  }
+}
 
 export interface AgentRuntime {
   readonly services: DesktopServices
@@ -78,6 +124,18 @@ export interface AgentRuntime {
   readonly ctx: DesktopServices['ctx']
   /** P6-01 文件检查点；恢复会追加审计事件，不会修改既有会话历史。 */
   readonly checkpoints: FileCheckpointService
+  /** P6 产品入口：安装快照、生命周期和只读检查都由同一 Runtime 持有。 */
+  readonly plugins: PluginRuntimeService
+  /** P6 产品入口：Skill 只读目录与按需正文加载。 */
+  readonly skills: RuntimeSkillService
+  /** P6 产品入口：预设只生成可审计的会话快照，不直接越权改变运行时。 */
+  readonly presets: RuntimePresetService
+  /** P7-02：显式压缩事务；自动触发与成本判定由后续 provider 决定。 */
+  readonly compaction: CompactionService
+  /** P7-04：受限的进程内子代理 provider；不能取得审批端口或扩展 root Context。 */
+  readonly subagents: InprocessSubagentService
+  /** 当前实际的内置组合；只含 service 关系，不含凭据、路径或运行时句柄。 */
+  readonly composition: RuntimeCompositionSnapshot
   /**
    * 订阅某个会话的事件流（UI 的数据源，06 §5.1 步骤⑤）。
    *
@@ -92,6 +150,29 @@ export interface AgentRuntime {
   dispose(): Promise<void>
 }
 
+export interface PluginRuntimeService {
+  list(): readonly PluginInfo[]
+  installLocal(path: string): Promise<{ readonly id: string; readonly version: string; readonly hash: string }>
+  activate(input: { readonly id: string; readonly version: string }): Promise<void>
+  deactivate(input: { readonly id: string; readonly version: string }): Promise<void>
+  uninstall(input: { readonly id: string; readonly version: string }): Promise<void>
+  inspect(): ReturnType<InstalledPluginLifecycleService['inspect']>
+}
+
+export interface RuntimeSkillService {
+  catalog(): ReturnType<ReturnType<typeof createLocalSkillFilesystem>['catalog']>
+  load(id: string): ReturnType<ReturnType<typeof createLocalSkillFilesystem>['load']>
+}
+
+export interface RuntimePresetService {
+  list(): ReturnType<ReturnType<typeof createLocalAgentPresets>['list']>
+  load(id: string): ReturnType<ReturnType<typeof createLocalAgentPresets>['load']>
+  snapshot(input: { readonly sessionId: string; readonly ids: readonly string[] }): Promise<PresetSnapshot>
+}
+
+type MountedAgentRuntime = Omit<AgentRuntime, 'composition'>
+interface ExtensionFacade { readonly plugins: PluginRuntimeService; readonly skills: RuntimeSkillService; readonly presets: RuntimePresetService }
+
 export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Promise<AgentRuntime> {
   /*
    * zstd 必须在**任何会话读写之前**初始化好。
@@ -104,62 +185,267 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
 
   const services = options.services ?? createServices(options)
   const ownsServices = options.services === undefined
-  const { ctx, home } = services
+  let mounted: MountedAgentRuntime | undefined
+  let sessions: LocalSessionsApi | undefined
+  let checkpoints: FileCheckpointService | undefined
+  let fsMutationAuthority: ReturnType<typeof createFsMutationAuthority> | undefined
+  let extensionFacade: ExtensionFacade | undefined
+  let compositionSnapshot: RuntimeCompositionSnapshot | undefined
+  const profileId = options.profile ?? 'desktop-default'
+  const profileExtras = createOptionalCapabilityEntries(options)
+  const profile = createBuiltinRuntimeProfile(
+    profileId,
+    (ctx) => {
+      const provider = new LocalSessionsApi({ home: services.home })
+      sessions = provider
+      checkpoints = createLocalFileCheckpointService({ home: services.home })
+      const unregister = ctx.set('sessions', provider)
+      return async () => {
+        unregister()
+        await provider.close()
+        if (ownsServices) services.dispose()
+      }
+    },
+    async (ctx) => {
+      if (sessions === undefined) throw new Error('内部组合未能挂载 sessions-local')
+      const mountedExecution = mountExecutionBundle(options, services, sessions, ctx)
+      fsMutationAuthority = mountedExecution.fsMutationAuthority
+      return mountedExecution.dispose
+    },
+    (ctx) => {
+      if (sessions === undefined) throw new Error('内部组合未能挂载 sessions-local')
+      return mountToolingBundle(options, sessions, ctx)
+    },
+    (ctx) => registerModelRouter({ ctx, routing: options.modelRouting ?? createModelRouter() }),
+    (ctx) => {
+      if (sessions === undefined || fsMutationAuthority === undefined) throw new Error('内部组合缺少 policy provider 依赖')
+      return mountPolicyBundle(options, services, sessions, fsMutationAuthority, ctx, () => compositionSnapshot ?? { profile: profileId, entries: [] })
+    },
+    (ctx) => {
+      if (sessions === undefined) throw new Error('内部组合缺少 sessions provider')
+      const mountedExtensions = mountExtensionsBundle(options, services, sessions, ctx)
+      extensionFacade = mountedExtensions.facade
+      return mountedExtensions.dispose
+    },
+    (ctx) => mountCodeRuntimeBundle(options, ctx),
+    (ctx) => {
+      if (sessions === undefined || checkpoints === undefined) throw new Error('内部组合缺少 agent provider 依赖')
+      return mountAgentBundle(options, services, sessions, checkpoints, ctx)
+    },
+    async () => {
+      if (sessions === undefined || checkpoints === undefined || extensionFacade === undefined) throw new Error('内部组合缺少 extension provider')
+      mounted = await mountDesktopSpine(services, sessions, checkpoints, extensionFacade)
+      return async () => { await mounted?.dispose() }
+    },
+    profileExtras,
+  )
+  const composition = await composeRuntimeProfile(services.ctx, profile)
+  compositionSnapshot = composition.snapshot
+  if (mounted === undefined) throw new Error('内部组合未能挂载 lcode-spine')
+  return {
+    ...mounted,
+    composition: composition.snapshot,
+    dispose: async () => { await composition.dispose() },
+  }
+}
 
-  // ① sessions：事件日志的唯一 owner（+ JSONL 持久化 + SQLite 索引）
-  const sessions = new LocalSessionsApi({ home })
-  const checkpoints = createLocalFileCheckpointService({ home })
-
-  // ② 引擎与 sessions 共享同一条日志（见文件头注释）
-  const getSession = (sessionId: string): SessionService => sessions.sessionServiceFor(sessionId)
-
-  // ③ 工具注册表 → 提示词装配（后者要读前者的 schema）
+function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSessionsApi, ctx: DesktopServices['ctx']): Disposer {
+  const workspaceRoot = options.workspaceRoot ?? process.cwd()
   const tools = new InMemoryToolRegistry(ctx)
-  ctx.set('tools', tools)
+  const unregisterTools = ctx.set('tools', tools)
   const systemPrompt = createSystemPromptService(tools)
   systemPrompt.section('base', BASE_SYSTEM_PROMPT)
-  ctx.set('systemPrompt', systemPrompt)
+  const unregisterPrompt = ctx.set('systemPrompt', systemPrompt)
+  const workspaceOf = (sessionId: string) => sessions.workspaceOf(sessionId)
+  for (const tool of createFsTools({ fs: ctx.get('fs'), workspaceRoot, workspaceOf, spill: ctx.get('spill') })) tools.register(tool)
+  const unregisterShell = tools.register(createShellTool({ shell: ctx.get('shell'), workspaceRoot, workspaceOf }))
+  const unregisterTerminal = tools.register(createTerminalTool({ terminals: ctx.get('terminals'), workspaceRoot, workspaceOf }))
+  return () => { unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
+}
 
-  /*
-   * ③b 工具族 + 权限（批次⑤⑥）。
-   *
-   * 这两件事**必须一起装**（14 §3.5）：只装工具就是"能改文件却没人拦"，
-   * 只装权限则没有任何东西可拦。所以它们在这一段里成对出现。
-   */
-  /*
-   * 工作区根取两处之一：显式传入的，或**第一个已打开会话**的 cwd。
-   *
-   * 这里给的是"新会话的默认工作区"以及"路径解析的基准"。注意**每个会话**的真实
-   * 工作区由 `sessions.workspaceOf()` 在审批时现查——多工作区是这个函数的常态，
-   * 不能拿一个进程级的基准去代替（见 `PolicyHookOptions.workspaceOf` 的说明）。
-   */
+function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServices, sessions: LocalSessionsApi, mutationAuthority: ReturnType<typeof createFsMutationAuthority>, ctx: DesktopServices['ctx'], profile: () => RuntimeCompositionSnapshot): Disposer {
+  const permissionPresets = createLocalPermissionPresets({ home: services.home })
+  const unregisterPresets = ctx.set('permissionPresets', permissionPresets)
+  const workspaceTrust = createLocalWorkspaceTrust({ home: services.home })
+  const unregisterTrust = ctx.set('workspaceTrust', workspaceTrust)
+  const subagentProvider = registerInprocessSubagents({ ctx, sessions, workspaceOf: (id) => sessions.workspaceOf(id), profile })
+  const unregisterSubagentTool = ctx.get('tools').register(createSubagentTool(ctx))
+  const uninstallPolicy = installPolicyHook({ ctx, ...(options.approval === undefined ? {} : { approval: options.approval }), sandbox: ctx.get('sandbox'), presets: permissionPresets, workspaceTrust, mutationAuthority, workspaceOf: (id) => sessions.workspaceOf(id), getSession: (id) => { try { return sessions.sessionServiceFor(id) } catch { return undefined } } })
+  const planMode = createPlanModeService({ ctx, getSession: (id) => sessions.sessionServiceFor(id), systemPrompt: ctx.get('systemPrompt'), tools: ctx.get('tools'), ...(options.approval === undefined ? {} : { approval: options.approval }) })
+  const unregisterPlan = ctx.set('planMode', planMode)
+  return () => { planMode.dispose(); unregisterPlan(); uninstallPolicy(); unregisterSubagentTool(); subagentProvider.dispose(); unregisterTrust(); unregisterPresets() }
+}
+
+/**
+ * Web 与 LSP 只能由已配置的可信 Provider 显式加入 Profile。默认 desktop/cli
+ * 组合保持离线，也不会为了“可用”而暗中启动语言服务进程。
+ */
+function createOptionalCapabilityEntries(options: AgentRuntimeOptions): readonly InternalBundleEntry[] {
+  const entries: InternalBundleEntry[] = []
+  if (options.web !== undefined) {
+    const web = options.web
+    entries.push({
+      id: 'web-provider',
+      requires: ['tools'],
+      provides: ['web'],
+      mount: (ctx) => {
+        const unregisterWeb = ctx.set('web', web)
+        const unregisterTools = createWebTools(web).map((tool) => ctx.get('tools').register(tool))
+        return () => {
+          for (const unregister of unregisterTools.reverse()) unregister()
+          unregisterWeb()
+        }
+      },
+    })
+  }
+  if (options.lsp !== undefined) {
+    const lsp = options.lsp
+    entries.push({
+      id: 'lsp-provider',
+      requires: ['tools', 'subprocess', 'sandbox'],
+      provides: ['lsp'],
+      mount: (ctx) => {
+        const unregisterLsp = ctx.set('lsp', lsp)
+        const unregisterTools = createLspTools(lsp).map((tool) => ctx.get('tools').register(tool))
+        return () => {
+          for (const unregister of unregisterTools.reverse()) unregister()
+          unregisterLsp()
+        }
+      },
+    })
+  }
+  return entries
+}
+
+function mountExtensionsBundle(
+  options: AgentRuntimeOptions,
+  services: DesktopServices,
+  sessions: LocalSessionsApi,
+  ctx: DesktopServices['ctx'],
+): { readonly facade: ExtensionFacade; readonly dispose: Disposer } {
+  const workspaceRoot = options.workspaceRoot ?? process.cwd()
+  // Skills 与 preset 都是本地只读声明；启用后的插件生命周期则始终走受控 utility host。
+  const skills = createLocalSkillFilesystem({
+    roots: [
+      { path: join(services.home, 'skills'), source: 'user' },
+      { path: join(workspaceRoot, '.lcode', 'skills'), source: 'workspace' },
+    ],
+  })
+  const unregisterSkills = ctx.set('skills', skills)
+  const unregisterSkillTools = registerSkillTools(skills, ctx.get('tools'))
+  const localPresets = createLocalAgentPresets({
+    roots: [
+      { path: join(services.home, 'presets'), source: 'user' },
+      { path: join(workspaceRoot, '.lcode', 'presets'), source: 'workspace' },
+    ],
+  })
+  const unregisterPresets = ctx.set('presets', localPresets)
+  const registry = new LocalPluginRegistry({ home: services.home, coreVersion: '0.1.0' })
+  const lifecycle = new PluginLifecycleManager({
+    context: ctx,
+    tools: ctx.get('tools'),
+    systemPrompt: ctx.get('systemPrompt'),
+    startHost: async ({ target, onRequest }) => await createPluginHost({
+      manifest: target.manifest,
+      argv: [process.execPath, pluginUtilityRunnerPath, target.entryPath],
+      cwd: workspaceRoot,
+      workspace: { root: workspaceRoot, trusted: ctx.get('workspaceTrust').isTrusted(workspaceRoot) },
+      subprocess: ctx.get('subprocess'),
+      sandbox: {
+        policy: { mode: 'read-only', workspaceRoot, allowNetwork: false },
+        wrap: async (argv) => await ctx.get('sandbox').wrap(argv, { mode: 'read-only', workspaceRoot, allowNetwork: false }),
+      },
+      onRequest,
+    }),
+  })
+  const lifecycleService = new InstalledPluginLifecycleService(lifecycle, registry)
+  const unregisterPlugins = ctx.set('plugins', lifecycleService)
+  const facade: ExtensionFacade = {
+    plugins: {
+      list: () => registry.list(),
+      installLocal: async (path) => await registry.install({ source: { kind: 'local', path } }),
+      async activate(input) { await lifecycleService.activate(input) },
+      async deactivate(input) { await lifecycleService.deactivate(input) },
+      async uninstall(input) { await lifecycleService.uninstall(input) },
+      inspect: () => lifecycleService.inspect(),
+    },
+    skills: { catalog: () => skills.catalog(), load: (id) => skills.load(id) },
+    presets: {
+      list: () => localPresets.list(),
+      load: (id) => localPresets.load(id),
+      snapshot: async ({ sessionId, ids }) => {
+        const snapshot = await localPresets.snapshot(sessionId, ids)
+        sessions.sessionServiceFor(sessionId).append({ type: 'preset/snapshot', data: snapshot })
+        return snapshot
+      },
+    },
+  }
+  for (const plugin of registry.list().filter((entry) => entry.state === 'enabled')) {
+    void lifecycleService.activate(plugin).catch((error: unknown) => {
+      console.warn(`[lcode] 插件 ${plugin.id}@${plugin.version} 未能恢复：`, error)
+    })
+  }
+  return {
+    facade,
+    dispose: async () => {
+      unregisterSkillTools()
+      await lifecycle.dispose()
+      unregisterPlugins()
+      unregisterPresets()
+      unregisterSkills()
+    },
+  }
+}
+
+function mountCodeRuntimeBundle(options: AgentRuntimeOptions, ctx: DesktopServices['ctx']): Disposer {
+  const workspaceRoot = options.workspaceRoot ?? process.cwd()
+  const runtime = options.codeRuntime ?? createSubprocessCodeRuntime({
+    subprocess: ctx.get('subprocess'),
+    sandbox: ctx.get('sandbox'),
+    workspaceRoot,
+  })
+  const unregisterRuntime = ctx.set('codeRuntime', runtime)
+  const unregisterTool = ctx.get('tools').register(createCodeTool({ runtime, tools: ctx.get('tools') }))
+  return () => {
+    unregisterTool()
+    unregisterRuntime()
+  }
+}
+
+function mountExecutionBundle(options: AgentRuntimeOptions, services: DesktopServices, _sessions: LocalSessionsApi, ctx: DesktopServices['ctx']): { readonly fsMutationAuthority: ReturnType<typeof createFsMutationAuthority>; readonly dispose: Disposer } {
+  const unregister: Disposer[] = []
   const workspaceRoot = options.workspaceRoot ?? process.cwd()
   const subprocess = createLocalSubprocess()
-  ctx.set('subprocess', subprocess)
-  const sandbox: SandboxService = options.sandbox ?? defaultSandbox(subprocess, workspaceRoot)
-  ctx.set('sandbox', sandbox)
-  const approval = options.approval
-
-  /*
-   * `fs` 是**单例**，而工作区是**每会话**的（一个进程里可以开着多个项目）。
-   * 所以这里把"按会话解析工作区"的能力交给工具层——相对路径在进 `FsService`
-   * 之前就被解成绝对路径（20 §6.1）。少了这一步，A 项目里说 `read hello.txt`
-   * 会去进程启动目录找（实测踩过）。
-   */
+  unregister.push(ctx.set('subprocess', subprocess))
+  const sandbox = options.sandbox ?? defaultSandbox(subprocess, workspaceRoot)
+  unregister.push(ctx.set('sandbox', sandbox))
   const fsMutationAuthority = createFsMutationAuthority()
-  const fsService = createLocalFs({ workspaceRoot, mutationAuthority: fsMutationAuthority })
-  ctx.set('fs', fsService)
+  unregister.push(ctx.set('fs', createLocalFs({ workspaceRoot, mutationAuthority: fsMutationAuthority })))
+  unregister.push(registerCompactionPrune({ ctx }))
+  unregister.push(registerLocalSpill({ ctx, home: services.home }))
   const jobs = createLocalJobs()
-  ctx.set('jobs', jobs)
-  const { shell } = createLocalShell({
-    workspaceRoot,
-    subprocess,
-    wrap: (argv, policy) => sandbox.wrap(argv, policy),
-    jobs,
-  })
-  ctx.set('shell', shell)
+  unregister.push(ctx.set('jobs', jobs))
+  const { shell } = createLocalShell({ workspaceRoot, subprocess, wrap: (argv, policy) => sandbox.wrap(argv, policy), jobs })
+  unregister.push(ctx.set('shell', shell))
   const terminals = createLocalTerminal({ workspaceRoot, subprocess, sandbox })
-  ctx.set('terminals', terminals)
+  unregister.push(ctx.set('terminals', terminals))
+  return { fsMutationAuthority, dispose: async () => { await jobs.dispose(); await terminals.dispose(); for (const dispose of unregister.reverse()) dispose() } }
+}
+
+/** `agent-local` 只装配内置 agent 协作服务；具体实现仍归各能力包所有。 */
+function mountAgentBundle(
+  options: AgentRuntimeOptions,
+  services: DesktopServices,
+  sessions: LocalSessionsApi,
+  checkpoints: FileCheckpointService,
+  ctx: DesktopServices['ctx'],
+): Disposer {
+  const unregisterServices: Disposer[] = []
+  const getSession = (sessionId: string): SessionService => sessions.sessionServiceFor(sessionId)
+  const systemPrompt = ctx.get('systemPrompt')
+  const workspaceRoot = options.workspaceRoot ?? process.cwd()
+  const jobs = ctx.get('jobs')
+  const terminals = ctx.get('terminals')
 
   // 检查点只在 `turn/end` 已写入后串行生成。agent-loop 不依赖具体快照实现，
   // 通过此协作点保持“一切皆插件”的装配方向。
@@ -186,55 +472,50 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
     })
   })
 
-  for (const tool of createFsTools({
-    fs: fsService,
-    workspaceRoot,
-    workspaceOf: (sessionId) => sessions.workspaceOf(sessionId),
-  })) {
-    tools.register(tool)
-  }
-  tools.register(createShellTool({ shell, workspaceRoot, workspaceOf: (sessionId) => sessions.workspaceOf(sessionId) }))
-  tools.register(createTerminalTool({ terminals, workspaceRoot, workspaceOf: (sessionId) => sessions.workspaceOf(sessionId) }))
-
-  // 策略钩子：判定 → 需要则审批 → 只有 allowed-once 才放行
-  const presets = createLocalPermissionPresets({ home })
-  ctx.set('permissionPresets', presets)
-  const workspaceTrust = createLocalWorkspaceTrust({ home })
-  ctx.set('workspaceTrust', workspaceTrust)
-  const uninstallPolicy = installPolicyHook({
-    ctx,
-    ...(approval === undefined ? {} : { approval }),
-    sandbox,
-    presets,
-    workspaceTrust,
-    mutationAuthority: fsMutationAuthority,
-    workspaceOf: (sessionId) => sessions.workspaceOf(sessionId),
-    getSession: (sessionId) => {
-      try {
-        return sessions.sessionServiceFor(sessionId)
-      } catch {
-        // 会话没打开（例如审批发生在会话关闭之后）：不阻碍判定，只是不落盘
-        return undefined
-      }
-    },
-  })
-
-  // 计划模式是会话级策略，不进入循环本体：请求时仅暴露只读工具，执行前再次拒绝写类工具。
-  const planMode = createPlanModeService({ ctx, getSession, systemPrompt, tools, approval })
-  ctx.set('planMode', planMode)
-
   // ④ 循环（唯一的具体循环）
   const loop = createAgentLoop({ ctx, getSession })
-  ctx.set('agentLoop', loop)
+  unregisterServices.push(ctx.set('agentLoop', loop))
 
   // ⑤ 活体 agent 注册表（依赖 ctx 与 getSession）
-  ctx.set('agents', new InMemoryAgentStore(ctx, getSession))
+  unregisterServices.push(ctx.set('agents', new InMemoryAgentStore(ctx, getSession)))
+  const unregisterContextSources = registerLocalContextSources({ ctx, workspaceRoot, systemPrompt, sessions })
+  const unregisterContextBudget = registerContextBudget({
+    ctx,
+    systemPrompt,
+    sessionOf: getSession,
+    contextWindowOf: () => activeContextWindow(services),
+  })
+  const compaction = createLocalCompactionSummary()
+  unregisterServices.push(ctx.set('compaction', compaction))
+  const unregisterAutoCompaction = registerAutoCompactionPolicy({
+    ctx,
+    sessionOf: getSession,
+    ...(options.compactionSummarizer === undefined ? {} : { summarize: options.compactionSummarizer }),
+  })
   // 发布中的后台作业归属到 agent。对话回合取消不碰它；只有 agent 被销毁时才清理。
   const uninstallJobOwnerCleanup = ctx.on('agent/disposed', async ({ agentId }) => {
     await jobs.disposeOwner(agentId)
     await terminals.disposeOwner(agentId)
   })
+  return () => {
+    uninstallJobOwnerCleanup()
+    unregisterContextBudget()
+    unregisterContextSources()
+    unregisterAutoCompaction()
+    uninstallCheckpoints()
+    for (const unregister of unregisterServices.reverse()) unregister()
+  }
+}
 
+/** `lcode-spine` 只将已装配的服务投影为桌面/CLI 共用的产品门面。 */
+async function mountDesktopSpine(
+  services: DesktopServices,
+  sessions: LocalSessionsApi,
+  checkpoints: FileCheckpointService,
+  extensions: ExtensionFacade,
+): Promise<MountedAgentRuntime> {
+  const { ctx } = services
+  const getSession = (sessionId: string): SessionService => sessions.sessionServiceFor(sessionId)
   // ⑥ 边界层：`agents.*`（对话入口）
   const agents = new LocalAgentsApi({ ctx, getSession })
 
@@ -242,31 +523,59 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
     services,
     sessions,
     agents,
-    loop,
+    loop: ctx.get('agentLoop') as AgentLoopRuntime,
     ctx,
     checkpoints,
+    plugins: extensions.plugins,
+    skills: extensions.skills,
+    presets: extensions.presets,
+    compaction: ctx.get('compaction') as CompactionService,
+    subagents: ctx.get('subagents') as InprocessSubagentService,
     watchSession(sessionId, handler) {
       // `sessionServiceFor` 会校验"会话已打开"并抛 ES-SESSION_NOT_FOUND——
       // 那正是我们要的行为：未开放的会话没有内存镜像，也没有事件可订阅。
       return sessions.sessionServiceFor(sessionId).onEvent(handler)
     },
-    async dispose() {
-      planMode.dispose()
-      uninstallCheckpoints()
-      uninstallPolicy()
-      uninstallJobOwnerCleanup()
-      await jobs.dispose()
-      await terminals.dispose()
-      await sessions.close()
-      if (ownsServices) services.dispose()
-    },
+    async dispose() {},
   }
 }
 
+function activeContextWindow(services: DesktopServices): number | undefined {
+  const selection = services.ctx.get('agentDefaultModel').get()
+  if (selection === undefined) return undefined
+  const providers = services.readSetting('model.providers')
+  if (!Array.isArray(providers)) return undefined
+  const config = providers.find((candidate) => typeof candidate === 'object' && candidate !== null && (candidate as { name?: unknown }).name === selection.provider) as { context_window_in?: unknown } | undefined
+  return typeof config?.context_window_in === 'number' && config.context_window_in > 0 ? config.context_window_in : undefined
+}
+
 function defaultSandbox(subprocess: ReturnType<typeof createLocalSubprocess>, workspaceRoot: string): SandboxService {
-  return process.platform === 'win32'
-    ? createWindowsSandbox({ bridge: createWindowsSandboxBridge({ subprocess, workspaceRoot }) })
-    : createLocalSandbox()
+  if (process.platform === 'win32') return createWindowsSandbox({ bridge: createWindowsSandboxBridge({ subprocess, workspaceRoot }) })
+  if (process.platform === 'darwin') return createMacosSandbox()
+  if (process.platform === 'linux') return createLinuxSandbox()
+  // 未知平台也必须保守降级；Linux/macOS 不能被未知平台的实现假冒。
+  return {
+    async status() {
+      return {
+        available: false,
+        mechanism: 'none',
+        knownEscapeSurfaces: ['文件系统（无约束）', '网络（无约束）', '进程（无约束）'],
+        degraded: true,
+        reason: `当前平台（${process.platform}）没有可用的原生沙箱 Provider。`,
+        capabilities: {
+          platform: process.platform,
+          mechanism: 'none',
+          boundaries: {
+            filesystem: { state: 'unavailable', plannedMechanism: 'none', message: '未知平台没有文件系统沙箱' },
+            network: { state: 'unavailable', plannedMechanism: 'none', message: '未知平台没有网络沙箱' },
+            spawn: { state: 'unavailable', plannedMechanism: 'none', message: '未知平台没有进程沙箱' },
+          },
+          reason: `当前平台（${process.platform}）没有可用的原生沙箱 Provider。`,
+        },
+      }
+    },
+    async wrap(argv) { return { enforced: false, wrappedArgv: [...argv], degradationReason: `当前平台（${process.platform}）没有可用的原生沙箱 Provider。` } },
+  }
 }
 
 /**

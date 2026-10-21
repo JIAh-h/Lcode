@@ -1,0 +1,15 @@
+{
+  "name": "@lcode/tool-code",
+  "version": "0.1.0",
+  "description": "Code Mode consumer：把运行器 binding 回流到既有工具执行流水线",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/code-runtime": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" },
+  "devDependencies": { "@lcode/context": "workspace:*" }
+}

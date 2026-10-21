@@ -1,3 +1,5 @@
+import type {} from '@lcode/context'
+
 export interface SpawnedProcess {
   readonly pid: number
   readonly stdout: NodeJS.ReadableStream

@@ -9,6 +9,9 @@ import { runDoctor, type DoctorMode } from './doctor.ts'
 import { runIndexCommand, runSessionsCommand } from './sessions.ts'
 import { runTaskCommand } from './run.ts'
 import { runJobsCommand } from './jobs.ts'
+import { runPluginsCommand } from './plugins.ts'
+import { createAgentRuntime } from '@lcode/lcode-desktop'
+import { resolveLcodeHome } from '@lcode/util'
 
 /**
  * 解析结果。这里**不用 `readonly`**：`parseArgs` 是逐参数增量构造它的，
@@ -27,10 +30,12 @@ export interface CliOptions {
   runArgv?: string[] | undefined
   /** 内存作业查询入口；不跨进程恢复。 */
   jobsArgv?: string[] | undefined
+  /** 本地插件管理；真实生命周期仍由共享 Runtime 承担。 */
+  pluginsArgv?: string[] | undefined
 }
 
 /** 走 `sessions` 实现的顶层命令（第一条参数即命令名） */
-const SESSION_COMMANDS = new Set(['sessions', 'export', 'delete', 'restore', 'purge', 'trash', 'archive'])
+const SESSION_COMMANDS = new Set(['sessions', 'export', 'import', 'delete', 'restore', 'purge', 'trash', 'archive'])
 
 export function parseArgs(argv: readonly string[]): CliOptions {
   const opts: CliOptions = {}
@@ -54,6 +59,10 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   }
   if (first === 'jobs') {
     opts.jobsArgv = [...argv.slice(1)]
+    return opts
+  }
+  if (first === 'plugins') {
+    opts.pluginsArgv = [...argv.slice(1)]
     return opts
   }
 
@@ -95,6 +104,7 @@ const USAGE = `Lcode CLI — 可用命令：
   lcode sessions show <id>         查看一个会话
   lcode export <id> [--format jsonl|md]
   lcode export --all [--out <dir>] 全量导出 + manifest.json
+  lcode import <file.jsonl> [--title <name>] 导入为新的本地会话
   lcode delete <id>                软删（文件保留）
   lcode restore <id>               撤销软删
   lcode purge <id> --exported      硬删（先导出；--force 可跳过提示）
@@ -107,6 +117,12 @@ const USAGE = `Lcode CLI — 可用命令：
   lcode run --session <id> <补充要求> [--trust-workspace]
   lcode jobs list                 查看活动作业的驻留语义
   lcode jobs kill <id>            仅原运行时可执行；新 CLI 会明确拒绝接管
+
+插件（仅本地目录快照；启动必须通过系统沙箱）
+  lcode plugins list
+  lcode plugins inspect
+  lcode plugins install <目录>
+  lcode plugins activate|deactivate|uninstall <id> <version>
 
 自检
   lcode doctor                     环境自检
@@ -136,13 +152,16 @@ async function main(): Promise<void> {
     process.exitCode = await runJobsCommand(opts.jobsArgv)
     return
   }
+  if (opts.pluginsArgv !== undefined) {
+    process.exitCode = await runPluginsCommand(opts.pluginsArgv)
+    return
+  }
   if (opts.doctor !== undefined) {
     process.exitCode = await runDoctor(opts.doctor)
     return
   }
   if (opts.dumpConfig) {
-    // TODO(批次⑦)：打印最终插件装配（含层级与来源）
-    console.log(JSON.stringify({ profile: opts.profile ?? 'default', bundles: [] }, null, 2))
+    process.exitCode = await runDumpConfig(opts.profile)
     return
   }
   console.log(USAGE)
@@ -152,3 +171,21 @@ main().catch((err: unknown) => {
   console.error(err)
   process.exit(1)
 })
+
+async function runDumpConfig(requested: string | undefined): Promise<number> {
+  const profile = requested ?? 'cli-default'
+  if (profile !== 'desktop-default' && profile !== 'cli-default') {
+    console.error(`未知 profile：${profile}（可用：desktop-default、cli-default）`)
+    return 1
+  }
+  const runtime = await createAgentRuntime({
+    home: resolveLcodeHome(),
+    profile,
+  })
+  try {
+    console.log(JSON.stringify(runtime.composition, null, 2))
+    return 0
+  } finally {
+    await runtime.dispose()
+  }
+}

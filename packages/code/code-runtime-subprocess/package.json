@@ -1,0 +1,16 @@
+{
+  "name": "@lcode/code-runtime-subprocess",
+  "version": "0.1.0",
+  "description": "受强制只读沙箱约束的 JavaScript code-runtime provider",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/code-runtime": "workspace:*",
+    "@lcode/sandbox": "workspace:*",
+    "@lcode/subprocess": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+  ,"devDependencies": { "@lcode/subprocess-local": "workspace:*" }
+}

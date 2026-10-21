@@ -72,6 +72,8 @@ import type {
   ExportFormat,
   ExportInput,
   ExportResult,
+  ImportSessionInput,
+  ImportSessionResult,
   FlushInput,
   FlushResult,
   ForkSessionInput,
@@ -105,7 +107,7 @@ import type {
   SessionMetaInput,
   SessionMetaResult,
   SessionStatus,
-  SessionsApi,
+  RuntimeSessionsService,
   StorageUsageResult,
   TrashEntry,
 } from './types.ts'
@@ -494,7 +496,7 @@ function renderMarkdown(header: { session_id: string; cwd: string | null; create
   return lines.join('\n')
 }
 
-export class LocalSessionsApi implements SessionsApi, HistoryApi {
+export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
   private readonly home: string
   private readonly persistence: JsonlSessionPersistence
   private readonly index: SessionIndexWriter
@@ -818,6 +820,35 @@ export class LocalSessionsApi implements SessionsApi, HistoryApi {
     const target = join(dir, `${sessionId}-${stamp}.md`)
     writeFileAtomicSync(target, text)
     return { path: target, bytes: Buffer.byteLength(text, 'utf8'), sha256: sha256Hex(text) }
+  }
+
+  async import(input: ImportSessionInput): Promise<ImportSessionResult> {
+    if (typeof input.path !== 'string' || input.path.trim() === '') throw invalidParams('导入路径不能为空')
+    const source = input.path
+    if (!existsSync(source) || !statSync(source).isFile()) throw invalidParams(`导入文件不存在或不是普通文件：${source}`)
+    let loaded: LoadedLog
+    try {
+      loaded = loadLog(source)
+    } catch (cause) {
+      throw invalidParams(`导入文件不是受支持的 JSONL 会话：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+
+    const sessionId = newSessionId()
+    await this.persistence.open(asSessionId(sessionId), { ...(loaded.header.cwd === null ? {} : { cwd: loaded.header.cwd }) })
+    const store = new InMemorySessionStore(asSessionId(sessionId))
+    this.sessions.set(sessionId, { store, cwd: loaded.header.cwd })
+    try {
+      const imported = store.appendMany(loaded.events.map(toEventInput))
+      if (imported.length > 0) await this.persistence.append(asSessionId(sessionId), imported as readonly SessionEvent[])
+      await this.persistence.flush(asSessionId(sessionId))
+      await this.index.drain()
+      const title = input.title?.trim() || '导入的共享会话'
+      openIndexDb({ home: this.home }).prepare('UPDATE sessions SET title = ? WHERE session_id = ?').run(title, sessionId)
+      return { session_id: sessionId, last_seq: store.length - 1, imported_events: imported.length }
+    } catch (cause) {
+      this.sessions.delete(sessionId)
+      throw cause
+    }
   }
 
   /** 全量重建索引（`lcode index rebuild` 的进程内入口；T6.4 `doctor --index` 也会用它） */

@@ -1,1 +1,1 @@
-export type { SubagentService } from './subagent.ts'
+export type { SubagentRunInput, SubagentRunResult, SubagentService } from './subagent.ts'

@@ -34,7 +34,13 @@ export class InMemoryAgentStore implements AgentService {
         userMessage: '这个对话已经在运行了。',
       })
     }
-    const handle = new AgentHandleImpl(this.ctx, id, spec.sessionId, this.getSession(spec.sessionId))
+    const handle = new AgentHandleImpl(
+      this.ctx,
+      id,
+      spec.sessionId,
+      this.getSession(spec.sessionId),
+      () => this.handles.delete(id),
+    )
     this.handles.set(id, handle)
     await this.ctx.emit('agent/created', { agentId: id, sessionId: spec.sessionId })
     return handle
@@ -44,7 +50,13 @@ export class InMemoryAgentStore implements AgentService {
     this.assertAlive()
     const existing = this.handles.get(ref.agentId)
     if (existing) return existing
-    const handle = new AgentHandleImpl(this.ctx, ref.agentId, ref.sessionId, this.getSession(ref.sessionId))
+    const handle = new AgentHandleImpl(
+      this.ctx,
+      ref.agentId,
+      ref.sessionId,
+      this.getSession(ref.sessionId),
+      () => this.handles.delete(ref.agentId),
+    )
     this.handles.set(ref.agentId, handle)
     return handle
   }
@@ -92,6 +104,7 @@ class AgentHandleImpl implements AgentHandle {
     readonly id: AgentId,
     readonly sessionId: SessionId,
     private readonly session: SessionService,
+    private readonly unregister: () => void,
   ) {}
 
   get status(): AgentStatus {
@@ -146,6 +159,7 @@ class AgentHandleImpl implements AgentHandle {
       this.disposers[i]!()
     }
     this.disposers = []
+    this.unregister()
     await this.ctx.emit('agent/disposed', { agentId: this.id })
   }
 

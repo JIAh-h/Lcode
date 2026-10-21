@@ -80,6 +80,23 @@ describe('read', () => {
     const r = await run('definitely_not_a_tool', {})
     expect(r).toMatchObject({ ok: false, error: { code: 'ET-UNKNOWN_TOOL' } })
   })
+
+  it('同一会话可通过 read 取回 spill locator，普通文件系统不参与解析', async () => {
+    const virtual = new InMemoryToolRegistry(ctx)
+    const locator = 'lcode://spill/11111111-1111-1111-1111-111111111111'
+    for (const tool of createFsTools({
+      fs: createLocalFs({ workspaceRoot: root }),
+      workspaceRoot: root,
+      spill: {
+        async read(input) {
+          expect(input).toMatchObject({ sessionId: 's1', locator })
+          return { text: 'first\nsecond', totalLines: 3, truncated: true }
+        },
+      },
+    })) virtual.register(tool)
+    const result = await virtual.execute(call('read', { path: locator }), { signal: new AbortController().signal, scope: { sessionId: 's1' } })
+    expect(result).toMatchObject({ ok: true, value: { path: locator, lines: [{ number: 1, text: 'first' }, { number: 2, text: 'second' }], totalLines: 3, truncated: true } })
+  })
 })
 
 describe('describeAction：策略层拿得到意图', () => {

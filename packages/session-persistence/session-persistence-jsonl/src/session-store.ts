@@ -98,6 +98,8 @@ export function eventToFrame(event: SessionEvent): EventFrame {
     data: event.data,
     ...(event.surfaceOp === undefined ? {} : { surfaceOp: event.surfaceOp }),
     ...(event.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: event.sourceEventSeqs }),
+    ...(event.compactionId === undefined ? {} : { compactionId: event.compactionId }),
+    ...(event.shadowedSeqs === undefined ? {} : { shadowedSeqs: event.shadowedSeqs }),
     ...(event.ignorable === undefined ? {} : { ignorable: event.ignorable }),
   }
 }

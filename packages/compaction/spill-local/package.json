@@ -11,6 +11,7 @@
     }
   },
   "dependencies": {
+    "@lcode/agent-loop": "workspace:*",
     "@lcode/util": "workspace:*",
     "@lcode/session": "workspace:*",
     "@lcode/context": "workspace:*"

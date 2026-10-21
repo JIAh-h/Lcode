@@ -1,0 +1,10 @@
+{
+  "name": "@lcode/code-runtime",
+  "version": "0.1.0",
+  "description": "模型代码执行的 provider seam，不包含工具或会话语义",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": { "@lcode/context": "workspace:*", "@lcode/util": "workspace:*" },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}
