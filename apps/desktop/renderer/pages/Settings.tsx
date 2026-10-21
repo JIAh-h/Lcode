@@ -1227,6 +1227,9 @@ function ArchiveSection() {
   const [trashBytes, setTrashBytes] = useState(0)
   const [busy, setBusy] = useState<string | null>(null)
   const [emptying, setEmptying] = useState(false)
+  const [purgeTarget, setPurgeTarget] = useState<
+    { kind: 'one'; id: string; title: string } | { kind: 'all' } | null
+  >(null)
 
   const load = useCallback(async () => {
     const bridge = sessionBridge()
@@ -1303,6 +1306,32 @@ function ArchiveSection() {
       .finally(() => setBusy(null))
   }
 
+  /** 归档会话 → 永久归档（进回收站）。批量时逐条执行，失败的不影响其它。 */
+  const confirmPurge = (): void => {
+    const bridge = sessionBridge()
+    const target = purgeTarget
+    if (bridge === undefined || target === null) return
+    const targets = target.kind === 'all' ? sessions : sessions.filter((item) => item.session_id === target.id)
+    if (targets.length === 0) {
+      setPurgeTarget(null)
+      return
+    }
+    setBusy('purge')
+    void Promise.allSettled(targets.map((item) => bridge.purge({ session_id: item.session_id, force: true })))
+      .then((results) => {
+        const done = results.filter((item) => item.status === 'fulfilled').length
+        window.dispatchEvent(new Event('lcode:session-changed'))
+        toast(
+          target.kind === 'all'
+            ? t('已把 {n} 个归档会话移入回收站', { n: done })
+            : t('已移入回收站'),
+        )
+        setPurgeTarget(null)
+        return load()
+      })
+      .finally(() => setBusy(null))
+  }
+
   return (
     <>
       <h2>{t('归档与回收站')}</h2>
@@ -1328,7 +1357,18 @@ function ArchiveSection() {
         )}
       </div>
       <div className="sect">
-        <div className="sh2">{t('已归档会话')}</div>
+        <div className="sh2">
+          {t('已归档会话')}
+          {sessions.length > 0 && (
+            <button
+              className="mini danger"
+              disabled={busy !== null}
+              onClick={() => setPurgeTarget({ kind: 'all' })}
+            >
+              {t('全部删除')}
+            </button>
+          )}
+        </div>
         <div className="hint" style={{ padding: '10px 16px' }}>
           {t('归档的会话不会自动清除，会一直保留到你恢复或永久归档。')}
         </div>
@@ -1348,6 +1388,13 @@ function ArchiveSection() {
               <button className="btn" disabled={busy !== null} onClick={() => restoreSession(item.session_id)}>
                 {t('恢复')}
               </button>
+              <button
+                className="btn danger"
+                disabled={busy !== null}
+                onClick={() => setPurgeTarget({ kind: 'one', id: item.session_id, title: item.title })}
+              >
+                {t('删除')}
+              </button>
             </div>
           ))
         )}
@@ -1362,7 +1409,7 @@ function ArchiveSection() {
           )}
         </div>
         <div className="hint" style={{ padding: '10px 16px' }}>
-          {t('永久归档的文件先进入回收站，保留 7 天；到期后需手动清空（或运行 lcode doctor --storage）才会真正删除，清空后无法恢复。')}
+          {t('永久归档的文件先进入回收站，保留 7 天；到期后由后台自动清理，也可以立即清空。清空后无法恢复。')}
         </div>
         {trash.length === 0 ? (
           <div className="srow">
@@ -1384,6 +1431,22 @@ function ArchiveSection() {
           ))
         )}
       </div>
+      {purgeTarget !== null && (
+        <ConfirmDialog
+          title={t('永久删除会话')}
+          message={
+            purgeTarget.kind === 'all'
+              ? t('会把 {n} 个归档会话全部移入回收站；回收站不能恢复，只能清空。', { n: sessions.length })
+              : t('会把「{name}」移入回收站；回收站不能恢复，只能清空。', {
+                  name: purgeTarget.title || t('未命名会话'),
+                })
+          }
+          confirmLabel={t('删除')}
+          danger
+          onCancel={() => setPurgeTarget(null)}
+          onConfirm={confirmPurge}
+        />
+      )}
       {emptying && (
         <ConfirmDialog
           title={t('清空回收站')}

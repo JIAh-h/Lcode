@@ -98,8 +98,8 @@ export const EN: Readonly<Record<string, string>> = {
     'Archived sessions are kept until you restore or permanently archive them.',
   '回收站（不可恢复）': 'Trash (not recoverable)',
   清空回收站: 'Empty trash',
-  '永久归档的文件先进入回收站，保留 7 天；到期后需手动清空（或运行 lcode doctor --storage）才会真正删除，清空后无法恢复。':
-    'Permanently archived files stay in the trash for 7 days. After that they are still not removed automatically — empty the trash (or run lcode doctor --storage) to delete them. Emptied files cannot be recovered.',
+  '永久归档的文件先进入回收站，保留 7 天；到期后由后台自动清理，也可以立即清空。清空后无法恢复。':
+    'Permanently archived files stay in the trash for 7 days and are cleaned up automatically after that; you can also empty the trash now. Emptied files cannot be recovered.',
   '回收站是空的。': 'Trash is empty.',
   '已过期，可清理': 'Expired — can be cleaned',
   '{n} 天后可清理': 'Can be cleaned in {n} days',
@@ -108,6 +108,14 @@ export const EN: Readonly<Record<string, string>> = {
   清空: 'Empty',
   已清空回收站: 'Trash emptied',
   清空失败: 'Failed to empty trash',
+  全部删除: 'Delete all',
+  永久删除会话: 'Permanently delete session',
+  '会把 {n} 个归档会话全部移入回收站；回收站不能恢复，只能清空。':
+    'Moves all {n} archived sessions to the trash. Trash items cannot be restored, only emptied.',
+  '会把「{name}」移入回收站；回收站不能恢复，只能清空。':
+    'Moves “{name}” to the trash. Trash items cannot be restored, only emptied.',
+  已移入回收站: 'Moved to the trash',
+  '已把 {n} 个归档会话移入回收站': 'Moved {n} archived session(s) to the trash',
   取消归档: 'Unarchive',
   工作区已归档: 'Workspace archived',
   已取消归档: 'Workspace restored',

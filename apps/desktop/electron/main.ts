@@ -1569,6 +1569,7 @@ function parseSetDefaultInput(input: unknown): {
 
 app.whenReady().then(() => {
   createMainWindow();
+  startTrashPruner();
   // 装配失败不该让窗口起不来：模型页会显示不可用，而不是整个应用打不开
   void models().catch((err: unknown) => {
     console.error("[lcode] 模型装配失败：", err);
@@ -1591,8 +1592,51 @@ app.on("window-all-closed", () => {
 });
 
 let runtimeDisposing = false;
+
+/**
+ * 回收站后台清理：到期（7 天）的文件由主进程定时移除。
+ *
+ * 只在主进程里跑，不依赖用户打开设置页。间隔可用环境变量覆盖，
+ * 便于验收脚本把周期压到秒级（正常运行时不需要配）。
+ */
+const TRASH_PRUNE_FIRST_MS = Number(process.env.LCODE_TRASH_PRUNE_FIRST_MS ?? 10_000);
+const TRASH_PRUNE_INTERVAL_MS = Number(
+  process.env.LCODE_TRASH_PRUNE_INTERVAL_MS ?? 60 * 60 * 1000,
+);
+let trashPruneFirst: NodeJS.Timeout | null = null;
+let trashPruneTimer: NodeJS.Timeout | null = null;
+
+function startTrashPruner(): void {
+  const sweep = (): void => {
+    if (quitting) return;
+    void agentRuntime()
+      .then((rt) => rt.sessions.prune({ trash: true, cache: false }))
+      .then((result) => {
+        if (result.trash.removed > 0) {
+          console.log(
+            `[lcode] 回收站清理：移除 ${result.trash.removed} 项，释放 ${result.trash.freedBytes} 字节`,
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        // 清理失败不能影响应用使用；下次周期还会再试
+        console.error("[lcode] 回收站清理失败：", error);
+      });
+  };
+  trashPruneFirst = setTimeout(sweep, TRASH_PRUNE_FIRST_MS);
+  trashPruneTimer = setInterval(sweep, TRASH_PRUNE_INTERVAL_MS);
+}
+
 app.on('before-quit', (event) => {
   quitting = true;
+  if (trashPruneFirst !== null) {
+    clearTimeout(trashPruneFirst);
+    trashPruneFirst = null;
+  }
+  if (trashPruneTimer !== null) {
+    clearInterval(trashPruneTimer);
+    trashPruneTimer = null;
+  }
   if (runtime === null || runtimeDisposing) return;
   // Electron 不会等待 async 监听器。阻止这一次退出，等宿主反向释放 utility
   // process，再以无回调的 exit 收尾，避免 Windows 上留下插件 Node 子进程。
