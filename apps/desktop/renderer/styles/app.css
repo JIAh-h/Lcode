@@ -26,8 +26,6 @@
 .side { width: 236px; display: flex; flex-direction: column; min-height: 0; background: var(--bg-panel); border-right: 1px solid var(--border-subtle); flex-shrink: 0; }
 .shead { padding: var(--s3) var(--s4) var(--s2); font-size: 11px; letter-spacing: 0.6px; color: var(--text-muted); }
 .snav { flex: none; padding: 0 var(--s3) var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
-.snav .new { padding: var(--s3) var(--s4); border-radius: var(--r2); background: var(--bg-elevated); border: 1px solid var(--border-subtle); font-size: 12.5px; text-align: left; }
-.snav .new:hover { border-color: var(--border-strong); }
 /* 会话树：唯一可滚动区。工作区/会话再多也不能挤压底部账户区 */
 .stree { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; padding-bottom: var(--s3); }
 .sgroup { display: block; }
@@ -40,6 +38,7 @@
 .sgcnt { flex: none; font-size: 10.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .sgh-acts { display: flex; align-items: center; gap: 1px; padding-right: 6px; opacity: 0; transition: opacity 0.1s ease; }
 .sgh-row:hover .sgh-acts, .sgh-row:focus-within .sgh-acts { opacity: 1; }
+.sgh-row:hover .sgh, .sgh-row:focus-within .sgh { color: var(--text-primary); }
 .sga { width: 22px; height: 22px; display: grid; place-items: center; border: 0; background: transparent; border-radius: var(--r1); font-size: 13px; line-height: 1; color: var(--text-muted); cursor: pointer; }
 .sga:hover { background: var(--bg-inset); color: var(--text-primary); }
 /* 会话行：整行（含右侧 ⋯）共用悬停/选中背景。类名不能叫 .srow——设置页有同名行容器 */
@@ -53,7 +52,8 @@
 .smore { display: block; width: calc(100% - 24px); margin: 6px 12px 10px; padding: 6px; border-radius: var(--r2); border: 1px solid var(--border-subtle); background: var(--bg-elevated); font-size: 11.5px; color: var(--text-secondary); cursor: pointer; }
 .smore:hover { border-color: var(--border-strong); }
 .slist { display: flex; flex-direction: column; padding: 0 var(--s3); gap: 1px; }
-.sitem { display: flex; align-items: center; gap: var(--s3); padding: 4px 10px; border-radius: var(--r2); font-size: 12.5px; color: var(--text-primary); cursor: pointer; }
+.sitem { display: flex; align-items: center; gap: var(--s3); padding: 4px 10px; border-radius: var(--r2); font-size: 12.5px; color: var(--text-secondary); cursor: pointer; }
+.snrow:hover .sitem, .snrow.on .sitem { color: var(--text-primary); }
 .sname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .acct { flex: none; margin-top: auto; display: flex; align-items: center; gap: var(--s3); padding: var(--s4); border-top: 1px solid var(--border-subtle); }
 .av { width: 26px; height: 26px; border-radius: 50%; background: var(--accent); color: var(--accent-fg); display: grid; place-items: center; font-size: 12px; }
@@ -378,7 +378,6 @@ body.noside .side { display: none; }
 .snav a { display: flex; align-items: center; gap: var(--s4); padding: 6px 10px; border-radius: var(--r2); font-size: 13px; color: var(--text-primary); text-decoration: none; }
 .snav a:hover { background: var(--bg-inset); }
 .snav a svg { color: var(--text-muted); flex: none; }
-.snav .new { font-weight: 600; border: none; background: transparent; }
 .snrow.on { background: var(--accent-weak); }
 .acct .av { background: linear-gradient(135deg, #8a8a92, #4a4a52); color: #fff; font-size: 11px; font-weight: 600; }
 .acct .nm { font-weight: 500; }

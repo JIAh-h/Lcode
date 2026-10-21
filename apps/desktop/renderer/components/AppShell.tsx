@@ -498,7 +498,6 @@ export function AppShell({ children }: { children: ReactNode }) {
               <span className="appname">Lcode</span>
               <span className="appver">v0.1.0</span>
             </div>
-            <div className="shead">{t('工作区')}</div>
             <nav className="snav">
               <a
                 className="new"
@@ -530,6 +529,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 {t('打开文件夹…')}
               </a>
             </nav>
+            <div className="shead">{t('工作区')}</div>
             {/*
               会话树独立滚动：工作区/会话再多也只占侧栏高度，不挤压底部账户区。
               `min-height: 0` 是 flex 子项能真正收缩的前提，缺了它会撑破外框。
