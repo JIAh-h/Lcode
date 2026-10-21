@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { ChipGroup, Seg, Select, Switch, SwitchRow, TextArea, TextInput } from '../components/controls.tsx'
+import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
 import { toast } from '../components/toast.ts'
 import { setLocale, t, useLocale } from '../i18n/index.ts'
 import { useUiPrefs } from '../store/uiPrefs.ts'
@@ -11,6 +12,7 @@ import { chooseDefaultModel, syncModelsFromMain } from '../store/modelSync.ts'
 import { workspaceTrustBridge } from '../store/sessionBridge.ts'
 import { sessionBridge } from '../store/sessionBridge.ts'
 import type { SessionMeta } from '../store/sessionBridge.ts'
+import type { TrashEntry } from '../store/sessionBridge.ts'
 import type { PermissionPreset } from '../store/uiPrefs.ts' // 模型条目类型 ModelEntry 也定义在 store/uiPrefs
 
 /**
@@ -1207,20 +1209,35 @@ function ExportSection() {
   )
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+}
+
 /**
  * 归档与回收站：工作区归档是本地视图状态（sidebar.json），会话归档是软删。
  * 两者都要能在这里看见并恢复——否则归档等于「消失」。
+ * 永久归档则进回收站（`trash/`），不可恢复，只能整体清空。
  */
 function ArchiveSection() {
   const [sessions, setSessions] = useState<readonly SessionMeta[]>([])
   const [workspaces, setWorkspaces] = useState<readonly { key: string; name: string }[]>([])
+  const [trash, setTrash] = useState<readonly TrashEntry[]>([])
+  const [trashBytes, setTrashBytes] = useState(0)
   const [busy, setBusy] = useState<string | null>(null)
+  const [emptying, setEmptying] = useState(false)
 
   const load = useCallback(async () => {
     const bridge = sessionBridge()
     if (bridge !== undefined) {
-      const result = await bridge.list({ includeDeleted: true, limit: 200 })
+      const [result, trashResult] = await Promise.all([
+        bridge.list({ includeDeleted: true, limit: 200 }),
+        bridge.trash(),
+      ])
       setSessions(result.items.filter((item) => item.deleted_at !== null))
+      setTrash(trashResult.items)
+      setTrashBytes(trashResult.total_bytes)
     }
     const sidebar = (await window.lcode.getSidebar()) as { archivedWorkspaces?: string[] } | null
     setWorkspaces(
@@ -1271,6 +1288,21 @@ function ArchiveSection() {
       .finally(() => setBusy(null))
   }
 
+  const emptyTrash = (): void => {
+    const bridge = sessionBridge()
+    if (bridge === undefined) return
+    setBusy('trash')
+    void bridge
+      .emptyTrash()
+      .then(() => {
+        setEmptying(false)
+        toast(t('已清空回收站'))
+        return load()
+      })
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('清空失败')))
+      .finally(() => setBusy(null))
+  }
+
   return (
     <>
       <h2>{t('归档与回收站')}</h2>
@@ -1297,6 +1329,9 @@ function ArchiveSection() {
       </div>
       <div className="sect">
         <div className="sh2">{t('已归档会话')}</div>
+        <div className="hint" style={{ padding: '10px 16px' }}>
+          {t('归档的会话不会自动清除，会一直保留到你恢复或永久归档。')}
+        </div>
         {sessions.length === 0 ? (
           <div className="srow">
             <div className="sl">{t('没有归档的会话。')}</div>
@@ -1317,6 +1352,51 @@ function ArchiveSection() {
           ))
         )}
       </div>
+      <div className="sect">
+        <div className="sh2">
+          {t('回收站（不可恢复）')}
+          {trash.length > 0 && (
+            <button className="mini" disabled={busy !== null} onClick={() => setEmptying(true)}>
+              {t('清空回收站')}
+            </button>
+          )}
+        </div>
+        <div className="hint" style={{ padding: '10px 16px' }}>
+          {t('永久归档的文件先进入回收站，7 天后清除；清空后无法恢复。')}
+        </div>
+        {trash.length === 0 ? (
+          <div className="srow">
+            <div className="sl">{t('回收站是空的。')}</div>
+          </div>
+        ) : (
+          trash.map((item) => (
+            <div className="srow" key={item.path}>
+              <div className="sl">{item.session_id}</div>
+              <div className="sr">
+                <span className="src">
+                  {formatBytes(item.bytes)} · {new Date(item.deleted_at).toLocaleString()} ·{' '}
+                  {item.expires_in_ms === 0
+                    ? t('已过期，可清理')
+                    : t('{n} 天后清除', { n: Math.ceil(item.expires_in_ms / 86_400_000) })}
+                </span>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+      {emptying && (
+        <ConfirmDialog
+          title={t('清空回收站')}
+          message={t('回收站里的 {n} 个文件（{size}）将被永久删除，无法恢复。', {
+            n: trash.length,
+            size: formatBytes(trashBytes),
+          })}
+          confirmLabel={t('清空')}
+          danger
+          onCancel={() => setEmptying(false)}
+          onConfirm={emptyTrash}
+        />
+      )}
     </>
   )
 }

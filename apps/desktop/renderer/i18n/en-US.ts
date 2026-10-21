@@ -94,6 +94,20 @@ export const EN: Readonly<Record<string, string>> = {
   恢复: 'Restore',
   已恢复会话: 'Session restored',
   恢复失败: 'Failed to restore',
+  '归档的会话不会自动清除，会一直保留到你恢复或永久归档。':
+    'Archived sessions are kept until you restore or permanently archive them.',
+  '回收站（不可恢复）': 'Trash (not recoverable)',
+  清空回收站: 'Empty trash',
+  '永久归档的文件先进入回收站，7 天后清除；清空后无法恢复。':
+    'Permanently archived files go to the trash, are cleared after 7 days, and cannot be recovered once emptied.',
+  '回收站是空的。': 'Trash is empty.',
+  '已过期，可清理': 'Expired — can be cleaned',
+  '{n} 天后清除': 'Cleared in {n} days',
+  '回收站里的 {n} 个文件（{size}）将被永久删除，无法恢复。':
+    'The {n} file(s) in the trash ({size}) will be permanently deleted and cannot be recovered.',
+  清空: 'Empty',
+  已清空回收站: 'Trash emptied',
+  清空失败: 'Failed to empty trash',
   取消归档: 'Unarchive',
   工作区已归档: 'Workspace archived',
   已取消归档: 'Workspace restored',

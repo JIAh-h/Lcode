@@ -42,8 +42,16 @@ export interface SessionMeta {
   readonly archived_at: number | null
 }
 
-export interface OpenedSession {
-  readonly meta: SessionMeta
+/** 回收站条目（永久归档后的文件；到期后可被清理，不可恢复） */
+export interface TrashEntry {
+  readonly session_id: string
+  readonly path: string
+  readonly bytes: number
+  readonly deleted_at: number
+  readonly expires_in_ms: number
+}
+
+export interface OpenedSession {  readonly meta: SessionMeta
   readonly events: readonly SessionEvent[]
   readonly history: { readonly messages: readonly ModelMessage[] }
   readonly repaired: boolean
@@ -56,6 +64,8 @@ export interface SessionBridge {
     readonly items: readonly SessionMeta[]
     readonly nextCursor?: string | undefined
   }>
+  trash(): Promise<{ readonly items: readonly TrashEntry[]; readonly total_bytes: number }>
+  emptyTrash(): Promise<unknown>
   create(input: unknown): Promise<{ readonly session_id: string; readonly last_seq: number }>
   open(sessionId: string): Promise<OpenedSession>
   delete(input: { readonly session_id: string }): Promise<unknown>

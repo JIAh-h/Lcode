@@ -998,6 +998,15 @@ ipcMain.handle(
   },
 );
 
+/** 回收站：永久归档后的文件（只读列表；可整体清空） */
+ipcMain.handle("lcode:session.trash", async () =>
+  (await agentRuntime()).sessions.listTrash(),
+);
+
+ipcMain.handle("lcode:session.emptyTrash", async () =>
+  (await agentRuntime()).sessions.prune({ emptyTrash: true, cache: false }),
+);
+
 ipcMain.handle(
   "lcode:session.export",
   async (_e: IpcMainInvokeEvent, input: unknown) => {
