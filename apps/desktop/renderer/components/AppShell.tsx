@@ -513,6 +513,9 @@ export function AppShell({ children }: { children: ReactNode }) {
                           trigger="⋯"
                           buttonClass="sga"
                           title={t('工作区操作')}
+                          align="right"
+                          width={170}
+                          dense
                           items={[
                             { id: 'pin', label: pinnedGroup ? '取消置顶' : '置顶' },
                             { id: 'archive', label: '归档工作区' },

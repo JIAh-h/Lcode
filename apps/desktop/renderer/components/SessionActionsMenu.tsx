@@ -123,6 +123,9 @@ export function SessionActionsMenu({
         trigger="⋯"
         buttonClass={buttonClass}
         title={t('会话操作')}
+        align="right"
+        width={170}
+        dense
         items={[
           { id: 'rename', label: '重命名' },
           { id: 'export', label: '导出记录' },

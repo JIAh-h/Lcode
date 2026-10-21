@@ -41,6 +41,9 @@ export function PopMenu({
   footer,
   up = false,
   block = false,
+  align = 'left',
+  width = MENU_WIDTH,
+  dense = false,
 }: {
   trigger: ReactNode
   buttonClass?: string
@@ -55,6 +58,12 @@ export function PopMenu({
   up?: boolean
   /** 触发按钮占满一行（表单里的下拉用） */
   block?: boolean
+  /** 贴触发按钮哪一侧展开：右侧按钮用 right，菜单向左长 */
+  align?: 'left' | 'right'
+  /** 菜单宽度（像素）；窄菜单用 170 左右 */
+  width?: number
+  /** 紧凑档：更小的内边距、隐藏勾选留白（纯动作菜单用） */
+  dense?: boolean
 }) {
   const triggerRef = useRef<HTMLSpanElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
@@ -65,10 +74,11 @@ export function PopMenu({
     const el = triggerRef.current
     if (!el) return
     const r = el.getBoundingClientRect()
-    const left = Math.max(EDGE, Math.min(r.left, window.innerWidth - MENU_WIDTH - EDGE))
+    const raw = align === 'right' ? r.right - width : r.left
+    const left = Math.max(EDGE, Math.min(raw, window.innerWidth - width - EDGE))
     // 向上展开时用 translateY(-100%) 翻转，免得为了定位去测量菜单高度
     setPos({ left, top: up ? r.top - GAP : r.bottom + GAP })
-  }, [up])
+  }, [up, align, width])
 
   /* 打开时定位；滚动/缩放会让固定坐标失效，直接关闭（可预期优先） */
   useEffect(() => {
@@ -109,12 +119,13 @@ export function PopMenu({
       {open
         ? createPortal(
             <div
-              className="pickmenu portal"
+              className={'pickmenu portal' + (dense ? ' dense' : '')}
               role="menu"
               ref={menuRef}
               style={{
                 left: pos.left,
                 top: pos.top,
+                width,
                 ...(up ? { transform: 'translateY(-100%)' } : {}),
               }}
             >
