@@ -106,8 +106,46 @@ function closeDialogLabels(): {
 
 let quitting = false;
 let askingClose = false;
+/**
+ * 渲染层回答关闭确认的回执。
+ * 同一时刻只可能有一个待答的关闭请求；渲染层卡死时走原生对话框兜底。
+ */
+let closeAnswer: ((decision: "cancel" | CloseDecision, remember: boolean) => void) | null = null;
 
-async function askCloseDecision(
+function askCloseDecision(win: BrowserWindow): Promise<"cancel" | CloseDecision> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (decision: "cancel" | CloseDecision): void => {
+      if (settled) return;
+      settled = true;
+      closeAnswer = null;
+      resolve(decision);
+    };
+    if (win.isDestroyed() || win.webContents.isDestroyed()) {
+      settle("cancel");
+      return;
+    }
+    closeAnswer = (decision, remember) => {
+      if (remember && decision !== "cancel") saveCloseDecision(decision);
+      settle(decision);
+    };
+    // 从任务栏关闭时窗口可能是最小化的：先还原，否则弹窗看得见但窗口没了
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
+    win.webContents.send("lcode:app.close-request");
+    // 渲染层无响应时不能把窗口变成“关不掉”：4 秒后回落原生对话框
+    setTimeout(() => {
+      if (settled) return;
+      closeAnswer = null;
+      settled = true;
+      void nativeCloseDecision(win).then(resolve);
+    }, 4000);
+  });
+}
+
+/** 兜底：渲染层来不及回答时仍用系统对话框（样式不统一，但保证关得掉） */
+async function nativeCloseDecision(
   win: BrowserWindow,
 ): Promise<"cancel" | CloseDecision> {
   const labels = closeDialogLabels();
@@ -293,6 +331,16 @@ ipcMain.handle("app:set-locale", (_e: IpcMainInvokeEvent, locale: unknown) => {
  */
 ipcMain.handle("app:request-close", (event: IpcMainInvokeEvent) => {
   BrowserWindow.fromWebContents(event.sender)?.close();
+});
+
+/** 渲染层对关闭确认的回答（`CloseConfirm` 组件） */
+ipcMain.handle("app:close-answer", (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const decision = record["decision"];
+  if (decision !== "cancel" && decision !== "minimize" && decision !== "quit") {
+    throw new Error("decision 必须是 cancel / minimize / quit");
+  }
+  closeAnswer?.(decision, record["remember"] === true);
 });
 
 // 选择本地文件夹（首页「选择项目 / 新建项目」、输入区「＋ → 添加文件夹」）

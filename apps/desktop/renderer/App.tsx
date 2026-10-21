@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { AppShell } from './components/AppShell.tsx'
 import { ApprovalDialog } from './components/ApprovalDialog.tsx'
+import { CloseConfirm } from './components/CloseConfirm.tsx'
 import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { useLocale } from './i18n/index.ts'
 import { HomePage } from './pages/Home.tsx'
@@ -54,6 +55,8 @@ export function App() {
         —— 而"没人问"会走 fail-closed，表现为"操作莫名其妙被拒"。
       */}
       <ApprovalDialog />
+      {/* 关闭确认同样挂根部：任何页面点关闭都要能拦住 */}
+      <CloseConfirm />
     </AppShell>
   )
 }

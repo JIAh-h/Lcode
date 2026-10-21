@@ -63,6 +63,13 @@ export const EN: Readonly<Record<string, string>> = {
   '导入自 {file} · {bytes} 字节 · SHA-256 {hash} · {time}': 'Imported from {file} · {bytes} bytes · SHA-256 {hash} · {time}',
   '加载更早的 {n} 条': 'Load {n} earlier items',
   '加载更早的 {n} 步': 'Load {n} earlier steps',
+  '关闭 Lcode': 'Close Lcode',
+  '要关闭 Lcode 窗口吗？': 'Close the Lcode window?',
+  '最小化后 Vite 与主进程 watch 会继续运行；退出应用会停止正在进行的工作。':
+    'Minimizing keeps Vite and the main-process watcher running; quitting stops work in progress.',
+  不再询问: "Don't ask again",
+  最小化: 'Minimize',
+  退出应用: 'Quit',
   关闭会话: 'Close session',
   退出: 'Quit',
   撤销: 'Undo',

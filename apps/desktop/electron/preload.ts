@@ -21,6 +21,16 @@ const api = {
   chooseSessionFile: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-session-file', title),
   /** 请求关闭窗口（走主进程的关闭确认；window.close() 会绕过确认） */
   requestClose: (): Promise<void> => ipcRenderer.invoke('app:request-close'),
+  /** 主进程请求渲染层展示关闭确认 */
+  onCloseRequest: (handler: () => void): (() => void) => {
+    const listener = (): void => handler()
+    ipcRenderer.on('lcode:app.close-request', listener)
+    return () => {
+      ipcRenderer.off('lcode:app.close-request', listener)
+    }
+  },
+  answerClose: (input: { decision: 'cancel' | 'minimize' | 'quit'; remember: boolean }): Promise<void> =>
+    ipcRenderer.invoke('app:close-answer', input),
   /** 拖拽文件 → 本地绝对路径（Electron 32+ 移除了 File.path，用 webUtils 解析） */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
 
