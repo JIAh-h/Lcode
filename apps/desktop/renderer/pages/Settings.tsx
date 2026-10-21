@@ -1418,7 +1418,9 @@ function ArchiveSection() {
         ) : (
           trash.map((item) => (
             <div className="srow" key={item.path}>
-              <div className="sl">{item.session_id}</div>
+              <div className="sl mono" title={item.session_id}>
+                {item.session_id.slice(0, 8)}…
+              </div>
               <div className="sr">
                 <span className="src">
                   {formatBytes(item.bytes)} · {new Date(item.deleted_at).toLocaleString()} ·{' '}
