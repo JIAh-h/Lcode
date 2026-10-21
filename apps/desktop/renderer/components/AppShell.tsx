@@ -233,19 +233,14 @@ export function AppShell({ children }: { children: ReactNode }) {
   const toggleGroup = (key: string): void => {
     updateSidebar({ ...sidebar, collapsedWorkspaces: toggleInList(sidebar.collapsedWorkspaces, key) })
   }
-  const createSessionIn = (workspace: string | null): void => {
-    const bridge = sessionBridge()
-    if (bridge === undefined) {
-      toast(t('当前环境没有主进程桥，无法新建会话'))
-      return
-    }
-    void bridge
-      .create({ ...(workspace === null || workspace === '' ? {} : { cwd: workspace }), title: t('新会话') })
-      .then((result) => {
-        window.dispatchEvent(new Event('lcode:session-changed'))
-        navigate(`/sessions/${result.session_id}`)
-      })
-      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('新建会话失败')))
+  /**
+   * 「+」只打开该工作区的输入页，**不立刻落会话**。
+   * 会话由首页在用户真正发送时创建（Home 的 send 路径）——否则点一下就会
+   * 在侧栏留下一个空会话，而模型可能压根没被调用。
+   */
+  const composeIn = (workspace: string | null): void => {
+    if (workspace === null || workspace === '') navigate('/')
+    else navigate('/', { state: { cwd: workspace } })
   }
   const onGroupMenu = (key: string, id: string): void => {
     if (id === 'pin') {
@@ -572,7 +567,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                           type="button"
                           className="sga"
                           title={t('在此工作区新建会话')}
-                          onClick={() => createSessionIn(group.workspace)}
+                          onClick={() => composeIn(group.workspace)}
                         >
                           +
                         </button>
