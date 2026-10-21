@@ -27,6 +27,113 @@ Menu.setApplicationMenu(null);
  * 硬性：持状态；不渲染。渲染进程崩溃不得杀死会话（状态在 main）。
  * 注：桌面端走 CJS（Electron 33 / Node 20 的 ESM 主进程加载器有兼容问题），__dirname 直接可用。
  */
+/**
+ * 关闭窗口的确认：避免一次误点就结束 Vite 与主进程 watch。
+ *
+ * `window-close.json` 只在用户勾选「不再询问」后写入；文件不存在 = 每次都问。
+ * 与 `locale.json` 同一套路：状态落盘在主进程，渲染层不参与。
+ */
+type CloseDecision = "minimize" | "quit";
+
+function closePrefFile(): string {
+  return join(app.getPath("userData"), "window-close.json");
+}
+
+function readCloseDecision(): CloseDecision | null {
+  try {
+    const parsed = JSON.parse(readFileSync(closePrefFile(), "utf8")) as {
+      decision?: unknown;
+    };
+    return parsed.decision === "minimize" || parsed.decision === "quit"
+      ? parsed.decision
+      : null;
+  } catch {
+    // 首次启动、文件损坏都按“每次询问”处理
+    return null;
+  }
+}
+
+function saveCloseDecision(decision: CloseDecision): void {
+  try {
+    writeFileSync(closePrefFile(), JSON.stringify({ decision }), "utf8");
+  } catch (error) {
+    console.error("[lcode] 保存关闭偏好失败：", error);
+  }
+}
+
+/** 原生对话框只能由主进程出字，所以这里按已落盘的语言给文案（主进程仍不持有界面语言状态） */
+function closeDialogLabels(): {
+  title: string;
+  message: string;
+  detail: string;
+  cancel: string;
+  minimize: string;
+  quit: string;
+  dontAsk: string;
+} {
+  let locale: string | null = null;
+  try {
+    const parsed = JSON.parse(readFileSync(localeFile(), "utf8")) as {
+      locale?: unknown;
+    };
+    locale = typeof parsed.locale === "string" ? parsed.locale : null;
+  } catch {
+    locale = null;
+  }
+  if (locale === "en-US") {
+    return {
+      title: "Close Lcode",
+      message: "Close the Lcode window?",
+      detail:
+        "Minimizing keeps Vite and the main-process watcher running; quitting stops work in progress.",
+      cancel: "Cancel",
+      minimize: "Minimize",
+      quit: "Quit",
+      dontAsk: "Don't ask again",
+    };
+  }
+  return {
+    title: "关闭 Lcode",
+    message: "要关闭 Lcode 窗口吗？",
+    detail:
+      "最小化后 Vite 与主进程 watch 会继续运行；退出应用会停止正在进行的工作。",
+    cancel: "取消",
+    minimize: "最小化",
+    quit: "退出应用",
+    dontAsk: "不再询问",
+  };
+}
+
+let quitting = false;
+let askingClose = false;
+
+async function askCloseDecision(
+  win: BrowserWindow,
+): Promise<"cancel" | CloseDecision> {
+  const labels = closeDialogLabels();
+  const { response, checkboxChecked } = await dialog.showMessageBox(win, {
+    type: "question",
+    title: labels.title,
+    message: labels.message,
+    detail: labels.detail,
+    buttons: [labels.cancel, labels.minimize, labels.quit],
+    defaultId: 1,
+    cancelId: 0,
+    checkboxLabel: labels.dontAsk,
+    checkboxChecked: false,
+    noLink: true,
+  });
+  if (response === 1) {
+    if (checkboxChecked) saveCloseDecision("minimize");
+    return "minimize";
+  }
+  if (response === 2) {
+    if (checkboxChecked) saveCloseDecision("quit");
+    return "quit";
+  }
+  return "cancel";
+}
+
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1280,
@@ -45,6 +152,44 @@ function createMainWindow(): BrowserWindow {
       nodeIntegration: false,
       sandbox: true,
     },
+  });
+
+  /*
+   * 关闭按钮的三选一确认（Qoder 式）。
+   *
+   * 为什么必须拦：dev 下 `concurrently -k` 会在 Electron 退出时连带杀掉
+   * Vite 与 build-main --watch，误点一次就要重新 `pnpm dev:desktop`。
+   * `before-quit` 里会置 `quitting`，系统关机/托盘退出等真实退出不受影响。
+   */
+  win.on("close", (event) => {
+    const remembered = readCloseDecision();
+    if (quitting) return;
+    if (askingClose) {
+      event.preventDefault();
+      return;
+    }
+    if (remembered === "minimize") {
+      event.preventDefault();
+      win.minimize();
+      return;
+    }
+    if (remembered === "quit") {
+      quitting = true;
+      return;
+    }
+    event.preventDefault();
+    askingClose = true;
+    void askCloseDecision(win)
+      .then((decision) => {
+        if (decision === "minimize") win.minimize();
+        else if (decision === "quit") {
+          quitting = true;
+          app.quit();
+        }
+      })
+      .finally(() => {
+        askingClose = false;
+      });
   });
 
   if (
@@ -138,6 +283,16 @@ ipcMain.handle("app:set-locale", (_e: IpcMainInvokeEvent, locale: unknown) => {
   } catch {
     // 写失败不影响本次会话内的语言切换
   }
+});
+
+/**
+ * 渲染层请求关闭窗口（应用内菜单「退出」）。
+ *
+ * 为什么不直接用 `window.close()`：渲染层的 `window.close()` 走 webContents 销毁路径，
+ * **不会**触发 `BrowserWindow` 的 `close` 事件，于是绕过上面的关闭确认。
+ */
+ipcMain.handle("app:request-close", (event: IpcMainInvokeEvent) => {
+  BrowserWindow.fromWebContents(event.sender)?.close();
 });
 
 // 选择本地文件夹（首页「选择项目 / 新建项目」、输入区「＋ → 添加文件夹」）
@@ -1241,6 +1396,7 @@ app.on("window-all-closed", () => {
 
 let runtimeDisposing = false;
 app.on('before-quit', (event) => {
+  quitting = true;
   if (runtime === null || runtimeDisposing) return;
   // Electron 不会等待 async 监听器。阻止这一次退出，等宿主反向释放 utility
   // process，再以无回调的 exit 收尾，避免 Windows 上留下插件 Node 子进程。

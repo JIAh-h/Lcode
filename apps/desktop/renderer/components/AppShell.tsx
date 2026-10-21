@@ -187,7 +187,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         { hr: true },
         { label: t('关闭会话'), kbd: '⌃W', run: act(() => navigate('/')) },
         { hr: true },
-        { label: t('退出'), kbd: '⌃Q', run: act(() => window.close()) },
+        { label: t('退出'), kbd: '⌃Q', run: act(() => void window.lcode.requestClose()) },
       ],
     },
     {

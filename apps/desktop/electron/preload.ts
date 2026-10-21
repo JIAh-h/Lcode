@@ -19,6 +19,8 @@ const api = {
   chooseFile: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-file', title),
   /** 导入会话：只选 JSONL，单选（P8-01） */
   chooseSessionFile: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-session-file', title),
+  /** 请求关闭窗口（走主进程的关闭确认；window.close() 会绕过确认） */
+  requestClose: (): Promise<void> => ipcRenderer.invoke('app:request-close'),
   /** 拖拽文件 → 本地绝对路径（Electron 32+ 移除了 File.path，用 webUtils 解析） */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
 
