@@ -347,6 +347,68 @@ ipcMain.handle("app:set-locale", (_e: IpcMainInvokeEvent, locale: unknown) => {
 });
 
 /**
+ * 侧栏的本地视图状态（置顶 / 归档 / 折叠）。
+ * 与 `window-close.json` 同思路：纯 UI 偏好落在主进程，渲染层不碰存储。
+ */
+interface SidebarStateFile {
+  pinnedWorkspaces: string[];
+  archivedWorkspaces: string[];
+  pinnedSessions: string[];
+  collapsedWorkspaces: string[];
+}
+
+function sidebarFile(): string {
+  return join(app.getPath("userData"), "sidebar.json");
+}
+
+function readStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value.filter(
+        (item): item is string => typeof item === "string" && item !== "",
+      ),
+    ),
+  ].slice(0, 500);
+}
+
+function readSidebarState(): SidebarStateFile {
+  try {
+    const parsed = JSON.parse(readFileSync(sidebarFile(), "utf8")) as Record<
+      string,
+      unknown
+    >;
+    return {
+      pinnedWorkspaces: readStringList(parsed["pinnedWorkspaces"]),
+      archivedWorkspaces: readStringList(parsed["archivedWorkspaces"]),
+      pinnedSessions: readStringList(parsed["pinnedSessions"]),
+      collapsedWorkspaces: readStringList(parsed["collapsedWorkspaces"]),
+    };
+  } catch {
+    return {
+      pinnedWorkspaces: [],
+      archivedWorkspaces: [],
+      pinnedSessions: [],
+      collapsedWorkspaces: [],
+    };
+  }
+}
+
+ipcMain.handle("app:get-sidebar", () => readSidebarState());
+
+ipcMain.handle("app:set-sidebar", (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const state: SidebarStateFile = {
+    pinnedWorkspaces: readStringList(record["pinnedWorkspaces"]),
+    archivedWorkspaces: readStringList(record["archivedWorkspaces"]),
+    pinnedSessions: readStringList(record["pinnedSessions"]),
+    collapsedWorkspaces: readStringList(record["collapsedWorkspaces"]),
+  };
+  writeFileSync(sidebarFile(), JSON.stringify(state), "utf8");
+  return state;
+});
+
+/**
  * 渲染层请求关闭窗口（应用内菜单「退出」）。
  *
  * 为什么不直接用 `window.close()`：渲染层的 `window.close()` 走 webContents 销毁路径，
@@ -892,6 +954,42 @@ ipcMain.handle(
     const result = await (
       await agentRuntime()
     ).sessions.restore({ session_id: sessionId });
+    pushToRenderer("lcode:session.changed", { session_id: sessionId });
+    return result;
+  },
+);
+
+ipcMain.handle(
+  "lcode:session.rename",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    const sessionId = record["session_id"];
+    const title = record["title"];
+    if (typeof sessionId !== "string" || sessionId === "")
+      throw new Error("session_id 必填");
+    if (typeof title !== "string") throw new Error("title 必须是字符串");
+    const result = await (
+      await agentRuntime()
+    ).sessions.rename({ session_id: sessionId, title });
+    pushToRenderer("lcode:session.changed", { session_id: sessionId });
+    return result;
+  },
+);
+
+ipcMain.handle(
+  "lcode:session.purge",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    const sessionId = record["session_id"];
+    if (typeof sessionId !== "string" || sessionId === "")
+      throw new Error("session_id 必填");
+    const result = await (
+      await agentRuntime()
+    ).sessions.purge({
+      session_id: sessionId,
+      ...(record["exported"] === true ? { exported: true } : {}),
+      ...(record["force"] === true ? { force: true } : {}),
+    });
     pushToRenderer("lcode:session.changed", { session_id: sessionId });
     return result;
   },

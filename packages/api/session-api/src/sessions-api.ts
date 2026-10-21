@@ -75,6 +75,8 @@ import type {
   ExportResult,
   ImportSessionInput,
   ImportSessionResult,
+  RenameSessionInput,
+  RenameSessionResult,
   SearchSessionHit,
   SearchSessionsInput,
   SearchSessionsResult,
@@ -642,6 +644,16 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
     }
     if (meta === null) throw notFound(sessionId)
     return { last_seq: meta.last_seq, header: meta, log_revision: meta.log_revision ?? '' }
+  }
+
+  async rename(input: RenameSessionInput): Promise<RenameSessionResult> {
+    const sessionId = input.session_id
+    const title = typeof input.title === 'string' ? input.title.trim() : ''
+    if (title === '') throw invalidParams('标题不能为空')
+    const db = openIndexDb({ home: this.home })
+    const result = db.prepare('UPDATE sessions SET title = ? WHERE session_id = ?').run(title, sessionId)
+    if (result.changes === 0) throw notFound(sessionId)
+    return { session_id: sessionId, title }
   }
 
   async fork(input: ForkSessionInput): Promise<ForkSessionResult> {

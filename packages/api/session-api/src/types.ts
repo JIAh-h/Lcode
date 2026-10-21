@@ -120,6 +120,20 @@ export interface SessionMetaResult {
   readonly log_revision: string
 }
 
+/**
+ * 重命名会话（用户元数据，只落 SQLite，不写 JSONL——11 §6：标题不在权威日志里）。
+ * 空标题回 `EC-INVALID_PARAMS`，会话不存在回 `ES-SESSION_NOT_FOUND`。
+ */
+export interface RenameSessionInput {
+  readonly session_id: string
+  readonly title: string
+}
+
+export interface RenameSessionResult {
+  readonly session_id: string
+  readonly title: string
+}
+
 export interface ForkSessionInput {
   readonly source_session_id: string
   /** 切点（seq）。必须落在已关闭的轮边界上，否则 `ES-FORK_BOUNDARY_INVALID` */
@@ -497,6 +511,7 @@ export interface SessionsApi {
   resume(input: ResumeSessionInput): Promise<ResumeSessionResult>
   list(input?: ListSessionsInput): Promise<ListSessionsResult>
   meta(input: SessionMetaInput): Promise<SessionMetaResult>
+  rename(input: RenameSessionInput): Promise<RenameSessionResult>
   fork(input: ForkSessionInput): Promise<ForkSessionResult>
   append(input: AppendEventInput): Promise<SessionEvent>
   derive(input: DeriveInput): Promise<DeriveResult>

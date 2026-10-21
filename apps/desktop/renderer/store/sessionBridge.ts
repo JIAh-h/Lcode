@@ -58,6 +58,8 @@ export interface SessionBridge {
   open(sessionId: string): Promise<OpenedSession>
   delete(input: { readonly session_id: string }): Promise<unknown>
   restore(input: { readonly session_id: string }): Promise<unknown>
+  rename(input: { readonly session_id: string; readonly title: string }): Promise<{ readonly session_id: string; readonly title: string }>
+  purge(input: { readonly session_id: string; readonly force?: boolean }): Promise<unknown>
   export(input: { readonly session_id: string; readonly format: 'jsonl' | 'md' }): Promise<{
     readonly path: string
     readonly bytes: number

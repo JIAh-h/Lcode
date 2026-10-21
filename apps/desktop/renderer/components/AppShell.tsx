@@ -3,6 +3,9 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { t } from '../i18n/index.ts'
 import { toast } from './toast.ts'
+import { PopMenu } from './PopMenu.tsx'
+import { ConfirmDialog } from './ConfirmDialog.tsx'
+import { RenameDialog } from './RenameDialog.tsx'
 import { sessionBridge } from '../store/sessionBridge.ts'
 import type { SessionMeta } from '../store/sessionBridge.ts'
 
@@ -15,6 +18,24 @@ import type { SessionMeta } from '../store/sessionBridge.ts'
 type MItem = { hr: true } | { label: string; kbd?: string; run: () => void }
 function isHr(it: MItem): it is { hr: true } {
   return (it as { hr: true }).hr === true
+}
+
+/** 侧栏本地视图状态（主进程 `userData/sidebar.json`） */
+interface SidebarState {
+  readonly pinnedWorkspaces: readonly string[]
+  readonly archivedWorkspaces: readonly string[]
+  readonly pinnedSessions: readonly string[]
+  readonly collapsedWorkspaces: readonly string[]
+}
+const EMPTY_SIDEBAR: SidebarState = {
+  pinnedWorkspaces: [],
+  archivedWorkspaces: [],
+  pinnedSessions: [],
+  collapsedWorkspaces: [],
+}
+
+function toggleInList(list: readonly string[], value: string): string[] {
+  return list.includes(value) ? list.filter((item) => item !== value) : [...list, value]
 }
 
 function sessionApi():
@@ -54,8 +75,24 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<readonly SessionMeta[]>([])
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
   const [loadingMore, setLoadingMore] = useState(false)
+  const [sidebar, setSidebar] = useState<SidebarState>(EMPTY_SIDEBAR)
+  const [showArchived, setShowArchived] = useState(false)
+  const [renameTarget, setRenameTarget] = useState<SessionMeta | null>(null)
+  const [purgeTarget, setPurgeTarget] = useState<SessionMeta | null>(null)
   const barRef = useRef<HTMLDivElement | null>(null)
   const zoomRef = useRef(1)
+
+  useEffect(() => {
+    void window.lcode.getSidebar().then((value) => {
+      const record = (value ?? {}) as Partial<SidebarState>
+      setSidebar({
+        pinnedWorkspaces: record.pinnedWorkspaces ?? [],
+        archivedWorkspaces: record.archivedWorkspaces ?? [],
+        pinnedSessions: record.pinnedSessions ?? [],
+        collapsedWorkspaces: record.collapsedWorkspaces ?? [],
+      })
+    })
+  }, [])
 
   const refreshSessions = useCallback(async () => {
     const api = sessionApi()
@@ -189,25 +226,139 @@ export function AppShell({ children }: { children: ReactNode }) {
       .then((result) => toast(t('已导出到 {path}（SHA-256 {hash}）', { path: result.path, hash: result.sha256.slice(0, 12) })))
       .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导出会话失败')))
   })
-  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(new Set())
-  const toggleGroup = (name: string): void => {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
-      return next
-    })
+  const updateSidebar = (next: SidebarState): void => {
+    setSidebar(next)
+    void window.lcode.setSidebar(next)
+  }
+  const toggleGroup = (key: string): void => {
+    updateSidebar({ ...sidebar, collapsedWorkspaces: toggleInList(sidebar.collapsedWorkspaces, key) })
+  }
+  const createSessionIn = (workspace: string | null): void => {
+    const bridge = sessionBridge()
+    if (bridge === undefined) {
+      toast(t('当前环境没有主进程桥，无法新建会话'))
+      return
+    }
+    void bridge
+      .create({ ...(workspace === null || workspace === '' ? {} : { cwd: workspace }), title: t('新会话') })
+      .then((result) => {
+        window.dispatchEvent(new Event('lcode:session-changed'))
+        navigate(`/sessions/${result.session_id}`)
+      })
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('新建会话失败')))
+  }
+  const onGroupMenu = (key: string, id: string): void => {
+    if (id === 'pin') {
+      updateSidebar({ ...sidebar, pinnedWorkspaces: toggleInList(sidebar.pinnedWorkspaces, key) })
+      return
+    }
+    if (id === 'archive') {
+      updateSidebar({ ...sidebar, archivedWorkspaces: toggleInList(sidebar.archivedWorkspaces, key) })
+      toast(t('工作区已归档'))
+    }
+  }
+  const onSessionMenu = (session: SessionMeta, id: string): void => {
+    const bridge = sessionBridge()
+    if (bridge === undefined) return
+    if (id === 'rename') {
+      setRenameTarget(session)
+      return
+    }
+    if (id === 'export') {
+      void bridge
+        .export({ session_id: session.session_id, format: 'jsonl' })
+        .then((result) => toast(t('已导出到 {path}（SHA-256 {hash}）', { path: result.path, hash: result.sha256.slice(0, 12) })))
+        .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导出会话失败')))
+      return
+    }
+    if (id === 'pin') {
+      updateSidebar({ ...sidebar, pinnedSessions: toggleInList(sidebar.pinnedSessions, session.session_id) })
+      return
+    }
+    if (id === 'archive') {
+      void bridge
+        .delete({ session_id: session.session_id })
+        .then(() => {
+          window.dispatchEvent(new Event('lcode:session-changed'))
+          toast(t('已归档，可用 lcode restore 恢复'))
+        })
+        .catch((err: unknown) => toast(err instanceof Error ? err.message : t('归档失败')))
+      return
+    }
+    if (id === 'purge') setPurgeTarget(session)
+  }
+  const submitRename = (title: string): void => {
+    const target = renameTarget
+    const bridge = sessionBridge()
+    if (target === null || bridge === undefined) return
+    void bridge
+      .rename({ session_id: target.session_id, title })
+      .then(() => {
+        setRenameTarget(null)
+        window.dispatchEvent(new Event('lcode:session-changed'))
+        toast(t('已重命名'))
+      })
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('重命名失败')))
+  }
+  const confirmPurge = (): void => {
+    const target = purgeTarget
+    const bridge = sessionBridge()
+    if (target === null || bridge === undefined) return
+    void bridge
+      .purge({ session_id: target.session_id, force: true })
+      .then(() => {
+        setPurgeTarget(null)
+        window.dispatchEvent(new Event('lcode:session-changed'))
+        toast(t('已移入回收站，7 天后清除'))
+      })
+      .catch((err: unknown) => {
+        setPurgeTarget(null)
+        toast(err instanceof Error ? err.message : t('永久归档失败'))
+      })
   }
   const sessionGroups = useMemo(() => {
-    const groups = new Map<string, SessionMeta[]>()
+    const groups = new Map<string, { workspace: string | null; name: string; items: SessionMeta[] }>()
     for (const session of sessions) {
-      const name = workspaceName(session.workspace)
-      const group = groups.get(name) ?? []
-      group.push(session)
-      groups.set(name, group)
+      const key = session.workspace ?? ''
+      const group = groups.get(key) ?? { workspace: session.workspace, name: workspaceName(session.workspace), items: [] }
+      group.items.push(session)
+      groups.set(key, group)
     }
-    return [...groups.entries()]
-  }, [sessions])
+    const pinnedSessions = sidebar.pinnedSessions
+    const entries = [...groups.entries()]
+      .filter(([key]) => !sidebar.archivedWorkspaces.includes(key))
+      .map(([key, group]) => {
+        const items = [...group.items].sort((a, b) => {
+          const ia = pinnedSessions.indexOf(a.session_id)
+          const ib = pinnedSessions.indexOf(b.session_id)
+          if (ia === -1 && ib === -1) return 0
+          if (ia === -1) return 1
+          if (ib === -1) return -1
+          return ia - ib
+        })
+        return [key, { ...group, items }] as const
+      })
+    const pinnedWorkspaces = sidebar.pinnedWorkspaces
+    entries.sort((a, b) => {
+      const ia = pinnedWorkspaces.indexOf(a[0])
+      const ib = pinnedWorkspaces.indexOf(b[0])
+      if (ia === -1 && ib === -1) return 0
+      if (ia === -1) return 1
+      if (ib === -1) return -1
+      return ia - ib
+    })
+    return entries
+  }, [sessions, sidebar])
+  const archivedGroups = useMemo(() => {
+    const names = new Map<string, string>()
+    for (const session of sessions) {
+      const key = session.workspace ?? ''
+      if (sidebar.archivedWorkspaces.includes(key) && !names.has(key)) names.set(key, workspaceName(session.workspace))
+    }
+    return sidebar.archivedWorkspaces.map(
+      (key) => [key, names.get(key) ?? (key === '' ? t('未命名工作区') : key)] as const,
+    )
+  }, [sessions, sidebar.archivedWorkspaces])
 
   /* 菜单文案：标签与提示统一过 t()；`label` 同时用作 key，仍保留中文原文 */
   const MENUS: { id: string; label: string; items: MItem[] }[] = [
@@ -395,43 +546,125 @@ export function AppShell({ children }: { children: ReactNode }) {
               `min-height: 0` 是 flex 子项能真正收缩的前提，缺了它会撑破外框。
             */}
             <div className="stree">
-              {sessionGroups.length === 0 && <div className="sempty">{t('还没有会话')}</div>}
-              {sessionGroups.map(([name, items]) => {
-                const open = !collapsedGroups.has(name)
+              {sessionGroups.length === 0 && archivedGroups.length === 0 && (
+                <div className="sempty">{t('还没有会话')}</div>
+              )}
+              {sessionGroups.map(([key, group]) => {
+                const open = !sidebar.collapsedWorkspaces.includes(key)
+                const pinnedGroup = sidebar.pinnedWorkspaces.includes(key)
                 return (
-                  <div className="sgroup" key={name}>
-                    <button
-                      type="button"
-                      className="sgh"
-                      aria-expanded={open}
-                      title={name}
-                      onClick={() => toggleGroup(name)}
-                    >
-                      <svg className={`sgc${open ? '' : ' closed'}`} width="12" height="12" viewBox="0 0 16 16" fill="none">
-                        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                      <span className="sgn">{name}</span>
-                      <span className="sgcnt">{items.length}</span>
-                    </button>
+                  <div className="sgroup" key={key}>
+                    <div className="sgh-row">
+                      <button
+                        type="button"
+                        className="sgh"
+                        aria-expanded={open}
+                        title={group.name}
+                        onClick={() => toggleGroup(key)}
+                      >
+                        <svg className={`sgc${open ? '' : ' closed'}`} width="12" height="12" viewBox="0 0 16 16" fill="none">
+                          <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        <span className="sgn">{group.name}</span>
+                      </button>
+                      <span className="sgh-acts">
+                        <button
+                          type="button"
+                          className="sga"
+                          title={t('在此工作区新建会话')}
+                          onClick={() => createSessionIn(group.workspace)}
+                        >
+                          +
+                        </button>
+                        <PopMenu
+                          trigger="⋯"
+                          buttonClass="sga"
+                          title={t('工作区操作')}
+                          items={[
+                            { id: 'pin', label: pinnedGroup ? '取消置顶' : '置顶' },
+                            { id: 'archive', label: '归档工作区' },
+                          ]}
+                          onSelect={(id) => onGroupMenu(key, id)}
+                        />
+                      </span>
+                    </div>
                     {open && (
                       <div className="slist">
-                        {items.map((it) => (
-                          <NavLink
-                            key={it.session_id}
-                            to={`/sessions/${it.session_id}`}
-                            className={({ isActive }) => 'sitem' + (isActive ? ' on' : '')}
-                            title={it.title || t('未命名会话')}
-                          >
-                            <i className="st" style={{ background: stateColor(it.status) }} />
-                            <span className="sname">{it.title || t('未命名会话')}</span>
-                            <span className="cnt">{it.last_seq < 0 ? t('空会话') : t('{n} 条记录', { n: it.last_seq + 1 })}</span>
-                          </NavLink>
+                        {group.items.map((it) => (
+                          <div className="srow" key={it.session_id}>
+                            <NavLink
+                              to={`/sessions/${it.session_id}`}
+                              className={({ isActive }) => 'sitem' + (isActive ? ' active' : '')}
+                              title={it.title || t('未命名会话')}
+                            >
+                              <i className="st" style={{ background: stateColor(it.status) }} />
+                              <span className="sname">{it.title || t('未命名会话')}</span>
+                            </NavLink>
+                            <PopMenu
+                              trigger="⋯"
+                              buttonClass="sga sact"
+                              title={t('会话操作')}
+                              items={[
+                                { id: 'rename', label: '重命名' },
+                                { id: 'export', label: '导出记录' },
+                                {
+                                  id: 'pin',
+                                  label: sidebar.pinnedSessions.includes(it.session_id) ? '取消置顶' : '工作区内置顶',
+                                },
+                                { id: 'archive', label: '归档' },
+                                { id: 'purge', label: '永久归档' },
+                              ]}
+                              onSelect={(id) => onSessionMenu(it, id)}
+                            />
+                          </div>
                         ))}
                       </div>
                     )}
                   </div>
                 )
               })}
+              {archivedGroups.length > 0 && (
+                <div className="sgroup">
+                  <div className="sgh-row">
+                    <button
+                      type="button"
+                      className="sgh"
+                      aria-expanded={showArchived}
+                      onClick={() => setShowArchived((value) => !value)}
+                    >
+                      <svg className={`sgc${showArchived ? '' : ' closed'}`} width="12" height="12" viewBox="0 0 16 16" fill="none">
+                        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      <span className="sgn">{t('已归档工作区')}</span>
+                    </button>
+                  </div>
+                  {showArchived && (
+                    <div className="slist">
+                      {archivedGroups.map(([key, name]) => (
+                        <div className="srow" key={key}>
+                          <span className="sitem" title={name}>
+                            <span className="sname">{name}</span>
+                          </span>
+                          <button
+                            type="button"
+                            className="sga sact"
+                            title={t('取消归档')}
+                            onClick={() => {
+                              updateSidebar({
+                                ...sidebar,
+                                archivedWorkspaces: sidebar.archivedWorkspaces.filter((item) => item !== key),
+                              })
+                              toast(t('已取消归档'))
+                            }}
+                          >
+                            ↩
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               {nextCursor !== undefined && (
                 <button
                   type="button"
@@ -457,6 +690,23 @@ export function AppShell({ children }: { children: ReactNode }) {
         )}
         <main className="content">{children}</main>
       </div>
+      {renameTarget !== null && (
+        <RenameDialog
+          initial={renameTarget.title}
+          onCancel={() => setRenameTarget(null)}
+          onSubmit={submitRename}
+        />
+      )}
+      {purgeTarget !== null && (
+        <ConfirmDialog
+          title={t('永久归档会话')}
+          message={t('会把「{name}」移入回收站，7 天后清除。', { name: purgeTarget.title || t('未命名会话') })}
+          confirmLabel={t('永久归档')}
+          danger
+          onCancel={() => setPurgeTarget(null)}
+          onConfirm={confirmPurge}
+        />
+      )}
     </div>
   )
 }

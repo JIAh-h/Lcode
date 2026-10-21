@@ -17,6 +17,8 @@ export type {
   ExportResult,
   ImportSessionInput,
   ImportSessionResult,
+  RenameSessionInput,
+  RenameSessionResult,
   SearchSessionHit,
   SearchSessionsInput,
   SearchSessionsResult,

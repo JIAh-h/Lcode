@@ -404,6 +404,15 @@ describe('sessions.export', () => {
     expect(hits[0]?.role).toBe('user')
     await expect(api.search({ query: '   ' })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
   })
+
+  it('rename：只改 SQLite 标题，空标题与未知会话分别报错', async () => {
+    const sessionId = await seedClosedTurn('旧标题')
+    const result = await api.rename({ session_id: sessionId, title: '  新标题  ' })
+    expect(result).toEqual({ session_id: sessionId, title: '新标题' })
+    expect((await api.list()).items.find((item) => item.session_id === sessionId)?.title).toBe('新标题')
+    await expect(api.rename({ session_id: sessionId, title: '   ' })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
+    await expect(api.rename({ session_id: 'NOPE', title: 'x' })).rejects.toMatchObject({ code: 'ES-SESSION_NOT_FOUND' })
+  })
 })
 
 describe('索引侧跟得上（派生层，不阻塞会话）', () => {

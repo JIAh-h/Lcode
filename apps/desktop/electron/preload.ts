@@ -33,6 +33,9 @@ const api = {
     ipcRenderer.invoke('app:close-answer', input),
   /** 已展示自绘确认框（主进程据此不再回落原生对话框） */
   ackClose: (): Promise<void> => ipcRenderer.invoke('app:close-ack'),
+  /** 侧栏本地视图状态（置顶 / 归档 / 折叠） */
+  getSidebar: (): Promise<unknown> => ipcRenderer.invoke('app:get-sidebar'),
+  setSidebar: (input: unknown): Promise<unknown> => ipcRenderer.invoke('app:set-sidebar', input),
   /** 拖拽文件 → 本地绝对路径（Electron 32+ 移除了 File.path，用 webUtils 解析） */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
 
@@ -62,6 +65,8 @@ const api = {
     open: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:session.open', sessionId),
     delete: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.delete', input),
     restore: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.restore', input),
+    rename: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.rename', input),
+    purge: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.purge', input),
     export: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.export', input),
     import: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.import', input),
     fork: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.fork', input),
