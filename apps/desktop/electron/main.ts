@@ -918,7 +918,9 @@ ipcMain.handle(
     const lastTurnErrored =
       lastTurnEnd?.type === "turn/end" && lastTurnEnd.data.reason === "error";
     return {
-      meta,
+      // `sessions.meta` 的 `header` 才是带 workspace/title 的会话元数据；
+      // 直接回整个 meta 会让渲染层读不到 workspace/title（标题栏显示“未设置工作区/未命名会话”）。
+      meta: meta.header,
       history,
       events: rt.sessions.sessionServiceFor(sessionId).events(),
       repaired: resumed.repaired,

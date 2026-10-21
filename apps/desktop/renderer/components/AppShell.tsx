@@ -4,8 +4,7 @@ import type { ReactNode } from 'react'
 import { t } from '../i18n/index.ts'
 import { toast } from './toast.ts'
 import { PopMenu } from './PopMenu.tsx'
-import { ConfirmDialog } from './ConfirmDialog.tsx'
-import { RenameDialog } from './RenameDialog.tsx'
+import { SessionActionsMenu } from './SessionActionsMenu.tsx'
 import { sessionBridge } from '../store/sessionBridge.ts'
 import type { SessionMeta } from '../store/sessionBridge.ts'
 
@@ -71,22 +70,26 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [loadingMore, setLoadingMore] = useState(false)
   const [sidebar, setSidebar] = useState<SidebarState>(EMPTY_SIDEBAR)
   const [showArchived, setShowArchived] = useState(false)
-  const [renameTarget, setRenameTarget] = useState<SessionMeta | null>(null)
-  const [purgeTarget, setPurgeTarget] = useState<SessionMeta | null>(null)
   const barRef = useRef<HTMLDivElement | null>(null)
   const zoomRef = useRef(1)
 
-  useEffect(() => {
-    void window.lcode.getSidebar().then((value) => {
-      const record = (value ?? {}) as Partial<SidebarState>
-      setSidebar({
-        pinnedWorkspaces: record.pinnedWorkspaces ?? [],
-        archivedWorkspaces: record.archivedWorkspaces ?? [],
-        pinnedSessions: record.pinnedSessions ?? [],
-        collapsedWorkspaces: record.collapsedWorkspaces ?? [],
-      })
+  const loadSidebar = useCallback(async () => {
+    const value = await window.lcode.getSidebar()
+    const record = (value ?? {}) as Partial<SidebarState>
+    setSidebar({
+      pinnedWorkspaces: record.pinnedWorkspaces ?? [],
+      archivedWorkspaces: record.archivedWorkspaces ?? [],
+      pinnedSessions: record.pinnedSessions ?? [],
+      collapsedWorkspaces: record.collapsedWorkspaces ?? [],
     })
   }, [])
+
+  useEffect(() => {
+    void loadSidebar()
+    const reload = (): void => void loadSidebar()
+    window.addEventListener('lcode:sidebar-changed', reload)
+    return () => window.removeEventListener('lcode:sidebar-changed', reload)
+  }, [loadSidebar])
 
   const refreshSessions = useCallback(async () => {
     const api = sessionApi()
@@ -245,65 +248,6 @@ export function AppShell({ children }: { children: ReactNode }) {
       updateSidebar({ ...sidebar, archivedWorkspaces: toggleInList(sidebar.archivedWorkspaces, key) })
       toast(t('工作区已归档'))
     }
-  }
-  const onSessionMenu = (session: SessionMeta, id: string): void => {
-    const bridge = sessionBridge()
-    if (bridge === undefined) return
-    if (id === 'rename') {
-      setRenameTarget(session)
-      return
-    }
-    if (id === 'export') {
-      void bridge
-        .export({ session_id: session.session_id, format: 'jsonl' })
-        .then((result) => toast(t('已导出到 {path}（SHA-256 {hash}）', { path: result.path, hash: result.sha256.slice(0, 12) })))
-        .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导出会话失败')))
-      return
-    }
-    if (id === 'pin') {
-      updateSidebar({ ...sidebar, pinnedSessions: toggleInList(sidebar.pinnedSessions, session.session_id) })
-      return
-    }
-    if (id === 'archive') {
-      void bridge
-        .delete({ session_id: session.session_id })
-        .then(() => {
-          window.dispatchEvent(new Event('lcode:session-changed'))
-          toast(t('已归档，可用 lcode restore 恢复'))
-        })
-        .catch((err: unknown) => toast(err instanceof Error ? err.message : t('归档失败')))
-      return
-    }
-    if (id === 'purge') setPurgeTarget(session)
-  }
-  const submitRename = (title: string): void => {
-    const target = renameTarget
-    const bridge = sessionBridge()
-    if (target === null || bridge === undefined) return
-    void bridge
-      .rename({ session_id: target.session_id, title })
-      .then(() => {
-        setRenameTarget(null)
-        window.dispatchEvent(new Event('lcode:session-changed'))
-        toast(t('已重命名'))
-      })
-      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('重命名失败')))
-  }
-  const confirmPurge = (): void => {
-    const target = purgeTarget
-    const bridge = sessionBridge()
-    if (target === null || bridge === undefined) return
-    void bridge
-      .purge({ session_id: target.session_id, force: true })
-      .then(() => {
-        setPurgeTarget(null)
-        window.dispatchEvent(new Event('lcode:session-changed'))
-        toast(t('已移入回收站，7 天后清除'))
-      })
-      .catch((err: unknown) => {
-        setPurgeTarget(null)
-        toast(err instanceof Error ? err.message : t('永久归档失败'))
-      })
   }
   const sessionGroups = useMemo(() => {
     const groups = new Map<string, { workspace: string | null; name: string; items: SessionMeta[] }>()
@@ -591,22 +535,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                             >
                               <span className="sname">{it.title || t('未命名会话')}</span>
                             </NavLink>
-                            <PopMenu
-                              trigger="⋯"
-                              buttonClass="sga sact"
-                              title={t('会话操作')}
-                              items={[
-                                { id: 'rename', label: '重命名' },
-                                { id: 'export', label: '导出记录' },
-                                {
-                                  id: 'pin',
-                                  label: sidebar.pinnedSessions.includes(it.session_id) ? '取消置顶' : '工作区内置顶',
-                                },
-                                { id: 'archive', label: '归档' },
-                                { id: 'purge', label: '永久归档' },
-                              ]}
-                              onSelect={(id) => onSessionMenu(it, id)}
-                            />
+                            <SessionActionsMenu session={it} buttonClass="sga sact" />
                           </div>
                         ))}
                       </div>
@@ -681,23 +610,6 @@ export function AppShell({ children }: { children: ReactNode }) {
         )}
         <main className="content">{children}</main>
       </div>
-      {renameTarget !== null && (
-        <RenameDialog
-          initial={renameTarget.title}
-          onCancel={() => setRenameTarget(null)}
-          onSubmit={submitRename}
-        />
-      )}
-      {purgeTarget !== null && (
-        <ConfirmDialog
-          title={t('永久归档会话')}
-          message={t('会把「{name}」移入回收站，7 天后清除。', { name: purgeTarget.title || t('未命名会话') })}
-          confirmLabel={t('永久归档')}
-          danger
-          onCancel={() => setPurgeTarget(null)}
-          onConfirm={confirmPurge}
-        />
-      )}
     </div>
   )
 }

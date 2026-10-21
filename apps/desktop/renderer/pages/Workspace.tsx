@@ -3,6 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom'
 import type { SessionEvent } from '@lcode/session'
 import { ComposerBar } from '../components/ComposerBar.tsx'
 import { SessionStream } from '../components/SessionStream.tsx'
+import { SessionActionsMenu } from '../components/SessionActionsMenu.tsx'
 import { TaskPanel } from '../components/TaskPanel.tsx'
 import { toast } from '../components/toast.ts'
 import { t } from '../i18n/index.ts'
@@ -326,13 +327,23 @@ export function WorkspacePage() {
   }
 
   if (sessionId === undefined) return null
+  const workspaceLabel =
+    meta?.workspace === null || meta?.workspace === undefined || meta.workspace === ''
+      ? t('未设置工作区')
+      : (meta.workspace.split(/[\\/]/).filter(Boolean).pop() ?? meta.workspace)
   const shouldConfirmTrust = workspaceTrust !== null && !workspaceTrust.trusted && readOnlyConfirmedFor !== sessionId
   return (
     <div className="workspace">
       <div className="wstitlebar">
         <span className="wscumb">
-          {meta?.workspace ?? t('未设置工作区')} / {meta?.title || t('未命名会话')}
+          {workspaceLabel} / {meta?.title || t('未命名会话')}
         </span>
+        <SessionActionsMenu
+          session={{ session_id: sessionId, title: meta?.title ?? '' }}
+          buttonClass="wstitleact"
+          onRenamed={(title) => setMeta((prev) => (prev === null ? prev : { ...prev, title }))}
+          onRemoved={() => navigate('/')}
+        />
         <span className="wsp" />
         <button className="ticon" title={t('回放时间轴')} onClick={() => navigate(`/sessions/${sessionId}/replay`)}>
           ⏱
