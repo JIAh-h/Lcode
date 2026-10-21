@@ -156,6 +156,16 @@ ipcMain.handle("dialog:choose-file", (_e: IpcMainInvokeEvent, title?: string) =>
     properties: ["openFile", "multiSelections"],
   }),
 );
+// 导入会话（P8-01）：只收导出格式，单选
+ipcMain.handle(
+  "dialog:choose-session-file",
+  (_e: IpcMainInvokeEvent, title?: string) =>
+    pickPath({
+      title: title || "选择要导入的会话文件",
+      properties: ["openFile"],
+      filters: [{ name: "JSONL 会话", extensions: ["jsonl"] }],
+    }),
+);
 
 /**
  * 标题由**渲染进程按当前界面语言传入**（`renderer/i18n`），主进程不做 i18n

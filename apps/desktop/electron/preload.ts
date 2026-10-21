@@ -17,6 +17,8 @@ const api = {
   chooseFolder: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-folder', title),
   /** 系统文件选择框（附件）；取消返回 null */
   chooseFile: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-file', title),
+  /** 导入会话：只选 JSONL，单选（P8-01） */
+  chooseSessionFile: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-session-file', title),
   /** 拖拽文件 → 本地绝对路径（Electron 32+ 移除了 File.path，用 webUtils 解析） */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
 

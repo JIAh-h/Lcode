@@ -56,6 +56,11 @@ export interface SessionBridge {
   delete(input: { readonly session_id: string }): Promise<unknown>
   restore(input: { readonly session_id: string }): Promise<unknown>
   export(input: { readonly session_id: string; readonly format: 'jsonl' | 'md' }): Promise<{ readonly path: string }>
+  import(input: { readonly path: string; readonly title?: string }): Promise<{
+    readonly session_id: string
+    readonly last_seq: number
+    readonly imported_events: number
+  }>
   fork(input: { readonly source_session_id: string; readonly boundary: number }): Promise<{ readonly session_id: string }>
   history(input: { readonly session_id: string; readonly up_to_seq: number }): Promise<HistorySnapshot>
   body(input: { readonly session_id: string; readonly seq: number }): Promise<HistoryBodyResult>

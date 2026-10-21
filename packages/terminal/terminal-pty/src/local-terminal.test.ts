@@ -19,7 +19,8 @@ afterEach(async () => {
 })
 
 async function readUntil(terminalId: string, marker: string, sinceOffset = 0): Promise<{ readonly data: string; readonly offset: number }> {
-  const deadline = Date.now() + 5_000
+  // ConPTY 冷启动 + 并行跑测时可能远超 5s，这里与外层用例超时保持一致
+  const deadline = Date.now() + 30_000
   let offset = sinceOffset
   let data = ''
   while (Date.now() < deadline) {

@@ -128,6 +128,24 @@ export function AppShell({ children }: { children: ReactNode }) {
       if (path !== null) navigate('/', { state: { cwd: path } })
     })
   })
+  const importSession = act(() => {
+    const bridge = sessionBridge()
+    if (bridge === undefined) {
+      toast(t('当前环境没有主进程桥，无法导入会话'))
+      return
+    }
+    void window.lcode.chooseSessionFile(t('选择要导入的会话文件')).then((path) => {
+      if (path === null) return
+      void bridge
+        .import({ path })
+        .then((result) => {
+          window.dispatchEvent(new Event('lcode:session-changed'))
+          toast(t('已导入会话（{n} 条事件）', { n: result.imported_events }))
+          navigate(`/sessions/${result.session_id}`)
+        })
+        .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导入会话失败')))
+    })
+  })
   const sessionGroups = useMemo(() => {
     const groups = new Map<string, SessionMeta[]>()
     for (const session of sessions) {
@@ -149,6 +167,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         { label: t('新建临时对话'), kbd: '⌃⇧N', run: act(() => navigate('/')) },
         { hr: true },
         { label: t('打开文件夹…'), kbd: '⌃O', run: openFolder },
+        { label: t('导入会话…'), run: importSession },
         { hr: true },
         { label: t('关闭会话'), kbd: '⌃W', run: act(() => navigate('/')) },
         { hr: true },
