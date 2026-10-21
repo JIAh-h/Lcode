@@ -393,6 +393,17 @@ describe('sessions.export', () => {
     await expect(api.import({ path: markdown.path })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
     await expect(api.import({ path: join(home, 'missing.jsonl') })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
   })
+
+  it('search：返回命中原文并按会话去重；空检索词是参数错误', async () => {
+    const sessionId = await seedClosedTurn('检索会话')
+    const result = await api.search({ query: '结构化解析' })
+    const hits = result.items.filter((item) => item.session_id === sessionId)
+    expect(hits).toHaveLength(1)
+    expect(hits[0]?.summary).toContain('结构化解析')
+    expect(hits[0]?.title).toBe('检索会话')
+    expect(hits[0]?.role).toBe('user')
+    await expect(api.search({ query: '   ' })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
+  })
 })
 
 describe('索引侧跟得上（派生层，不阻塞会话）', () => {

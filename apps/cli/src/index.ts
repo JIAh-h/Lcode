@@ -35,7 +35,7 @@ export interface CliOptions {
 }
 
 /** 走 `sessions` 实现的顶层命令（第一条参数即命令名） */
-const SESSION_COMMANDS = new Set(['sessions', 'export', 'import', 'delete', 'restore', 'purge', 'trash', 'archive'])
+const SESSION_COMMANDS = new Set(['sessions', 'export', 'import', 'search', 'delete', 'restore', 'purge', 'trash', 'archive'])
 
 export function parseArgs(argv: readonly string[]): CliOptions {
   const opts: CliOptions = {}
@@ -105,6 +105,7 @@ const USAGE = `Lcode CLI — 可用命令：
   lcode export <id> [--format jsonl|md]
   lcode export --all [--out <dir>] 全量导出 + manifest.json
   lcode import <file.jsonl> [--title <name>] 导入为新的本地会话
+  lcode search <词…>               全文检索会话消息
   lcode delete <id>                软删（文件保留）
   lcode restore <id>               撤销软删
   lcode purge <id> --exported      硬删（先导出；--force 可跳过提示）

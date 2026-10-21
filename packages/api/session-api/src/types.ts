@@ -185,6 +185,29 @@ export interface ImportSessionResult {
   readonly imported_events: number
 }
 
+/** 会话全文检索（FTS5，逐字预分词 + 前缀 AND；22 §3.13）。 */
+export interface SearchSessionsInput {
+  readonly query: string
+  readonly limit?: number | undefined
+  /** 默认不包含已软删会话（22 未决项倾向：删了就不该还能搜到） */
+  readonly include_deleted?: boolean | undefined
+}
+
+export interface SearchSessionHit {
+  readonly session_id: string
+  readonly seq: number
+  readonly role: 'user' | 'assistant' | 'tool'
+  /** 命中原样文本；不用 `snippet()`——分词后中文会带空格（fts.ts 的查询形状说明） */
+  readonly summary: string
+  readonly title: string
+  readonly workspace: string | null
+  readonly updated_at: number
+}
+
+export interface SearchSessionsResult {
+  readonly items: readonly SearchSessionHit[]
+}
+
 /**
  * 全量导出（22 §9.5 的 `lcode export --all`）。
  * `manifest.json` 记每个会话文件的大小与 SHA-256，供用户自行校验完整性
@@ -481,6 +504,8 @@ export interface SessionsApi {
   export(input: ExportInput): Promise<ExportResult>
   /** 导入 JSONL 分享副本；永远生成新 session_id，不覆盖已有会话。 */
   import(input: ImportSessionInput): Promise<ImportSessionResult>
+  /** 全文检索：按会话去重，保留排名最高的一条命中。 */
+  search(input: SearchSessionsInput): Promise<SearchSessionsResult>
   /** 全量导出 + `manifest.json`（22 §9.5；对应 `lcode export --all`） */
   exportAll(input?: ExportAllInput): Promise<ExportAllResult>
   /** 软删：从列表隐藏，文件不动（22 §9.3） */

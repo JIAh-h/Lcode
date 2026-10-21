@@ -28,6 +28,7 @@ import {
   openIndexDb,
   projectSession,
   rebuildIndex,
+  searchMessages,
 } from '@lcode/session-persistence-sqlite'
 import type { EventInput } from '@lcode/session'
 import type { JsonValue } from '@lcode/util'
@@ -74,6 +75,9 @@ import type {
   ExportResult,
   ImportSessionInput,
   ImportSessionResult,
+  SearchSessionHit,
+  SearchSessionsInput,
+  SearchSessionsResult,
   FlushInput,
   FlushResult,
   ForkSessionInput,
@@ -863,6 +867,56 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
       this.sessions.delete(sessionId)
       throw cause
     }
+  }
+
+  /**
+   * 全文检索（22 §3.13 的 FTS5 形态）。
+   *
+   * `searchMessages` 只回 `(session_id, seq, role)`，命中文本要回 `messages_projection`
+   * 取原样 `summary`（分词后中文带空格，不能用 `snippet()`）。结果**按会话去重**：
+   * 同一个会话里命中多条的，只保留排名最高的一条——列表里重复出现同一会话没有意义。
+   */
+  async search(input: SearchSessionsInput): Promise<SearchSessionsResult> {
+    const query = typeof input.query === 'string' ? input.query.trim() : ''
+    if (query === '') throw invalidParams('检索词不能为空')
+    const limit = Math.min(Math.max(Math.trunc(input.limit ?? 20), 1), 50)
+    // 索引写入是写后异步的；检索前先排空，避免刚追加的消息搜不到
+    await this.index.drain()
+    const db = openIndexDb({ home: this.home })
+    // 去重前多取一些，避免一个会话的多条命中占满配额
+    const hits = searchMessages(db, query, {
+      limit: Math.min(limit * 5, 200),
+      ...(input.include_deleted === true ? { includeDeleted: true } : {}),
+    })
+    const lookup = db.prepare(
+      `SELECT m.summary AS summary, s.title AS title, s.workspace AS workspace, s.updated_at AS updated_at
+       FROM messages_projection m
+       JOIN sessions s ON s.session_id = m.session_id
+       WHERE m.session_id = ? AND m.seq = ?
+       ORDER BY m.surface_index DESC
+       LIMIT 1`,
+    )
+    const seen = new Set<string>()
+    const items: SearchSessionHit[] = []
+    for (const hit of hits) {
+      if (seen.has(hit.sessionId)) continue
+      const row = lookup.get(hit.sessionId, hit.seq) as
+        | { summary: string; title: string; workspace: string | null; updated_at: number }
+        | undefined
+      if (row === undefined) continue
+      seen.add(hit.sessionId)
+      items.push({
+        session_id: hit.sessionId,
+        seq: hit.seq,
+        role: hit.role === 'assistant' || hit.role === 'tool' ? hit.role : 'user',
+        summary: row.summary,
+        title: row.title,
+        workspace: row.workspace,
+        updated_at: row.updated_at,
+      })
+      if (items.length >= limit) break
+    }
+    return { items }
   }
 
   /** 全量重建索引（`lcode index rebuild` 的进程内入口；T6.4 `doctor --index` 也会用它） */

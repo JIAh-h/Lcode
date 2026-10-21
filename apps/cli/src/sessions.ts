@@ -21,6 +21,7 @@ const USAGE = `lcode sessions — 会话操作
   lcode export <id> [--format jsonl|md] [--out <dir>]
   lcode export --all [--format jsonl|md] [--out <dir>]
   lcode import <file.jsonl> [--title <name>]  导入为新的本地会话
+  lcode search <词…> [--limit <n>] [--deleted]  全文检索会话消息
   lcode delete <id>            软删（从列表隐藏，文件保留）
   lcode restore <id>           撤销软删
   lcode purge <id> --exported  硬删（移入回收站，7 天后清除）
@@ -146,6 +147,28 @@ export async function runSessionsCommand(argv: readonly string[]): Promise<numbe
         const result = await api.import({ path: source, ...(typeof title === 'string' ? { title } : {}) })
         console.log(`已导入为新会话：${result.session_id}`)
         console.log(`  ${result.imported_events} 个事件，最后序号 ${result.last_seq}`)
+        return 0
+      }
+
+      case 'search': {
+        const query = positional.join(' ').trim()
+        if (query === '') return usageError('search 需要一个检索词')
+        const rawLimit = flags.get('limit')
+        const parsedLimit = typeof rawLimit === 'string' ? Number.parseInt(rawLimit, 10) : Number.NaN
+        const result = await api.search({
+          query,
+          ...(Number.isFinite(parsedLimit) ? { limit: parsedLimit } : {}),
+          ...(flags.get('deleted') === true ? { include_deleted: true } : {}),
+        })
+        if (result.items.length === 0) {
+          console.log('没有命中。')
+          return 0
+        }
+        for (const hit of result.items) {
+          const where = hit.workspace === null ? '' : `  ${hit.workspace}`
+          console.log(`${hit.title === '' ? '(无标题)' : hit.title}${where}  ·  ${hit.role}@${hit.seq}`)
+          console.log(`  ${hit.summary.replace(/\s+/g, ' ').trim().slice(0, 160)}`)
+        }
         return 0
       }
 
