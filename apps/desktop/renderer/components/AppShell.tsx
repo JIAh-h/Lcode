@@ -62,12 +62,6 @@ function workspaceName(workspace: string | null): string {
   return workspace.split(/[\\/]/).filter(Boolean).pop() ?? workspace
 }
 
-function stateColor(status: SessionMeta['status']): string {
-  if (status === 'busy' || status === 'waiting-approval') return 'var(--state-running)'
-  if (status === 'error') return 'var(--state-error)'
-  return 'var(--state-idle)'
-}
-
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
@@ -586,13 +580,15 @@ export function AppShell({ children }: { children: ReactNode }) {
                     {open && (
                       <div className="slist">
                         {group.items.map((it) => (
-                          <div className="srow" key={it.session_id}>
+                          <div
+                            className={'snrow' + (pathname.startsWith(`/sessions/${it.session_id}`) ? ' on' : '')}
+                            key={it.session_id}
+                          >
                             <NavLink
                               to={`/sessions/${it.session_id}`}
-                              className={({ isActive }) => 'sitem' + (isActive ? ' active' : '')}
+                              className="sitem"
                               title={it.title || t('未命名会话')}
                             >
-                              <i className="st" style={{ background: stateColor(it.status) }} />
                               <span className="sname">{it.title || t('未命名会话')}</span>
                             </NavLink>
                             <PopMenu
@@ -636,7 +632,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                   {showArchived && (
                     <div className="slist">
                       {archivedGroups.map(([key, name]) => (
-                        <div className="srow" key={key}>
+                        <div className="snrow" key={key}>
                           <span className="sitem" title={name}>
                             <span className="sname">{name}</span>
                           </span>
