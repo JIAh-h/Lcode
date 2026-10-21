@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
+import { useNavigate } from 'react-router-dom'
 import type { QueuedMessage } from '../store/sessionBridge.ts'
 import { TextArea } from './controls.tsx'
 import { PopMenu } from './PopMenu.tsx'
@@ -77,6 +78,7 @@ export function ComposerBar({
   onClearQueued?: (() => void) | undefined
 }) {
   const prefs = useUiPrefs()
+  const navigate = useNavigate()
   const [attachments, setAttachments] = useState<readonly Attachment[]>([])
   const [editingQueueId, setEditingQueueId] = useState<string | null>(null)
   const [editingQueueText, setEditingQueueText] = useState('')
@@ -149,13 +151,20 @@ export function ComposerBar({
     checked: prefs.permissionPreset === p,
   }))
 
-  const modelItems: readonly PopMenuItem[] = prefs.models.map((m) => ({
-    id: m.name,
-    // 显示名（label），不是内部 id——用户认的是"我给它起的名字"
-    label: m.src,
-    hint: m.model,
-    checked: prefs.defaultProvider === m.name,
-  }))
+  const modelItems: readonly PopMenuItem[] = [
+    ...prefs.models.map((m) => ({
+      id: m.name,
+      // 显示名（label），不是内部 id——用户认的是"我给它起的名字"
+      label: m.src,
+      hint: m.model,
+      checked: prefs.defaultProvider === m.name,
+    })),
+    {
+      id: 'manage',
+      label: prefs.models.length === 0 ? '添加模型' : '管理模型',
+      hint: '设置 → 模型',
+    },
+  ]
 
   /** 当前选中项的显示名；没选或找不到就显示引导文案 */
   const currentModelLabel =
@@ -271,12 +280,11 @@ export function ComposerBar({
           up
           header="这次对话用哪个模型"
           items={modelItems}
-          footer={
-            modelItems.length === 0
-              ? t('还没有配置任何模型，请先到「设置 → 模型」添加')
-              : t('换默认模型请到「设置 → 模型」')
-          }
           onSelect={(id) => {
+            if (id === 'manage') {
+              navigate('/settings', { state: { sec: 'providers' } })
+              return
+            }
             // **必须走 chooseDefaultModel**：它会把选择回写主进程
             // （`ctx.agentDefaultModel` 是权威）。以前这里只改渲染层镜像，
             // 于是"界面上选好了、引擎那边还是空的"，发消息必报「还没有选择模型」。

@@ -25,6 +25,7 @@ export const EN: Readonly<Record<string, string>> = {
   返回工作台: 'Back to workspace',
   '导出…': 'Export…',
   添加模型: 'Add model',
+  管理模型: 'Manage models',
   添加文件夹: 'Add folder',
   测试连接: 'Test connection',
   '在文件夹中显示': 'Show in folder',
@@ -244,10 +245,7 @@ export const EN: Readonly<Record<string, string>> = {
   补充要求: 'Add a requirement',
   '当前环境没有主进程桥，无法发送': 'No main-process bridge — cannot send',
   发送失败: 'Send failed',
-  '还没有配置任何模型，请先到「设置 → 模型」添加':
-    'No models configured yet — add one in Settings → Model',
   这次对话用哪个模型: 'Which model for this chat',
-  '换默认模型请到「设置 → 模型」': 'Change the default in Settings → Model',
   发送: 'Send',
   暂停: 'Pause',
   继续: 'Resume',
