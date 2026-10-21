@@ -405,13 +405,22 @@ describe('sessions.export', () => {
     await expect(api.search({ query: '   ' })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
   })
 
-  it('rename：只改 SQLite 标题，空标题与未知会话分别报错', async () => {
-    const sessionId = await seedClosedTurn('旧标题')
+  it('rename：只改 SQLite 标题，空标题与未知会话分别报错', async () => {    const sessionId = await seedClosedTurn('旧标题')
     const result = await api.rename({ session_id: sessionId, title: '  新标题  ' })
     expect(result).toEqual({ session_id: sessionId, title: '新标题' })
     expect((await api.list()).items.find((item) => item.session_id === sessionId)?.title).toBe('新标题')
     await expect(api.rename({ session_id: sessionId, title: '   ' })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
     await expect(api.rename({ session_id: 'NOPE', title: 'x' })).rejects.toMatchObject({ code: 'ES-SESSION_NOT_FOUND' })
+  })
+
+  it('归档会话可从 includeDeleted 列表找回并恢复', async () => {
+    const sessionId = await seedClosedTurn('归档会话')
+    await api.delete({ session_id: sessionId })
+    expect((await api.list()).items.some((item) => item.session_id === sessionId)).toBe(false)
+    const withDeleted = await api.list({ includeDeleted: true })
+    expect(withDeleted.items.find((item) => item.session_id === sessionId)?.deleted_at).not.toBeNull()
+    await api.restore({ session_id: sessionId })
+    expect((await api.list()).items.some((item) => item.session_id === sessionId)).toBe(true)
   })
 })
 

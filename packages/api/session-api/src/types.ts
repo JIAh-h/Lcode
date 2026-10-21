@@ -99,6 +99,8 @@ export interface ResumeSessionResult {
 export interface ListSessionsInput {
   readonly workspace?: string | undefined
   readonly includeArchived?: boolean | undefined
+  /** 含已软删会话（设置页「归档与回收站」用；默认 false） */
+  readonly includeDeleted?: boolean | undefined
   /** 默认 50 */
   readonly limit?: number | undefined
   readonly cursor?: string | undefined

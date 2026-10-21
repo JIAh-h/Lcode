@@ -834,6 +834,7 @@ ipcMain.handle(
         : {}),
       ...(typeof cursor === "string" ? { cursor } : {}),
       ...(record["includeArchived"] === true ? { includeArchived: true } : {}),
+      ...(record["includeDeleted"] === true ? { includeDeleted: true } : {}),
     });
   },
 );

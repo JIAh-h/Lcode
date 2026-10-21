@@ -9,6 +9,8 @@ import { choosePermissionPreset, syncPermissionPresetFromMain } from '../store/p
 import type { PermissionPresetState } from '../store/permissionSync.ts'
 import { chooseDefaultModel, syncModelsFromMain } from '../store/modelSync.ts'
 import { workspaceTrustBridge } from '../store/sessionBridge.ts'
+import { sessionBridge } from '../store/sessionBridge.ts'
+import type { SessionMeta } from '../store/sessionBridge.ts'
 import type { PermissionPreset } from '../store/uiPrefs.ts' // 模型条目类型 ModelEntry 也定义在 store/uiPrefs
 
 /**
@@ -1205,8 +1207,121 @@ function ExportSection() {
   )
 }
 
-/* ───────── 导航定义 + 页面骨架（Codex 布局） ───────── */
+/**
+ * 归档与回收站：工作区归档是本地视图状态（sidebar.json），会话归档是软删。
+ * 两者都要能在这里看见并恢复——否则归档等于「消失」。
+ */
+function ArchiveSection() {
+  const [sessions, setSessions] = useState<readonly SessionMeta[]>([])
+  const [workspaces, setWorkspaces] = useState<readonly { key: string; name: string }[]>([])
+  const [busy, setBusy] = useState<string | null>(null)
 
+  const load = useCallback(async () => {
+    const bridge = sessionBridge()
+    if (bridge !== undefined) {
+      const result = await bridge.list({ includeDeleted: true, limit: 200 })
+      setSessions(result.items.filter((item) => item.deleted_at !== null))
+    }
+    const sidebar = (await window.lcode.getSidebar()) as { archivedWorkspaces?: string[] } | null
+    setWorkspaces(
+      (sidebar?.archivedWorkspaces ?? []).map((key) => ({
+        key,
+        name: key.split(/[\\/]/).filter(Boolean).pop() ?? key,
+      })),
+    )
+  }, [])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const restoreSession = (id: string): void => {
+    const bridge = sessionBridge()
+    if (bridge === undefined) return
+    setBusy(id)
+    void bridge
+      .restore({ session_id: id })
+      .then(() => {
+        window.dispatchEvent(new Event('lcode:session-changed'))
+        toast(t('已恢复会话'))
+        return load()
+      })
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('恢复失败')))
+      .finally(() => setBusy(null))
+  }
+
+  const restoreWorkspace = (key: string): void => {
+    setBusy(key)
+    void (async () => {
+      const current = (await window.lcode.getSidebar()) as {
+        pinnedWorkspaces: string[]
+        archivedWorkspaces: string[]
+        pinnedSessions: string[]
+        collapsedWorkspaces: string[]
+      }
+      await window.lcode.setSidebar({
+        ...current,
+        archivedWorkspaces: current.archivedWorkspaces.filter((item) => item !== key),
+      })
+      window.dispatchEvent(new Event('lcode:sidebar-changed'))
+      toast(t('已取消归档'))
+      await load()
+    })()
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('恢复失败')))
+      .finally(() => setBusy(null))
+  }
+
+  return (
+    <>
+      <h2>{t('归档与回收站')}</h2>
+      <div className="sub">{t('查看已归档的工作区与会话，并把它们恢复到侧栏。')}</div>
+      <div className="sect">
+        <div className="sh2">{t('已归档工作区')}</div>
+        {workspaces.length === 0 ? (
+          <div className="srow">
+            <div className="sl">{t('没有归档的工作区。')}</div>
+          </div>
+        ) : (
+          workspaces.map((item) => (
+            <div className="srow" key={item.key}>
+              <div className="sl">{item.name}</div>
+              <div className="sr">
+                <span className="src">{item.key}</span>
+              </div>
+              <button className="btn" disabled={busy !== null} onClick={() => restoreWorkspace(item.key)}>
+                {t('恢复')}
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="sect">
+        <div className="sh2">{t('已归档会话')}</div>
+        {sessions.length === 0 ? (
+          <div className="srow">
+            <div className="sl">{t('没有归档的会话。')}</div>
+          </div>
+        ) : (
+          sessions.map((item) => (
+            <div className="srow" key={item.session_id}>
+              <div className="sl">{item.title || t('未命名会话')}</div>
+              <div className="sr">
+                <span className="src">
+                  {item.workspace ?? t('未设置工作区')} · {new Date(item.updated_at).toLocaleString()}
+                </span>
+              </div>
+              <button className="btn" disabled={busy !== null} onClick={() => restoreSession(item.session_id)}>
+                {t('恢复')}
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  )
+}
+
+/* ───────── 导航定义 + 页面骨架（Codex 布局） ───────── */
 const SECTIONS: { g?: string; id?: string; label?: string }[] = [
   { g: '个人' },
   { id: 'general', label: '常规' },
@@ -1223,6 +1338,7 @@ const SECTIONS: { g?: string; id?: string; label?: string }[] = [
   { g: '记忆与历史' },
   { id: 'history', label: '历史与保留' },
   { id: 'export', label: '导出' },
+  { id: 'archive', label: '归档与回收站' },
 ]
 
 function SectionBody({ id }: { id: string }) {
@@ -1247,6 +1363,8 @@ function SectionBody({ id }: { id: string }) {
       return <HistorySection />
     case 'export':
       return <ExportSection />
+    case 'archive':
+      return <ArchiveSection />
     default:
       return null
   }

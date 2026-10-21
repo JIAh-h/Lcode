@@ -604,8 +604,9 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
 
   async list(input: ListSessionsInput = {}): Promise<ListSessionsResult> {
     const limit = Math.min(Math.max(input.limit ?? 50, 1), 500)
-    const where: string[] = ['deleted_at IS NULL']
+    const where: string[] = []
     const args: unknown[] = []
+    if (input.includeDeleted !== true) where.push('deleted_at IS NULL')
     if (input.workspace !== undefined) {
       where.push('workspace = ?')
       args.push(normalizePath(input.workspace))
@@ -617,9 +618,10 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
       args.push(updatedAt, updatedAt, sessionId)
     }
     const db = openIndexDb({ home: this.home })
+    const clause = where.length === 0 ? '' : `WHERE ${where.join(' AND ')}`
     const rows = db
       .prepare(
-        `SELECT * FROM sessions WHERE ${where.join(' AND ')}
+        `SELECT * FROM sessions ${clause}
          ORDER BY updated_at DESC, session_id DESC LIMIT ?`,
       )
       .all(...args, limit + 1) as SessionRowLike[]

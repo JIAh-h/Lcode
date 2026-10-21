@@ -38,6 +38,8 @@ export interface SessionMeta {
   readonly last_seq: number
   readonly updated_at: number
   readonly created_at: number
+  readonly deleted_at: number | null
+  readonly archived_at: number | null
 }
 
 export interface OpenedSession {
@@ -50,7 +52,7 @@ export interface OpenedSession {
 }
 
 export interface SessionBridge {
-  list(input?: { readonly limit?: number; readonly cursor?: string }): Promise<{
+  list(input?: { readonly limit?: number; readonly cursor?: string; readonly includeDeleted?: boolean }): Promise<{
     readonly items: readonly SessionMeta[]
     readonly nextCursor?: string | undefined
   }>
