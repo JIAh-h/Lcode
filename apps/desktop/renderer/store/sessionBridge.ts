@@ -50,7 +50,10 @@ export interface OpenedSession {
 }
 
 export interface SessionBridge {
-  list(input?: unknown): Promise<{ readonly items: readonly SessionMeta[] }>
+  list(input?: { readonly limit?: number; readonly cursor?: string }): Promise<{
+    readonly items: readonly SessionMeta[]
+    readonly nextCursor?: string | undefined
+  }>
   create(input: unknown): Promise<{ readonly session_id: string; readonly last_seq: number }>
   open(sessionId: string): Promise<OpenedSession>
   delete(input: { readonly session_id: string }): Promise<unknown>

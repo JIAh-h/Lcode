@@ -17,7 +17,14 @@ function isHr(it: MItem): it is { hr: true } {
   return (it as { hr: true }).hr === true
 }
 
-function sessionApi(): { list(input?: unknown): Promise<{ items: readonly SessionMeta[] }> } | undefined {
+function sessionApi():
+  | {
+      list(input?: { readonly limit?: number; readonly cursor?: string }): Promise<{
+        items: readonly SessionMeta[]
+        nextCursor?: string | undefined
+      }>
+    }
+  | undefined {
   return (
     globalThis as unknown as {
       lcode?: {
@@ -45,6 +52,8 @@ export function AppShell({ children }: { children: ReactNode }) {
   const { pathname } = useLocation()
   const [open, setOpen] = useState<string | null>(null)
   const [sessions, setSessions] = useState<readonly SessionMeta[]>([])
+  const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
+  const [loadingMore, setLoadingMore] = useState(false)
   const barRef = useRef<HTMLDivElement | null>(null)
   const zoomRef = useRef(1)
 
@@ -52,12 +61,31 @@ export function AppShell({ children }: { children: ReactNode }) {
     const api = sessionApi()
     if (api === undefined) return
     try {
-      const result = await api.list()
+      const result = await api.list({ limit: 50 })
       setSessions(result.items)
+      setNextCursor(result.nextCursor)
     } catch {
       setSessions([])
+      setNextCursor(undefined)
     }
   }, [])
+  const loadMoreSessions = useCallback(async () => {
+    const api = sessionApi()
+    if (api === undefined || nextCursor === undefined || loadingMore) return
+    setLoadingMore(true)
+    try {
+      const result = await api.list({ limit: 50, cursor: nextCursor })
+      setSessions((prev) => {
+        const seen = new Set(prev.map((item) => item.session_id))
+        return [...prev, ...result.items.filter((item) => !seen.has(item.session_id))]
+      })
+      setNextCursor(result.nextCursor)
+    } catch {
+      // 保留已加载的部分；下次点击还能重试
+    } finally {
+      setLoadingMore(false)
+    }
+  }, [nextCursor, loadingMore])
 
   useEffect(() => {
     void refreshSessions()
@@ -161,6 +189,15 @@ export function AppShell({ children }: { children: ReactNode }) {
       .then((result) => toast(t('已导出到 {path}（SHA-256 {hash}）', { path: result.path, hash: result.sha256.slice(0, 12) })))
       .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导出会话失败')))
   })
+  const [collapsedGroups, setCollapsedGroups] = useState<ReadonlySet<string>>(new Set())
+  const toggleGroup = (name: string): void => {
+    setCollapsedGroups((prev) => {
+      const next = new Set(prev)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
+  }
   const sessionGroups = useMemo(() => {
     const groups = new Map<string, SessionMeta[]>()
     for (const session of sessions) {
@@ -353,32 +390,59 @@ export function AppShell({ children }: { children: ReactNode }) {
                 {t('打开文件夹…')}
               </a>
             </nav>
-            {sessionGroups.map(([name, items]) => (
-              <div
-                key={name}
-                style={{
-                  display: 'flex',
-                  flexDirection: 'column',
-                  minHeight: 0,
-                  flex: 1,
-                }}
-              >
-                <div className="sgroup">{name}</div>
-                <div className="slist">
-                  {items.map((it) => (
-                    <NavLink
-                      key={it.session_id}
-                      to={`/sessions/${it.session_id}`}
-                      className={({ isActive }) => 'sitem' + (isActive ? ' on' : '')}
+            {/*
+              会话树独立滚动：工作区/会话再多也只占侧栏高度，不挤压底部账户区。
+              `min-height: 0` 是 flex 子项能真正收缩的前提，缺了它会撑破外框。
+            */}
+            <div className="stree">
+              {sessionGroups.length === 0 && <div className="sempty">{t('还没有会话')}</div>}
+              {sessionGroups.map(([name, items]) => {
+                const open = !collapsedGroups.has(name)
+                return (
+                  <div className="sgroup" key={name}>
+                    <button
+                      type="button"
+                      className="sgh"
+                      aria-expanded={open}
+                      title={name}
+                      onClick={() => toggleGroup(name)}
                     >
-                      <i className="st" style={{ background: stateColor(it.status) }} />
-                      {it.title || t('未命名会话')}
-                      <span className="cnt">{it.last_seq < 0 ? t('空会话') : t('{n} 条记录', { n: it.last_seq + 1 })}</span>
-                    </NavLink>
-                  ))}
-                </div>
-              </div>
-            ))}
+                      <svg className={`sgc${open ? '' : ' closed'}`} width="12" height="12" viewBox="0 0 16 16" fill="none">
+                        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                      <span className="sgn">{name}</span>
+                      <span className="sgcnt">{items.length}</span>
+                    </button>
+                    {open && (
+                      <div className="slist">
+                        {items.map((it) => (
+                          <NavLink
+                            key={it.session_id}
+                            to={`/sessions/${it.session_id}`}
+                            className={({ isActive }) => 'sitem' + (isActive ? ' on' : '')}
+                            title={it.title || t('未命名会话')}
+                          >
+                            <i className="st" style={{ background: stateColor(it.status) }} />
+                            <span className="sname">{it.title || t('未命名会话')}</span>
+                            <span className="cnt">{it.last_seq < 0 ? t('空会话') : t('{n} 条记录', { n: it.last_seq + 1 })}</span>
+                          </NavLink>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+              {nextCursor !== undefined && (
+                <button
+                  type="button"
+                  className="smore"
+                  disabled={loadingMore}
+                  onClick={() => void loadMoreSessions()}
+                >
+                  {loadingMore ? t('加载中…') : t('加载更多会话')}
+                </button>
+              )}
+            </div>
             <div className="acct">
               <div className="av">J</div>
               <div>

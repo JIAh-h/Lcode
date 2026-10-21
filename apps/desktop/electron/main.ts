@@ -761,8 +761,18 @@ ipcMain.handle(
   "lcode:session.list",
   async (_e: IpcMainInvokeEvent, input: unknown) => {
     const rt = await agentRuntime();
-    const workspace = (input as { workspace?: unknown } | null)?.workspace;
-    return rt.sessions.list(typeof workspace === "string" ? { workspace } : {});
+    const record = (input ?? {}) as Record<string, unknown>;
+    const workspace = record["workspace"];
+    const limit = record["limit"];
+    const cursor = record["cursor"];
+    return rt.sessions.list({
+      ...(typeof workspace === "string" ? { workspace } : {}),
+      ...(typeof limit === "number" && Number.isFinite(limit)
+        ? { limit }
+        : {}),
+      ...(typeof cursor === "string" ? { cursor } : {}),
+      ...(record["includeArchived"] === true ? { includeArchived: true } : {}),
+    });
   },
 );
 
