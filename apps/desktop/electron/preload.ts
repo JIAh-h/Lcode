@@ -31,6 +31,8 @@ const api = {
   },
   answerClose: (input: { decision: 'cancel' | 'minimize' | 'quit'; remember: boolean }): Promise<void> =>
     ipcRenderer.invoke('app:close-answer', input),
+  /** 已展示自绘确认框（主进程据此不再回落原生对话框） */
+  ackClose: (): Promise<void> => ipcRenderer.invoke('app:close-ack'),
   /** 拖拽文件 → 本地绝对路径（Electron 32+ 移除了 File.path，用 webUtils 解析） */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
 

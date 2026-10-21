@@ -16,6 +16,7 @@ export function CloseConfirm() {
     return window.lcode.onCloseRequest(() => {
       setRemember(false)
       setOpen(true)
+      void window.lcode.ackClose()
     })
   }, [])
 

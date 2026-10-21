@@ -111,36 +111,59 @@ let askingClose = false;
  * 同一时刻只可能有一个待答的关闭请求；渲染层卡死时走原生对话框兜底。
  */
 let closeAnswer: ((decision: "cancel" | CloseDecision, remember: boolean) => void) | null = null;
+/** 渲染层已收到请求并展示了自绘弹窗——收到 ack 后就不再计时兜底 */
+let closeAcked = false;
+let closeFallbackTimer: NodeJS.Timeout | null = null;
 
 function askCloseDecision(win: BrowserWindow): Promise<"cancel" | CloseDecision> {
   return new Promise((resolve) => {
     let settled = false;
-    const settle = (decision: "cancel" | CloseDecision): void => {
+    const clearFallback = (): void => {
+      if (closeFallbackTimer !== null) {
+        clearTimeout(closeFallbackTimer);
+        closeFallbackTimer = null;
+      }
+    };
+    const finish = (decision: "cancel" | CloseDecision): void => {
       if (settled) return;
       settled = true;
+      clearFallback();
       closeAnswer = null;
+      closeAcked = false;
+      win.off("unresponsive", onUnresponsive);
       resolve(decision);
     };
+    const fallbackToNative = (): void => {
+      if (settled) return;
+      settled = true;
+      clearFallback();
+      closeAnswer = null;
+      closeAcked = false;
+      win.off("unresponsive", onUnresponsive);
+      console.warn("[lcode] 渲染层未确认关闭，回落原生对话框");
+      void nativeCloseDecision(win).then(resolve);
+    };
+    const onUnresponsive = (): void => fallbackToNative();
     if (win.isDestroyed() || win.webContents.isDestroyed()) {
-      settle("cancel");
+      void nativeCloseDecision(win).then(resolve);
       return;
     }
     closeAnswer = (decision, remember) => {
       if (remember && decision !== "cancel") saveCloseDecision(decision);
-      settle(decision);
+      finish(decision);
     };
+    closeAcked = false;
     // 从任务栏关闭时窗口可能是最小化的：先还原，否则弹窗看得见但窗口没了
     if (win.isMinimized()) win.restore();
     win.show();
     win.focus();
+    win.once("unresponsive", onUnresponsive);
     win.webContents.send("lcode:app.close-request");
-    // 渲染层无响应时不能把窗口变成“关不掉”：4 秒后回落原生对话框
-    setTimeout(() => {
-      if (settled) return;
-      closeAnswer = null;
-      settled = true;
-      void nativeCloseDecision(win).then(resolve);
-    }, 4000);
+    // 只有“渲染层压根没接住请求”才兜底；用户犹豫多久都不该再弹原生框
+    closeFallbackTimer = setTimeout(() => {
+      if (settled || closeAcked) return;
+      fallbackToNative();
+    }, 3000);
   });
 }
 
@@ -341,6 +364,11 @@ ipcMain.handle("app:close-answer", (_e: IpcMainInvokeEvent, input: unknown) => {
     throw new Error("decision 必须是 cancel / minimize / quit");
   }
   closeAnswer?.(decision, record["remember"] === true);
+});
+
+/** 渲染层已展示自绘确认框：撤销“没接住请求”的原生兜底计时 */
+ipcMain.handle("app:close-ack", () => {
+  closeAcked = true;
 });
 
 // 选择本地文件夹（首页「选择项目 / 新建项目」、输入区「＋ → 添加文件夹」）
