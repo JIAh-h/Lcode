@@ -239,6 +239,20 @@ export interface SessionEventMap {
   'request/context': RequestContext
   /** 生命周期分界线：空载荷，靠位置表达含义（11 §7） */
   'session/end-seed': Record<string, never>
+  /**
+   * 会话来源（P8-01）：从外部 JSONL 导入时，宿主**先于**被导入事件追加。
+   * 不进模型历史；回放页据此展示来源文件与内容哈希。
+   */
+  'session/imported': {
+    readonly source: {
+      readonly file: string
+      readonly sha256: string
+      readonly bytes: number
+      readonly sourceSessionId: string
+      readonly sourceCreatedAt: number
+      readonly importedAt: number
+    }
+  }
   /** 待办整表快照，last-write-wins */
   'todo/write': { readonly todos: readonly TodoItem[] }
   /** 计划模式：整值替换；退出原因让“确认执行”和“取消”在回放中可区分。 */

@@ -146,6 +146,21 @@ export function AppShell({ children }: { children: ReactNode }) {
         .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导入会话失败')))
     })
   })
+  const exportSession = act(() => {
+    const bridge = sessionBridge()
+    if (bridge === undefined) {
+      toast(t('当前环境没有主进程桥，无法导出会话'))
+      return
+    }
+    if (currentSessionId === undefined) {
+      toast(t('先打开一个会话再导出'))
+      return
+    }
+    void bridge
+      .export({ session_id: currentSessionId, format: 'jsonl' })
+      .then((result) => toast(t('已导出到 {path}（SHA-256 {hash}）', { path: result.path, hash: result.sha256.slice(0, 12) })))
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导出会话失败')))
+  })
   const sessionGroups = useMemo(() => {
     const groups = new Map<string, SessionMeta[]>()
     for (const session of sessions) {
@@ -168,6 +183,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         { hr: true },
         { label: t('打开文件夹…'), kbd: '⌃O', run: openFolder },
         { label: t('导入会话…'), run: importSession },
+        { label: t('导出当前会话…'), run: exportSession },
         { hr: true },
         { label: t('关闭会话'), kbd: '⌃W', run: act(() => navigate('/')) },
         { hr: true },

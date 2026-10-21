@@ -1,6 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { SessionEvent, ModelMessage, ContentBlock } from '@lcode/session'
-import { deriveMessages } from '@lcode/session'
 import { t } from '../i18n/index.ts'
 import { ToolCard, type ToolCardCall, type ToolCardResult } from './ToolCard.tsx'
 import { ApprovalCard, type ApprovalDecision } from './ApprovalCard.tsx'
@@ -16,13 +15,14 @@ import { ApprovalCard, type ApprovalDecision } from './ApprovalCard.tsx'
  * 事件流（IPC 推送）        → 之后发生的一切
  * ```
  *
- * ## 一条纪律：投影用**内核的权威派生器**
+ * ## 一条纪律：渲染行只从事件装配，不另写消息投影
  *
- * `deriveMessages(log)` 是 `@lcode/core/session` 导出的纯函数——**引擎自己用的就是它**。
- * 渲染层只需把事件按序攒起来喂进去，于是"UI 看到的"与"模型看到的"必然一致（I1 的另一半）。
+ * 渲染行由 `timeline`（用户/助手消息、工具调用、审批）直接装配；消息投影的**唯一权威**
+ * 仍是 `@lcode/core/session` 的 `deriveMessages`，引擎侧用它（I1）。
  *
- * ⚠️ 不要在这边另写一份"遍历事件拼消息"的逻辑：渲染层自己拼一遍，就等于给同一个
- * 概念造了第二个实现，而它们迟早会分叉（压缩、空 assistant 消息这些边界最容易漏）。
+ * ⚠️ 不要在这边另写一份"遍历事件拼消息"的投影逻辑：那等于给同一个概念造第二个实现，
+ * 压缩、空 assistant 消息这些边界迟早会分叉。空态判断只需要"有没有可渲染行"，不必为此
+ * 在每次事件到达时跑一遍全量派生——10 万事件的会话里这笔开销是实打实的。
  */
 
 interface SessionBridge {
@@ -98,7 +98,29 @@ export function SessionStream({
   const [failureEpoch, setFailureEpoch] = useState(0)
   /** `open()` 时主进程告诉我们"日志末尾是一个失败的轮"（历史里没有 turn/end 这种结构事件） */
   const [historyTurnFailed, setHistoryTurnFailed] = useState(false)
+  /**
+   * 时间线渲染窗口：只挂载最近 N 行，避免长会话一次创建上万个 DOM 节点。
+   * "加载更早"以倍增方式扩容，10 万行量级十来次点击就能回到开头。
+   */
+  const [visibleLimit, setVisibleLimit] = useState(150)
   const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollerRef = useRef<HTMLDivElement>(null)
+  /** 视口是否贴底；用户向上翻阅历史时为 false，新事件不再强制滚动 */
+  const stickRef = useRef(true)
+  /** 扩容前记录的 scrollHeight；扩容后用它把视口锚在原位置，避免内容从上方插入时跳动 */
+  const anchorRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    setVisibleLimit(150)
+  }, [sessionId])
+
+  useLayoutEffect(() => {
+    const anchor = anchorRef.current
+    anchorRef.current = null
+    const scroller = scrollerRef.current
+    if (anchor === null || scroller === null) return
+    scroller.scrollTop += scroller.scrollHeight - anchor
+  }, [visibleLimit])
 
   useEffect(() => {
     onSendStateChange?.(running)
@@ -211,13 +233,10 @@ export function SessionStream({
     }
   }, [sessionId])
 
-  // 自动滚到底（新内容到达时）
+  // 自动滚到底（新内容到达时）；用户向上翻阅历史时不打断
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' })
+    if (stickRef.current) bottomRef.current?.scrollIntoView({ block: 'end' })
   }, [events.length, streaming])
-
-  /** 派生消息：**内核的权威纯函数**，与引擎同源 */
-  const messages = useMemo(() => deriveMessages(events), [events])
 
   /**
    * **从事件里派生"最后一轮失败了"**（而不是只认那条实时推送）。
@@ -265,14 +284,35 @@ export function SessionStream({
     () => events.filter((event) => event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/call' || event.type === 'approval/asked'),
     [events],
   )
+  const hiddenCount = Math.max(0, timeline.length - visibleLimit)
+  const visibleTimeline = hiddenCount === 0 ? timeline : timeline.slice(hiddenCount)
 
   return (
-    <div className="sessionstream">
+    <div
+      className="sessionstream"
+      ref={scrollerRef}
+      onScroll={(event) => {
+        const el = event.currentTarget
+        stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+      }}
+    >
       {shownError !== null && <div className="sserror">{shownError}</div>}
-      {messages.length === 0 && streaming === '' && shownError === null && (
+      {hiddenCount > 0 && (
+        <button
+          type="button"
+          className="ssmore"
+          onClick={() => {
+            anchorRef.current = scrollerRef.current?.scrollHeight ?? null
+            setVisibleLimit((n) => n * 2)
+          }}
+        >
+          {t('加载更早的 {n} 条', { n: Math.min(hiddenCount, visibleLimit) })}
+        </button>
+      )}
+      {timeline.length === 0 && streaming === '' && shownError === null && (
         <div className="ssempty">{t('还没有内容。在下面输入一句话开始。')}</div>
       )}
-      {timeline.map((event) => {
+      {visibleTimeline.map((event) => {
         if (event.type === 'tool/call') {
           const finished = toolResults.get(event.data.callId)
           const call: ToolCardCall = {

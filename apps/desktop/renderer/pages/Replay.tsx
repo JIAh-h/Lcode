@@ -28,6 +28,12 @@ export function ReplayPage() {
   const [fileCheckpoints, setFileCheckpoints] = useState<readonly FileCheckpointMeta[]>([])
   const [restoring, setRestoring] = useState<string | null>(null)
   const [restoreMessage, setRestoreMessage] = useState('')
+  /** 步骤列表只挂载最近 N 步；长会话里几千个按钮会拖慢首屏 */
+  const [stepLimit, setStepLimit] = useState(300)
+
+  useEffect(() => {
+    setStepLimit(300)
+  }, [sessionId])
 
   useEffect(() => {
     if (sessionId === undefined) return
@@ -72,6 +78,11 @@ export function ReplayPage() {
     }
   }
 
+  const provenance = useMemo(() => {
+    const found = events.find((item) => item.type === 'session/imported')
+    return found !== undefined && found.type === 'session/imported' ? found.data.source : null
+  }, [events])
+
   const steps = useMemo(() => {
     const result: Step[] = []
     for (const event of events) {
@@ -81,6 +92,8 @@ export function ReplayPage() {
     }
     return result
   }, [events])
+  const hiddenSteps = Math.max(0, steps.length - stepLimit)
+  const visibleSteps = hiddenSteps === 0 ? steps : steps.slice(hiddenSteps)
   const current = steps.find((step) => `${step.turn}:${step.step}` === selected) ?? steps[steps.length - 1]
   const boundary = current === undefined ? events.length : current.endSeq + 1
   const replayCards = useMemo(() => {
@@ -131,10 +144,25 @@ export function ReplayPage() {
   return (
     <main className="page replay">
       <h2>{t('回放 · {name}', { name: meta?.title || sessionId })}</h2>
+      {provenance !== null && (
+        <p className="hint" title={provenance.file}>
+          {t('导入自 {file} · {bytes} 字节 · SHA-256 {hash} · {time}', {
+            file: provenance.file,
+            bytes: provenance.bytes,
+            hash: provenance.sha256.slice(0, 12),
+            time: new Date(provenance.importedAt).toLocaleString(),
+          })}
+        </p>
+      )}
       <div className="replay-layout">
         <div className="replay-list">
           {steps.length === 0 && <div className="pickhint">{t('当前会话还没有完成的步骤')}</div>}
-          {steps.map((step) => {
+          {hiddenSteps > 0 && (
+            <button type="button" className="replay-item" onClick={() => setStepLimit((n) => n * 2)}>
+              {t('加载更早的 {n} 步', { n: Math.min(hiddenSteps, stepLimit) })}
+            </button>
+          )}
+          {visibleSteps.map((step) => {
             const key = `${step.turn}:${step.step}`
             return (
               <button

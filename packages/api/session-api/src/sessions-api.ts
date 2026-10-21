@@ -833,13 +833,27 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
       throw invalidParams(`导入文件不是受支持的 JSONL 会话：${cause instanceof Error ? cause.message : String(cause)}`)
     }
 
+    const sourceBytes = readFileSync(source)
     const sessionId = newSessionId()
     await this.persistence.open(asSessionId(sessionId), { ...(loaded.header.cwd === null ? {} : { cwd: loaded.header.cwd }) })
     const store = new InMemorySessionStore(asSessionId(sessionId))
     this.sessions.set(sessionId, { store, cwd: loaded.header.cwd })
     try {
+      const provenance = store.append({
+        type: 'session/imported',
+        data: {
+          source: {
+            file: source,
+            sha256: sha256Hex(sourceBytes),
+            bytes: sourceBytes.length,
+            sourceSessionId: loaded.header.sessionId,
+            sourceCreatedAt: loaded.header.createdAt,
+            importedAt: this.now(),
+          },
+        },
+      })
       const imported = store.appendMany(loaded.events.map(toEventInput))
-      if (imported.length > 0) await this.persistence.append(asSessionId(sessionId), imported as readonly SessionEvent[])
+      await this.persistence.append(asSessionId(sessionId), [provenance, ...imported] as readonly SessionEvent[])
       await this.persistence.flush(asSessionId(sessionId))
       await this.index.drain()
       const title = input.title?.trim() || '导入的共享会话'

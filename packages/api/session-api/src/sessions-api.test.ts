@@ -2,6 +2,7 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent } from '@lcode/session'
+import { listSessionFiles, loadLog } from '@lcode/session-persistence-jsonl'
 import { closeAllIndexDbs } from '@lcode/session-persistence-sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { LocalSessionsApi } from './sessions-api.ts'
@@ -371,10 +372,19 @@ describe('sessions.export', () => {
 
     expect(imported.session_id).not.toBe(sourceId)
     expect(imported.imported_events).toBe(4)
-    expect(imported.last_seq).toBe(3)
+    // 来源事件占 seq 0，被导入事件从 1 开始连续重排
+    expect(imported.last_seq).toBe(4)
     expect((await api.meta({ session_id: imported.session_id })).header.title).toBe('导入的共享会话')
     expect((await api.derive({ session_id: imported.session_id })).messages).toEqual((await api.derive({ session_id: sourceId })).messages)
     expect((await api.list()).items).toHaveLength(2)
+
+    const file = listSessionFiles(home).find((entry) => entry.sessionId === imported.session_id)?.file
+    expect(file).toBeDefined()
+    const importedEvents = loadLog(file as string).events
+    expect(importedEvents[0]).toMatchObject({ type: 'session/imported', seq: 0 })
+    expect(importedEvents[0]?.data).toMatchObject({
+      source: { file: exported.path, sha256: exported.sha256, bytes: exported.bytes, sourceSessionId: sourceId },
+    })
   })
 
   it('Markdown 或不存在路径不能当作可恢复分享包导入', async () => {
