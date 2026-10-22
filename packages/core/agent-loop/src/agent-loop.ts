@@ -74,6 +74,20 @@ declare module '@lcode/context' {
     'agent/pre-step': { agentId: string; turn: number; nextStep: number }
     'agent/model-selection': { agentId: string; sessionId: string; turn: number; selection: ModelSelection }
     'agent/request': { call: PreparedCall }
+    /**
+     * 请求失败（waterfall）。处理器可在此做"压缩后重试"之类的恢复，并返回
+     * `{ retry: true }`；返回 false 或没人处理时错误照常向上抛。
+     *
+     * 只应在**规范化错误码**上分支（例如 `EL-CONTEXT_OVERFLOW`），不要读错误文案。
+     */
+    'agent/request-error': {
+      agentId: string
+      sessionId: string
+      session: SessionService
+      turn: number
+      step: number
+      error: unknown
+    }
     /** 回合已写入终态；检查点等终局副作用在此串行完成，下一回合开始前可见。 */
     'agent/turn-ended': { agentId: string; sessionId: string; session: SessionService; turn: number; reason: TurnEndReason; endSeq: number }
     /** 工具结果已经成为表面事件；剪枝 / spill 只能在这里或后续步边界做替换。 */

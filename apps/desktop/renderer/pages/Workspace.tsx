@@ -1,13 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import type { SessionEvent } from '@lcode/session'
-import { ComposerBar } from '../components/ComposerBar.tsx'
+import { ComposerBar, withAttachments, type Attachment } from '../components/ComposerBar.tsx'
+import { ContextBar } from '../components/ContextBar.tsx'
 import { SessionStream } from '../components/SessionStream.tsx'
 import { SessionActionsMenu } from '../components/SessionActionsMenu.tsx'
 import { TaskPanel } from '../components/TaskPanel.tsx'
 import { toast } from '../components/toast.ts'
 import { t } from '../i18n/index.ts'
-import { agentBridge, notifySessionChanged, planBridge, sessionBridge, workspaceTrustBridge, type QueuedMessage, type SessionMeta } from '../store/sessionBridge.ts'
+import { agentBridge, notifySessionChanged, planBridge, sessionBridge, workspaceInfoBridge, workspaceTrustBridge, type QueuedMessage, type SessionContextUsage, type SessionMeta, type WorkspaceGitInfo } from '../store/sessionBridge.ts'
 
 type Tab = 'changes' | 'files' | 'tasks'
 type Change = {
@@ -20,6 +21,12 @@ type Change = {
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
+}
+
+/** IPC 只保留 message，错误码会在序列化时丢掉，所以按稳定文案判断 */
+function isSessionGone(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return message.includes('ES-SESSION_NOT_FOUND') || message.includes('会话不存在或日志缺失')
 }
 
 function changesFrom(events: readonly SessionEvent[]): readonly Change[] {
@@ -157,6 +164,13 @@ export function WorkspacePage() {
   const [meta, setMeta] = useState<SessionMeta | null>(null)
   const [queued, setQueued] = useState<readonly QueuedMessage[]>([])
   const [readOnlyConfirmedFor, setReadOnlyConfirmedFor] = useState<string | null>(null)
+  /** 回退重发会就地截断日志：本页那份事件副本必须整体重读，否则右栏还挂着已撤回的变更 */
+  const [reloadEpoch, setReloadEpoch] = useState(0)
+  /** 输入框状态栏：上下文占用与 Git 信息 */
+  const [usage, setUsage] = useState<SessionContextUsage | null>(null)
+  const [gitInfo, setGitInfo] = useState<WorkspaceGitInfo | null>(null)
+  const [usageEpoch, setUsageEpoch] = useState(0)
+  const [compacting, setCompacting] = useState(false)
 
   useEffect(() => {
     if (sessionId === undefined) return
@@ -171,24 +185,66 @@ export function WorkspacePage() {
       const event = item['event'] as SessionEvent
       if (!ready) buffered.push(event)
       else setEvents((prev) => (prev.some((current) => current.seq === event.seq) ? prev : [...prev, event]))
+      // 轮结束 / 压缩事务结束都会改变表面或 system 占用：刷新状态栏
+      if (event.type === 'turn/end' || event.type === 'compaction/end') setUsageEpoch((n) => n + 1)
     })
     void api
       .open(sessionId)
       .then((opened) => {
         if (!alive) return
         setMeta(opened.meta)
+        if (opened.meta.deleted_at !== null) {
+          // 归档（软删）的会话不属于工作台：切到同工作区的活跃会话；
+          // 一个都没有就打开该工作区的新建会话页。否则继续发送会写进一个侧栏看不到的会话。
+          void (async () => {
+            const bridge = sessionBridge()
+            try {
+              if (bridge !== undefined) {
+                const workspace = opened.meta.workspace
+                const siblings = await bridge.list({
+                  ...(workspace === null || workspace === '' ? {} : { workspace }),
+                  limit: 50,
+                })
+                const next = siblings.items.find(
+                  (item) => item.session_id !== sessionId && item.deleted_at === null,
+                )
+                if (next !== undefined) {
+                  toast(t('该会话已归档，已切换到同工作区的其他会话'))
+                  navigate(`/sessions/${next.session_id}`, { replace: true })
+                  return
+                }
+              }
+            } catch {
+              // 列表拿不到就回落到新建会话页
+            }
+            toast(t('该会话已归档，已为你打开该工作区的新会话'))
+            const workspace = opened.meta.workspace
+            navigate('/', {
+              replace: true,
+              ...(workspace === null || workspace === '' ? {} : { state: { cwd: workspace } }),
+            })
+          })()
+          return
+        }
         const merged = [...opened.events, ...buffered].sort((a, b) => a.seq - b.seq)
         setEvents(merged.filter((event, index) => index === 0 || event.seq !== merged[index - 1]!.seq))
         ready = true
       })
       .catch((err: unknown) => {
-        if (alive) toast(err instanceof Error ? err.message : t('打开会话失败'))
+        if (!alive) return
+        if (isSessionGone(err)) {
+          // 路由可能指向刚被永久归档（或从别处删除）的会话：回首页，不留一个死页面
+          navigate('/', { replace: true })
+          toast(t('这个会话已不存在，可能已被永久归档'))
+          return
+        }
+        toast(err instanceof Error ? err.message : t('打开会话失败'))
       })
     return () => {
       alive = false
       stop()
     }
-  }, [sessionId])
+  }, [sessionId, reloadEpoch])
 
   const changes = useMemo(() => changesFrom(events), [events])
   const planActive = useMemo(() => planActiveFrom(events), [events])
@@ -196,6 +252,66 @@ export function WorkspacePage() {
   const workspaceTrust = useMemo(() => workspaceTrustFrom(events), [events])
   const composerAction = useMemo(() => primaryActionFrom(events), [events])
   const agentRunning = composerAction === 'pause'
+
+  // 状态栏：上下文占用。轮结束、压缩结束、发送成功后各刷新一次（不逐 chunk 轮询）。
+  useEffect(() => {
+    if (sessionId === undefined) return
+    const api = sessionBridge()
+    if (api === undefined) return
+    let alive = true
+    void api
+      .contextUsage(sessionId)
+      .then((next) => {
+        if (alive) setUsage(next)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [sessionId, usageEpoch, composerAction])
+
+  useEffect(() => {
+    const workspace = meta?.workspace
+    if (workspace === null || workspace === undefined || workspace === '') {
+      setGitInfo(null)
+      return
+    }
+    const bridge = workspaceInfoBridge()
+    if (bridge === undefined) return
+    let alive = true
+    void bridge
+      .gitInfo(workspace)
+      .then((info) => {
+        if (alive) setGitInfo(info)
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [meta?.workspace, reloadEpoch])
+
+  const compactContext = (): void => {
+    if (sessionId === undefined || compacting) return
+    const api = sessionBridge()
+    if (api === undefined) return
+    setCompacting(true)
+    void api
+      .compact(sessionId)
+      .then((result) => {
+        setUsageEpoch((n) => n + 1)
+        if (result.status === 'compacted') {
+          toast(t('已压缩上下文：{before} → {after} 字符', { before: result.originalChars, after: result.summaryChars }))
+        } else if (result.status === 'not-beneficial') {
+          toast(t('这段历史已经很短，没有可省的'))
+        } else {
+          toast(t('当前没有可安全压缩的范围'))
+        }
+      })
+      .catch((err: unknown) => {
+        toast(err instanceof Error ? err.message : t('压缩上下文失败'))
+      })
+      .finally(() => setCompacting(false))
+  }
 
   const refreshQueue = (): void => {
     if (sessionId === undefined) return
@@ -209,9 +325,13 @@ export function WorkspacePage() {
   // 队列不是持久事件；只在轮边界刷新，避免每个流式 chunk 都触发 IPC。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, agentRunning, events.filter((event) => event.type === 'turn/start' || event.type === 'turn/end').map((event) => event.seq).join(',')])
-  const send = () => {
+  const send = (attachments: readonly Attachment[] = []) => {
     const value = text.trim()
     if (value === '' || sessionId === undefined) return
+    if (meta?.deleted_at !== null && meta?.deleted_at !== undefined) {
+      toast(t('该会话已归档，无法发送'))
+      return
+    }
     const api = agentBridge()
     if (api === undefined) {
       toast(t('当前环境没有主进程桥，无法发送'))
@@ -219,10 +339,11 @@ export function WorkspacePage() {
     }
     setText('')
     void api
-      .send({ session_id: sessionId, text: value })
+      .send({ session_id: sessionId, text: withAttachments(value, attachments) })
       .then(() => {
         refreshQueue()
         notifySessionChanged()
+        setUsageEpoch((n) => n + 1)
       })
       .catch((err: unknown) => {
         toast(err instanceof Error ? err.message : t('发送失败'))
@@ -366,6 +487,7 @@ export function WorkspacePage() {
             <div className="col">
               <SessionStream
                 sessionId={sessionId}
+                onRewound={() => setReloadEpoch((n) => n + 1)}
               />
             </div>
           </div>
@@ -393,6 +515,18 @@ export function WorkspacePage() {
                 onEditQueued={editQueued}
                 onRemoveQueued={removeQueued}
                 onClearQueued={clearQueued}
+                footer={
+                  <ContextBar
+                    workspace={meta?.workspace ?? null}
+                    branch={gitInfo?.branch ?? null}
+                    mode={gitInfo?.mode ?? 'local'}
+                    usage={usage}
+                    compacting={compacting}
+                    running={agentRunning}
+                    onCompact={compactContext}
+                    onOpenSettings={() => navigate('/settings', { state: { sec: 'providers' } })}
+                  />
+                }
               />
             </div>
           </div>

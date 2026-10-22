@@ -322,3 +322,61 @@ describe('装配：模型 id 贯通（显示名 ≠ 服务端模型名）', () =
     restarted.feature.dispose()
   })
 })
+
+describe('测试连接：未保存配置的模型发现', () => {
+  it('discover 只读探测 /models，不写配置也不写凭据', async () => {
+    const { feature: f, calls } = await feature(() =>
+      new Response(JSON.stringify({ data: [{ id: 'deepseek-chat', context_window: 1_048_576 }] }), { status: 200 }),
+    )
+    const result = await f.discover({ base_url: 'https://gw.example.com/v1', api_key: 'sk-live' })
+    expect(result).toEqual({
+      ok: true,
+      models: [{ id: 'deepseek-chat', name: 'deepseek-chat', contextWindow: 1_048_576 }],
+    })
+    expect(await f.listCustom()).toEqual([])
+    expect(calls.at(-1)?.auth).toBe('Bearer sk-live')
+    f.dispose()
+  })
+
+  it('失败返回六类归因，不抛错', async () => {
+    const { feature: f } = await feature(() => new Response('nope', { status: 401 }))
+    await expect(
+      f.discover({ base_url: 'https://gw.example.com/v1', api_key: 'bad' }),
+    ).resolves.toMatchObject({ ok: false, failure: { kind: 'credential-rejected' } })
+    f.dispose()
+  })
+
+  it('编辑模式留空 Key 时可复用已保存的凭据引用', async () => {
+    const { feature: f, calls } = await feature()
+    await f.saveCustom({ ...CUSTOM, api_key: 'sk-secret' })
+    const result = await f.discover({
+      base_url: CUSTOM.base_url,
+      api_key: '',
+      credential_ref: CUSTOM.api_key_ref,
+    })
+    expect(result.ok).toBe(true)
+    expect(calls.at(-1)?.auth).toBe('Bearer sk-secret')
+    f.dispose()
+  })
+})
+
+describe('未保存配置查单个模型上限', () => {
+  it('列表不带窗口时用详情接口读该模型的上限', async () => {
+    const { feature: f } = await feature((url) => {
+      if (url.endsWith('/models/qwen3-coder')) {
+        return new Response(JSON.stringify({ id: 'qwen3-coder', extra_info: { default_envs: { max_input_tokens: 200_000 } } }), { status: 200 })
+      }
+      if (url.endsWith('/models')) {
+        return new Response(JSON.stringify({ data: [{ id: 'qwen3-coder' }] }), { status: 200 })
+      }
+      return new Response('nope', { status: 404 })
+    })
+    await expect(
+      f.limitsUnsaved({ base_url: 'https://gw.example.com/v1', model: 'qwen3-coder', api_key: 'k' }),
+    ).resolves.toEqual({ context_window: 200_000 })
+    await expect(
+      f.limitsUnsaved({ base_url: 'https://gw.example.com/v1', model: 'missing', api_key: 'k' }),
+    ).resolves.toEqual({})
+    f.dispose()
+  })
+})

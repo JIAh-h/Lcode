@@ -48,6 +48,8 @@ export interface TrashEntry {
   readonly path: string
   readonly bytes: number
   readonly deleted_at: number
+  /** 展示用内容标签（首条用户消息或标题）；旧条目可能为空 */
+  readonly label: string
   readonly expires_in_ms: number
 }
 
@@ -89,6 +91,20 @@ export interface SessionBridge {
   checkpoints(input: { readonly session_id: string }): Promise<readonly { readonly turn: number; readonly end_seq: number; readonly ended_at: number; readonly reason: string }[]>
   fileCheckpoints(input: { readonly session_id: string }): Promise<readonly FileCheckpointMeta[]>
   restoreCheckpoint(input: { readonly session_id: string; readonly checkpoint_id: string }): Promise<{ readonly restoredPaths: readonly string[]; readonly removedPaths: readonly string[] }>
+  /** 编辑后重发：回退该提问之后的日志与文件改动，再重新发送 */
+  rewindSend(input: { readonly session_id: string; readonly to_seq: number; readonly text: string }): Promise<{
+    readonly accepted: true
+    readonly rewind: {
+      readonly discarded: number
+      readonly restored: readonly string[]
+      readonly removed: readonly string[]
+      readonly unrestored: readonly string[]
+    }
+  }>
+  /** 输入框状态栏：上下文占用估算（2 字符/token） */
+  contextUsage(sessionId: string): Promise<SessionContextUsage>
+  /** 手动压缩较早历史；摘要由当前默认模型生成 */
+  compact(sessionId: string): Promise<CompactResult>
   onEvent(handler: (payload: unknown) => void): () => void
   onChunks(handler: (payload: unknown) => void): () => void
   onTurnFailed(handler: (payload: unknown) => void): () => void
@@ -109,8 +125,46 @@ export interface AgentBridge {
   resume(sessionId: string): Promise<unknown>
 }
 
-export interface FileCheckpointMeta {
-  readonly checkpointId: string
+export interface SessionContextUsage {
+  readonly contextWindowTokens: number | null
+  readonly usedTokens: number
+  readonly percent: number | null
+  readonly usageSource: 'provider' | 'mixed' | 'estimate'
+  readonly measurement: {
+    readonly revision: number
+    readonly surfaceTokens: number
+    readonly systemTokens: number
+    readonly toolSchemaTokens: number
+    readonly total: number
+    readonly observedInputTokens: number
+    readonly observedOutputTokens: number
+    readonly providerTotal?: number | undefined
+    readonly providerDeltaTokens?: number | undefined
+  }
+}
+
+export interface CompactResult {
+  readonly status: 'compacted' | 'not-beneficial' | 'invalid-range' | 'tool-boundary' | 'active-transaction'
+  readonly originalChars: number
+  readonly summaryChars: number
+  readonly compactionId?: string | undefined
+}
+
+export interface WorkspaceGitInfo {
+  readonly isRepo: boolean
+  readonly branch: string | null
+  readonly mode: 'local' | 'worktree'
+}
+
+export interface WorkspaceInfoBridge {
+  gitInfo(path: string): Promise<WorkspaceGitInfo>
+}
+
+export function workspaceInfoBridge(): WorkspaceInfoBridge | undefined {
+  return (globalThis as unknown as { lcode?: { workspace?: WorkspaceInfoBridge } }).lcode?.workspace
+}
+
+export interface FileCheckpointMeta {  readonly checkpointId: string
   readonly turn: number
   readonly endSeq: number
   readonly createdAt: number

@@ -34,7 +34,7 @@ export function createBuiltinRuntimeProfile(
   }
   const spine: InternalBundleEntry = {
     id: 'lcode-spine',
-    requires: ['sessions', 'agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'autoCompaction', 'skills', 'presets', 'plugins'],
+    requires: ['sessions', 'agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'skills', 'presets', 'plugins'],
     provides: [],
     mount: mountSpine,
   }
@@ -78,7 +78,7 @@ export function createBuiltinRuntimeProfile(
   const agent: InternalBundleEntry = {
     id: 'agent-local',
     requires: ['llm', 'agentDefaultModel', 'modelRouting', 'sessions', 'tools', 'systemPrompt', 'jobs', 'terminals'],
-    provides: ['agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'autoCompaction'],
+    provides: ['agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction'],
     mount: mountAgent,
   }
   return { id, bundles: [sessions, execution, tooling, model, modelRouting, policy, extensions, codeRuntime, agent, spine, ...extras] }

@@ -84,6 +84,9 @@ importers:
       '@lcode/lcode-desktop':
         specifier: workspace:*
         version: link:../../packages/bundle/lcode-desktop
+      '@lcode/model-api':
+        specifier: workspace:*
+        version: link:../../packages/api/model-api
       '@lcode/session':
         specifier: workspace:*
         version: link:../../packages/core/session
@@ -259,9 +262,6 @@ importers:
       '@lcode/compaction':
         specifier: workspace:*
         version: link:../../compaction/compaction
-      '@lcode/compaction-policy':
-        specifier: workspace:*
-        version: link:../../compaction/compaction-policy
       '@lcode/compaction-prune':
         specifier: workspace:*
         version: link:../../compaction/compaction-prune
@@ -464,30 +464,6 @@ importers:
         specifier: workspace:*
         version: link:../../util
 
-  packages/compaction/compaction-policy:
-    dependencies:
-      '@lcode/agent':
-        specifier: workspace:*
-        version: link:../../core/agent
-      '@lcode/agent-loop':
-        specifier: workspace:*
-        version: link:../../core/agent-loop
-      '@lcode/compaction':
-        specifier: workspace:*
-        version: link:../compaction
-      '@lcode/context':
-        specifier: workspace:*
-        version: link:../../core/context
-      '@lcode/context-budget':
-        specifier: workspace:*
-        version: link:../../context/context-budget
-      '@lcode/session':
-        specifier: workspace:*
-        version: link:../../core/session
-      '@lcode/util':
-        specifier: workspace:*
-        version: link:../../util
-
   packages/compaction/compaction-prune:
     dependencies:
       '@lcode/agent-loop':
@@ -538,21 +514,12 @@ importers:
 
   packages/context/context-budget:
     dependencies:
-      '@lcode/agent':
-        specifier: workspace:*
-        version: link:../../core/agent
-      '@lcode/agent-loop':
-        specifier: workspace:*
-        version: link:../../core/agent-loop
       '@lcode/context':
         specifier: workspace:*
         version: link:../../core/context
       '@lcode/session':
         specifier: workspace:*
         version: link:../../core/session
-      '@lcode/system-prompt':
-        specifier: workspace:*
-        version: link:../../core/system-prompt
       '@lcode/tools':
         specifier: workspace:*
         version: link:../../core/tools

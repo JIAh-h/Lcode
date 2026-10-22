@@ -44,8 +44,10 @@ export interface CustomModelInput {
   readonly api_key_ref: string
   /** 可选的模型白名单覆盖（网关上常用来收窄可选模型） */
   readonly models?: readonly string[] | undefined
-  /** 输入窗口（用户可覆盖；缺省则用适配器兜底） */
+  /** 输入窗口（用户可覆盖；缺省则用供应商返回的模型上限） */
   readonly context_window_in?: number | undefined
+  /** 供应商返回的窗口上限（保存时探测，只读缓存；用户输入不能超过它） */
+  readonly context_window_max?: number | undefined
   /** 输出上限（同上） */
   readonly context_window_out?: number | undefined
 }
@@ -170,6 +172,7 @@ function validate(config: CustomModelInput): CustomModelConfig {
     api_key_ref: config.api_key_ref.trim(),
     ...(config.models === undefined ? {} : { models: [...config.models] }),
     ...(config.context_window_in === undefined ? {} : { context_window_in: config.context_window_in }),
+    ...(config.context_window_max === undefined ? {} : { context_window_max: config.context_window_max }),
     ...(config.context_window_out === undefined ? {} : { context_window_out: config.context_window_out }),
   }
 }
@@ -193,6 +196,7 @@ function toConfig(value: unknown): CustomModelConfig | null {
     api_key_ref: typeof record['api_key_ref'] === 'string' ? record['api_key_ref'] : '',
     ...(Array.isArray(models) ? { models: models.filter((m): m is string => typeof m === 'string') } : {}),
     ...(typeof record['context_window_in'] === 'number' ? { context_window_in: record['context_window_in'] } : {}),
+    ...(typeof record['context_window_max'] === 'number' ? { context_window_max: record['context_window_max'] } : {}),
     ...(typeof record['context_window_out'] === 'number' ? { context_window_out: record['context_window_out'] } : {}),
   }
 }

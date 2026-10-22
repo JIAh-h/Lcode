@@ -1,6 +1,6 @@
 import type { Context } from '@lcode/context'
 import type { ModelSelection as CoreModelSelection } from '@lcode/agent-default-model'
-import type { LlmAdapter } from '@lcode/llm'
+import type { LlmAdapter, ModelLimits } from '@lcode/llm'
 import { ERROR_CODES, LcodeErrorImpl, withTimeout, TimeoutError } from '@lcode/util'
 import { ValueStream } from './types.ts'
 import type { ModelInfo, ModelSelection, ProbeFailure, ProbeResult, ProviderInfo } from './types.ts'
@@ -48,6 +48,7 @@ export interface CustomModelStoreLike {
       readonly api_key_ref: string
       readonly models?: readonly string[] | undefined
       readonly context_window_in?: number | undefined
+      readonly context_window_max?: number | undefined
       readonly context_window_out?: number | undefined
     }[]
   >
@@ -66,6 +67,9 @@ export interface CustomModelStoreLike {
     readonly base_url: string
     readonly api_key_ref: string
     readonly models?: readonly string[] | undefined
+    readonly context_window_in?: number | undefined
+    readonly context_window_max?: number | undefined
+    readonly context_window_out?: number | undefined
   }): Promise<{ readonly name: string; readonly api_key_ref: string }>
   remove(name: string): Promise<{ readonly removed: boolean }>
 }
@@ -85,6 +89,12 @@ export interface CustomModelInfo {
   readonly base_url: string
   readonly api_key_ref: string
   readonly models?: readonly string[] | undefined
+  /** 输入上下文窗口（tokens）；缺省表示使用供应商返回的上限 */
+  readonly context_window_in?: number | undefined
+  /** 供应商返回的窗口上限（探测缓存，只读） */
+  readonly context_window_max?: number | undefined
+  /** 输出上限（tokens）；缺省表示使用模型默认值 */
+  readonly context_window_out?: number | undefined
 }
 
 function toCustomInfo(config: {
@@ -94,6 +104,9 @@ function toCustomInfo(config: {
   readonly base_url: string
   readonly api_key_ref: string
   readonly models?: readonly string[] | undefined
+  readonly context_window_in?: number | undefined
+  readonly context_window_max?: number | undefined
+  readonly context_window_out?: number | undefined
 }): CustomModelInfo {
   return {
     name: config.name,
@@ -102,6 +115,9 @@ function toCustomInfo(config: {
     base_url: config.base_url,
     api_key_ref: config.api_key_ref,
     ...(config.models === undefined ? {} : { models: config.models }),
+    ...(config.context_window_in === undefined ? {} : { context_window_in: config.context_window_in }),
+    ...(config.context_window_max === undefined ? {} : { context_window_max: config.context_window_max }),
+    ...(config.context_window_out === undefined ? {} : { context_window_out: config.context_window_out }),
   }
 }
 
@@ -112,6 +128,19 @@ function toCustomInfo(config: {
  */
 function refNameFor(name: string): string {
   return `${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_API_KEY`
+}
+
+/** 上下文窗口是预算判定的输入：允许缺省（用适配器兜底），但给了就必须是正整数 */
+function assertWindow(value: number | undefined, field: string): void {
+  if (value === undefined) return
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new LcodeErrorImpl({
+      code: ERROR_CODES.EC_INVALID_PARAMS,
+      message: `${field} 必须是正整数：${String(value)}`,
+      userMessage: '上下文窗口必须是正整数。',
+      retryable: false,
+    })
+  }
 }
 
 export class LocalModelApi {
@@ -150,7 +179,38 @@ export class LocalModelApi {
   }
 
   /**
-   * `model.probe`：连通性自检。**返回归因而非抛错**（docs/21 §2.7 六类归因）。
+   * 读供应商对单个模型的资源上限。**永不抛错**：拿不到就返回空对象，
+   * 设置页据此回落到保守值。窗口不是用户必填项，不能因为网络问题卡住保存。
+   */
+  async modelLimits(input: { readonly provider: string; readonly model: string }): Promise<ModelLimits> {
+    const provider = input.provider.trim()
+    const model = input.model.trim()
+    if (provider === '' || model === '') return {}
+    const adapter = this.deps.ctx.get('llm').get(provider)
+    if (adapter === undefined) return {}
+    // 用 bind 保住 this：适配器的方法内部要读自己的端点和凭据
+    const describe = adapter.describeModel?.bind(adapter)
+    if (describe !== undefined) {
+      try {
+        const detail = await withTimeout(
+          (signal) => describe({ provider, model }, { signal }),
+          Math.min(this.timeoutMs, 10_000),
+        )
+        if (detail.contextWindow !== undefined || detail.maxOutputTokens !== undefined) return detail
+      } catch {
+        // 详情接口不是协议标准：404/不支持都回落到列表
+      }
+    }
+    try {
+      const models = await withTimeout((signal) => adapter.listModels(signal), Math.min(this.timeoutMs, 10_000))
+      const found = models.find((candidate) => candidate.id === model)
+      return found?.contextWindow === undefined ? {} : { contextWindow: found.contextWindow }
+    } catch {
+      return {}
+    }
+  }
+
+  /** `model.probe`：连通性自检。**返回归因而非抛错**（docs/21 §2.7 六类归因）。
    * `base_url` 供批次④的真实适配器使用（replay 适配器忽略）。
    */
   async probe(input: {
@@ -232,9 +292,15 @@ export class LocalModelApi {
     readonly api_key?: string
     readonly api_key_ref?: string
     readonly models?: readonly string[]
+    readonly context_window_in?: number
+    readonly context_window_max?: number
+    readonly context_window_out?: number
   }): Promise<{ readonly saved: true; readonly provider: string; readonly api_key_ref: string }> {
     const store = this.requireStore()
     const name = input.name.trim()
+    assertWindow(input.context_window_in, 'context_window_in')
+    assertWindow(input.context_window_max, 'context_window_max')
+    assertWindow(input.context_window_out, 'context_window_out')
 
     // 凭据引用名：用户没给就按 id 推导一个（`CUSTOM_API_KEY` 这类），保持可读
     const refName = (input.api_key_ref ?? '').trim() === '' ? refNameFor(name) : input.api_key_ref!.trim()
@@ -249,6 +315,9 @@ export class LocalModelApi {
       base_url: input.base_url,
       api_key_ref: refName,
       ...(input.models === undefined ? {} : { models: input.models }),
+      ...(input.context_window_in === undefined ? {} : { context_window_in: input.context_window_in }),
+      ...(input.context_window_max === undefined ? {} : { context_window_max: input.context_window_max }),
+      ...(input.context_window_out === undefined ? {} : { context_window_out: input.context_window_out }),
     })
 
     // 只在用户真的填了值时才写凭据——空值表示"这个端点不需要密钥"（本地模型），

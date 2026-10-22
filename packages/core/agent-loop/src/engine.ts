@@ -103,6 +103,19 @@ export type LoopHandle = AgentHandle & {
   guideQueued(queueId: string): boolean;
 };
 
+/** 一次请求的结局：取消，或一条完整的 assistant 消息 */
+type StreamOutcome =
+  | { readonly kind: "cancelled" }
+  | {
+      readonly kind: "done";
+      readonly message: AssistantMessage;
+      readonly usage?: TokenUsage;
+      readonly rawArgs: Map<string, string>;
+    };
+
+/** 每轮最多做几次"压缩后重试"，防止压缩空间不足时无限循环 */
+const MAX_CONTEXT_RECOVERIES = 2;
+
 export class TurnEngine {
   private readonly queue: QueueItem[] = [];
   private nextQueueId = 0;
@@ -402,6 +415,7 @@ export class TurnEngine {
 
     let reason: TurnEndReason = "completed";
     let stepOpened = false;
+    let recoveryAttempts = 0;
     let step = 0;
 
     try {
@@ -490,54 +504,37 @@ export class TurnEngine {
           });
         }
 
-        const adapter = this.requireAdapter(turnSelection);
-        const assembled = await this.deps.ctx.get("systemPrompt").assemble({
-          sessionId: this.inner.sessionId,
-          ...(Object.keys(injectedVars).length > 0
-            ? { variables: injectedVars }
-            : {}),
-        });
-        const system = item.continuation
-          ? `${assembled.system}\n\n上一个执行回合已被用户暂停。请基于当前对话继续未完成的任务，不要重复已经完成的工作。`
-          : assembled.system;
-        const messages = session.deriveMessages();
-
-        const prepared = await adapter.prepareCall(toCallSelection(turnSelection), {
-          signal,
-        });
-        // 协作点：请求配置可被替换（模型替换 / 降级）。处理器原地改 args.call 后 next()。
-        const wf: { call: PreparedCall } = { call: prepared };
-        const finalPrepared = await this.deps.ctx.waterfall<
-          "agent/request",
-          { call: PreparedCall },
-          PreparedCall
-        >("agent/request", wf, undefined, async () => wf.call);
-
-        const header = {
-          provider: finalPrepared.provider,
-          model: finalPrepared.model,
-          system,
-          tools: snapshotTools(assembled.tools),
-          systemFingerprint: fingerprintOf(system),
-          toolsFingerprint: toolsFingerprintOf(assembled.tools),
-        };
-        session.append({
-          type: "request/header",
-          data: { header, reason: headerReason(session.events(), header) },
-        });
-
-        // ── 流式消费 ──
-        const outcome = await this.consumeStream(
-          adapter,
-          withBody(
-            finalPrepared,
-            buildRequestBody(system, messages, assembled.tools),
-          ),
-          signal,
-          session,
-          turn,
-          step,
-        );
+        /*
+         * 构建请求 + 流式消费。失败时给恢复链一次机会（上下文溢出 → 压缩 → 重试）；
+         * 重试必须重新 assemble / deriveMessages，因为压缩改的是**日志表面**。
+         */
+        let outcome: StreamOutcome;
+        for (;;) {
+          try {
+            outcome = await this.executeRequest({
+              session,
+              turn,
+              step,
+              selection: turnSelection,
+              continuation: item.continuation === true,
+              injectedVars,
+              signal,
+            });
+            break;
+          } catch (err) {
+            if (recoveryAttempts >= MAX_CONTEXT_RECOVERIES) throw err;
+            if (!(await this.tryRecoverRequest({ session, turn, step, error: err, signal }))) throw err;
+            recoveryAttempts += 1;
+            // 失败的那一步也要闭合，日志里才不会留下一个没有终点的 step
+            if (stepOpened) {
+              session.append({ type: "step/end", data: { turn, step } });
+              stepOpened = false;
+            }
+            step += 1;
+            stepOpened = true;
+            session.append({ type: "step/start", data: { turn, step } });
+          }
+        }
         if (outcome.kind === "cancelled") {
           reason = "cancelled";
           break;
@@ -662,6 +659,112 @@ export class TurnEngine {
   }
 
   /** 流式消费：逐 chunk 落盘 + 聚合；返回本步的最终消息（或取消标记） */
+  /**
+   * 构建并执行一次请求。重试路径复用同一份 `injectedVars`（注入只在本轮有效），
+   * 但 system / messages 必须重新从日志派生——压缩改的是表面。
+   */
+  private async executeRequest(input: {
+    session: SessionService;
+    turn: number;
+    step: number;
+    selection: ModelSelection;
+    continuation: boolean;
+    injectedVars: Record<string, string>;
+    signal: AbortSignal;
+  }): Promise<StreamOutcome> {
+    const adapter = this.requireAdapter(input.selection);
+    const assembled = await this.deps.ctx.get("systemPrompt").assemble({
+      sessionId: this.inner.sessionId,
+      ...(Object.keys(input.injectedVars).length > 0
+        ? { variables: input.injectedVars }
+        : {}),
+    });
+    const system = input.continuation
+      ? `${assembled.system}\n\n上一个执行回合已被用户暂停。请基于当前对话继续未完成的任务，不要重复已经完成的工作。`
+      : assembled.system;
+    const messages = input.session.deriveMessages();
+
+    const prepared = await adapter.prepareCall(toCallSelection(input.selection), {
+      signal: input.signal,
+    });
+    // 协作点：请求配置可被替换（模型替换 / 降级）。处理器原地改 args.call 后 next()。
+    const wf: { call: PreparedCall } = { call: prepared };
+    const finalPrepared = await this.deps.ctx.waterfall<
+      "agent/request",
+      { call: PreparedCall },
+      PreparedCall
+    >("agent/request", wf, undefined, async () => wf.call);
+
+    const header = {
+      provider: finalPrepared.provider,
+      model: finalPrepared.model,
+      system,
+      tools: snapshotTools(assembled.tools),
+      systemFingerprint: fingerprintOf(system),
+      toolsFingerprint: toolsFingerprintOf(assembled.tools),
+    };
+    input.session.append({
+      type: "request/header",
+      data: { header, reason: headerReason(input.session.events(), header) },
+    });
+
+    return await this.consumeStream(
+      adapter,
+      withBody(
+        finalPrepared,
+        buildRequestBody(system, messages, assembled.tools),
+      ),
+      input.signal,
+      input.session,
+      input.turn,
+      input.step,
+    );
+  }
+
+  /**
+   * 请求失败的恢复协作点。默认不恢复；只有处理器明确返回 `{ retry: true }`
+   * （且已经推进了表面）才重试。恢复链自己抛错时保留原始错误。
+   */
+  private async tryRecoverRequest(input: {
+    session: SessionService;
+    turn: number;
+    step: number;
+    error: unknown;
+    signal: AbortSignal;
+  }): Promise<boolean> {
+    if (input.signal.aborted) return false;
+    try {
+      const result = await this.deps.ctx.waterfall<
+        "agent/request-error",
+        {
+          agentId: string;
+          sessionId: string;
+          session: SessionService;
+          turn: number;
+          step: number;
+          error: unknown;
+        },
+        { readonly retry: boolean }
+      >(
+        "agent/request-error",
+        {
+          agentId: this.inner.id,
+          sessionId: this.inner.sessionId,
+          session: input.session,
+          turn: input.turn,
+          step: input.step,
+          error: input.error,
+        },
+        undefined,
+        async () => ({ retry: false }),
+      );
+      return result.retry === true;
+    } catch {
+      // 恢复失败不能掩盖原始错误（L3：取消之外不吞异常，但这里吞的是"恢复链自己"的错误）
+      return false;
+    }
+  }
+
   private async consumeStream(
     adapter: LlmAdapter,
     call: PreparedCall,
@@ -669,15 +772,7 @@ export class TurnEngine {
     session: SessionService,
     turn: number,
     step: number,
-  ): Promise<
-    | { kind: "cancelled" }
-    | {
-        kind: "done";
-        message: AssistantMessage;
-        usage?: TokenUsage;
-        rawArgs: Map<string, string>;
-      }
-  > {
+  ): Promise<StreamOutcome> {
     let text = "";
     let usage: TokenUsage | undefined;
     let done: AssistantMessage | undefined;

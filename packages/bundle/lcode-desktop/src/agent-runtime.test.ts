@@ -343,12 +343,12 @@ describe('A. 装配的接线正确性', () => {
           id: 'agent-local',
           adopts: [],
           requires: ['llm', 'agentDefaultModel', 'modelRouting', 'sessions', 'tools', 'systemPrompt', 'jobs', 'terminals'],
-          provides: ['agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'autoCompaction'],
+          provides: ['agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction'],
         },
         {
           id: 'lcode-spine',
           adopts: [],
-          requires: ['sessions', 'agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'autoCompaction', 'skills', 'presets', 'plugins'],
+          requires: ['sessions', 'agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'skills', 'presets', 'plugins'],
           provides: [],
         },
       ],
@@ -386,6 +386,121 @@ describe('A. 装配的接线正确性', () => {
     const prompt = rt.ctx.get('systemPrompt')
     const assembled = await prompt.assemble({})
     expect(assembled.system).toContain('Lcode')
+  })
+
+  it('上下文用量：供应商没给上限时保守回落到 128K', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id } = await rt.sessions.create({ cwd: '/repo/web' })
+    rt.sessions.sessionServiceFor(session_id).append({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: '看一下项目结构' }] },
+    })
+
+    const usage = await rt.contextUsage({ sessionId: session_id })
+    expect(usage.contextWindowTokens).toBe(128_000)
+    expect(usage.usedTokens).toBeGreaterThan(0)
+    expect(usage.percent).not.toBeNull()
+    expect(usage.usageSource).toBe('estimate')
+    expect(usage.measurement.surfaceTokens).toBeGreaterThan(0)
+    expect(usage.measurement.systemTokens).toBeGreaterThan(0)
+    expect(usage.measurement.toolSchemaTokens).toBeGreaterThan(0)
+  })
+
+  it('上下文用量：供应商 usage 是实测基线，后续新增内容标为混合估算', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id } = await rt.sessions.create({ cwd: '/repo/web' })
+    const session = rt.sessions.sessionServiceFor(session_id)
+    session.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '看一下项目结构' }] } })
+    session.append({
+      type: 'assistant/message',
+      data: {
+        turn: 1,
+        step: 1,
+        message: { role: 'assistant', content: [{ type: 'text', text: '好的' }] },
+        usage: { input: 1_200, output: 80 },
+      },
+    })
+
+    const measured = await rt.contextUsage({ sessionId: session_id })
+    expect(measured.usageSource).toBe('provider')
+    expect(measured.usedTokens).toBe(1_280)
+    expect(measured.percent).toBe(1)
+
+    session.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '继续' }] } })
+    const mixed = await rt.contextUsage({ sessionId: session_id })
+    expect(mixed.usageSource).toBe('mixed')
+    expect(mixed.usedTokens).toBeGreaterThan(1_280)
+  })
+
+  it('上下文用量：优先用供应商缓存的窗口上限', async () => {
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({
+      model: {
+        providers: [{
+          name: 'custom',
+          label: 'custom',
+          model: 'test-model',
+          base_url: 'http://127.0.0.1:1',
+          api_key_ref: '',
+          context_window_max: 129_024,
+        }],
+      },
+    }, null, 2))
+    const rt = await makeRuntime([textScript])
+    const { session_id } = await rt.sessions.create({ cwd: '/repo/web' })
+    rt.sessions.sessionServiceFor(session_id).append({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: '看一下项目结构' }] },
+    })
+
+    const usage = await rt.contextUsage({ sessionId: session_id })
+    expect(usage.contextWindowTokens).toBe(129_024)
+    expect(usage.usedTokens).toBeGreaterThan(0)
+  })
+
+  it('手动压缩：摘要安全前缀并提交 manual 事务；运行中的轮拒绝', async () => {
+    const rt = await createAgentRuntime({ home, compactionSummarizer: () => '较早历史摘要' })
+    runtime = rt
+    rt.ctx.get('llm').register(new ReplayLlmAdapter([textScript]))
+    await rt.ctx.get('agentDefaultModel').set({ provider: 'custom', model: 'test-model' })
+    const { session_id } = await rt.sessions.create({ cwd: '/repo/web' })
+    const session = rt.sessions.sessionServiceFor(session_id)
+    session.append({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: `旧目标：${'改代码'.repeat(500)}` }] },
+    })
+    session.append({
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '改完了。' }] } },
+    })
+    session.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '继续' }] } })
+
+    const result = await rt.compactSession({ sessionId: session_id })
+    expect(result).toMatchObject({ status: 'compacted' })
+    const derived = await rt.sessions.derive({ session_id })
+    expect(JSON.stringify(derived.messages[0])).toContain('较早历史摘要')
+    expect(JSON.stringify(derived.messages.at(-1))).toContain('继续')
+
+    session.append({ type: 'turn/start', data: { turn: 2 } })
+    await expect(rt.compactSession({ sessionId: session_id })).rejects.toThrow('这一轮还在执行')
+  })
+
+  it('agents.inject 进入本轮系统提示，但不会污染下一轮', async () => {
+    const rt = await makeRuntime([textScript, textScript])
+    const { session_id } = await rt.sessions.create({ cwd: '/repo/web' })
+    const { agent_id } = await rt.agents.create({ session_id })
+
+    await rt.agents.inject({ agent_id, content: [{ type: 'text', text: '宿主提示：a.txt 无法回退' }] })
+    await sendAndWait(rt, agent_id, '第一轮')
+    await sendAndWait(rt, agent_id, '第二轮')
+
+    const systems = rt.sessions
+      .sessionServiceFor(session_id)
+      .events()
+      .filter((event) => event.type === 'request/header')
+      .map((event) => event.data.header.system)
+    expect(systems).toHaveLength(2)
+    expect(systems[0]).toContain('宿主提示：a.txt 无法回退')
+    expect(systems[1]).not.toContain('宿主提示：a.txt 无法回退')
   })
 
   it('P7-01：上下文来源预计算、限于工作区并写入请求审计', async () => {

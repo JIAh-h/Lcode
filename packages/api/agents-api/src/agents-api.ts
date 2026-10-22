@@ -139,7 +139,11 @@ export class LocalAgentsApi {
       const seen = this.dedupe.get(handle.id)?.get(input.dedupe_key)
       if (seen !== undefined) return seen
     }
-    await handle.inject({ content: JSON.stringify(input.content), source: 'agents.inject' })
+    // 纯文本注入按原文交给宿主提示（JSON.stringify 会把一句话变成转义后的数组字面量）
+    const text = input.content.every((block) => block.type === 'text')
+      ? input.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
+      : JSON.stringify(input.content)
+    await handle.inject({ content: text, source: 'agents.inject' })
     const receipt = { accepted: true, seq: this.deps.getSession(handle.sessionId).length } as const
     if (input.dedupe_key !== undefined) {
       const perAgent = this.dedupe.get(handle.id) ?? new Map<string, EnqueueReceipt>()

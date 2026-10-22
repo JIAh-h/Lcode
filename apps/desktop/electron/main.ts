@@ -1,8 +1,10 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, dialog, shell } from "electron";
 import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { promisify } from "node:util";
 import {
   createAgentRuntime,
   createDesktopModelFeature,
@@ -433,6 +435,14 @@ ipcMain.handle("app:close-ack", () => {
   closeAcked = true;
 });
 
+/** 用系统浏览器打开 http(s) 链接（模型输出里的链接只放行这两种协议） */
+ipcMain.handle("app:open-external", (_e: IpcMainInvokeEvent, url: unknown) => {
+  if (typeof url !== "string" || !/^https?:\/\//i.test(url)) {
+    throw new Error("只允许 http/https 链接");
+  }
+  void shell.openExternal(url);
+});
+
 // 选择本地文件夹（首页「选择项目 / 新建项目」、输入区「＋ → 添加文件夹」）
 ipcMain.handle(
   "dialog:choose-folder",
@@ -541,7 +551,32 @@ ipcMain.handle(
       base_url: parsed.base_url,
       ...(parsed.api_key === "" ? {} : { api_key: parsed.api_key }),
       api_key_ref: refNameFor(provider),
+      ...(parsed.context_window_in === undefined ? {} : { context_window_in: parsed.context_window_in }),
+      ...(parsed.context_window_max === undefined ? {} : { context_window_max: parsed.context_window_max }),
+      ...(parsed.context_window_out === undefined ? {} : { context_window_out: parsed.context_window_out }),
     });
+    /*
+     * 供应商上限是“尽量拿到”的元数据：`/models/{id}` 与 `/models` 都不是协议强制项。
+     * 拿到就缓存进配置（运行时预算与设置页滑块都用它），拿不到就保留用户/旧值。
+     * 同时把用户填的窗口夹到上限以内——窗口不能超过供应商给出的输入字段。
+     */
+    const limits = await feature.api.modelLimits({ provider, model: parsed.model });
+    const effectiveMax = limits.contextWindow ?? parsed.context_window_max;
+    /*
+     * 用户显式设的窗口**不夹到供应商上报值以内**：百炼那类网关报的是部署默认 env
+     * （实测 129024）而实际能接受更长输入，夹了就等于把用户手动调大的上限吃掉。
+     */
+    if (effectiveMax !== parsed.context_window_max) {
+      await feature.saveCustom({
+        name: provider,
+        label: parsed.label,
+        model: parsed.model,
+        base_url: parsed.base_url,
+        api_key_ref: saved.api_key_ref,
+        ...(parsed.context_window_in === undefined ? {} : { context_window_in: parsed.context_window_in }),
+        ...(effectiveMax === undefined ? {} : { context_window_max: effectiveMax }),
+      });
+    }
     /*
      * **第一个配好的模型自动成为默认**。
      *
@@ -557,7 +592,61 @@ ipcMain.handle(
         selection: { provider, model: parsed.model },
       });
     }
-    return saved;
+    return { ...saved, context_window_max: effectiveMax ?? null };
+  },
+);
+
+ipcMain.handle(
+  "lcode:model.limits",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    const provider = record["provider"];
+    const model = record["model"];
+    if (typeof provider !== "string" || provider === "") return {};
+    if (typeof model !== "string" || model === "") return {};
+    const feature = await models();
+    return await feature.api.modelLimits({ provider, model });
+  },
+);
+
+ipcMain.handle(
+  "lcode:model.discover",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    const baseUrl = record["base_url"] ?? record["baseUrl"];
+    const apiKey = record["api_key"] ?? record["apiKey"] ?? "";
+    const credentialRef = record["credential_ref"];
+    if (typeof baseUrl !== "string" || baseUrl.trim() === "")
+      throw new Error("base_url 必填");
+    if (typeof apiKey !== "string") throw new Error("api_key 必须是字符串");
+    const feature = await models();
+    // 未保存的配置只用于探测：不落 settings、不落凭据
+    return await feature.discover({
+      base_url: baseUrl,
+      api_key: apiKey,
+      ...(typeof credentialRef === "string" && credentialRef !== "" ? { credential_ref: credentialRef } : {}),
+    });
+  },
+);
+
+ipcMain.handle(
+  "lcode:model.limitsUnsaved",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    const baseUrl = record["base_url"] ?? record["baseUrl"];
+    const model = record["model"];
+    const apiKey = record["api_key"] ?? record["apiKey"] ?? "";
+    const credentialRef = record["credential_ref"];
+    if (typeof baseUrl !== "string" || baseUrl.trim() === "") return {};
+    if (typeof model !== "string" || model === "") return {};
+    if (typeof apiKey !== "string") return {};
+    const feature = await models();
+    return await feature.limitsUnsaved({
+      base_url: baseUrl,
+      model,
+      api_key: apiKey,
+      ...(typeof credentialRef === "string" && credentialRef !== "" ? { credential_ref: credentialRef } : {}),
+    });
   },
 );
 
@@ -1128,6 +1217,56 @@ ipcMain.handle("lcode:session.checkpoint.restore", async (_e: IpcMainInvokeEvent
   return result;
 });
 
+const execFileAsync = promisify(execFile);
+
+ipcMain.handle("lcode:session.contextUsage", async (_e: IpcMainInvokeEvent, sessionId: unknown) => {
+  if (typeof sessionId !== "string" || sessionId === "") throw new Error("session_id 必填");
+  const rt = await agentRuntime();
+  await rt.sessions.resume({ session_id: sessionId });
+  return rt.contextUsage({ sessionId });
+});
+
+ipcMain.handle("lcode:session.compact", async (_e: IpcMainInvokeEvent, sessionId: unknown) => {
+  if (typeof sessionId !== "string" || sessionId === "") throw new Error("session_id 必填");
+  const rt = await agentRuntime();
+  await rt.sessions.resume({ session_id: sessionId });
+  const result = await rt.compactSession({ sessionId });
+  pushToRenderer("lcode:session.changed", { session_id: sessionId });
+  return result;
+});
+
+/**
+ * 输入框状态栏用：工作区是不是 Git 仓库、当前分支、是否 linked worktree。
+ * 只读命令、2s 超时；不是仓库/没装 git 都回 local，不把 UI 卡住。
+ */
+ipcMain.handle("lcode:workspace.gitInfo", async (_e: IpcMainInvokeEvent, workspace: unknown) => {
+  if (typeof workspace !== "string" || workspace === "") return { isRepo: false, branch: null, mode: "local" };
+  return await workspaceGitInfo(workspace);
+});
+
+async function workspaceGitInfo(workspace: string): Promise<{ isRepo: boolean; branch: string | null; mode: "local" | "worktree" }> {
+  const run = async (...args: string[]): Promise<string> => {
+    const { stdout } = await execFileAsync("git", ["-C", workspace, ...args], {
+      timeout: 2_000,
+      windowsHide: true,
+      maxBuffer: 64 * 1024,
+    });
+    return stdout.trim();
+  };
+  try {
+    if ((await run("rev-parse", "--is-inside-work-tree")) !== "true") {
+      return { isRepo: false, branch: null, mode: "local" };
+    }
+    let branch = await run("rev-parse", "--abbrev-ref", "HEAD");
+    if (branch === "HEAD") branch = await run("rev-parse", "--short", "HEAD");
+    const gitDir = await run("rev-parse", "--git-dir");
+    const commonDir = await run("rev-parse", "--git-common-dir");
+    const mode = resolve(workspace, gitDir) === resolve(workspace, commonDir) ? "local" : "worktree";
+    return { isRepo: true, branch: branch === "" ? null : branch, mode };
+  } catch {
+    return { isRepo: false, branch: null, mode: "local" };
+  }
+}
 // ─────────────── 活动任务（P3-04） ───────────────
 //
 // jobs / terminals 是本桌面主进程的内存资源，不是会话日志的一部分。渲染进程只能按
@@ -1309,6 +1448,159 @@ ipcMain.handle(
     return { ...receipt, agent_id };
   },
 );
+
+ipcMain.handle(
+  "lcode:session.rewindSend",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    const sessionId = record["session_id"];
+    const toSeq = record["to_seq"];
+    const text = record["text"];
+    if (typeof sessionId !== "string" || sessionId === "")
+      throw new Error("session_id 必填");
+    if (typeof toSeq !== "number" || !Number.isInteger(toSeq) || toSeq < 0)
+      throw new Error("to_seq 非法");
+    if (typeof text !== "string" || text.trim() === "")
+      throw new Error("text 必填");
+
+    const rt = await agentRuntime();
+    const events = rt.sessions.sessionServiceFor(sessionId).events();
+
+    /*
+     * 只允许撤回**最后一条**用户消息。更早的轮次后面还压着别的记录，
+     * 删掉它们不是"重新编辑这句话"，而是静默丢弃后续对话。
+     */
+    const lastUser = [...events].reverse().find((event) => event.type === "user/message");
+    if (lastUser?.seq !== toSeq) throw new Error("只能重新编辑最新一条提问");
+    if (events[toSeq]?.type !== "user/message") throw new Error("回退目标不是用户消息");
+
+    const boundary = [...events]
+      .reverse()
+      .find((event) => event.type === "turn/start" || event.type === "turn/end");
+    if (boundary?.type === "turn/start") throw new Error("这一轮还在执行，先暂停再编辑");
+
+    // 这一轮改过哪些文件（没有检查点可回退时，用来告诉用户/模型哪些改动没撤销）
+    const changedPaths = new Set<string>();
+    for (const event of events.slice(toSeq)) {
+      if (event.type !== "tool/result") continue;
+      const meta = event.data.meta as unknown as { changes?: unknown } | undefined;
+      const changes = meta?.changes;
+      if (!Array.isArray(changes)) continue;
+      for (const change of changes) {
+        const path = (change as { path?: unknown }).path;
+        if (typeof path === "string" && path !== "") changedPaths.add(path);
+      }
+    }
+
+    /*
+     * ① 先截断权威日志，再回退文件。
+     *
+     * 顺序反过来（先回退文件）的问题是：回退会追加 `checkpoint/restored`，而截断失败时
+     * 工作区已经被改写、日志却还留着那一轮——用户看到"记录还在，文件却变了"。
+     * 先截断则最坏情况是"记录已撤回、文件没退成"，后者仍可继续（下面会告诉模型/用户）。
+     */
+    const rewound = await rt.sessions.rewind({ session_id: sessionId, to_seq: toSeq });
+
+    /*
+     * ② 文件回退：退到"这一轮开始之前"= 上一个已闭合轮的检查点。
+     *
+     * 只有 `endSeq < toSeq` 的检查点才可能早于本轮；它可能不完整（二进制/超大/
+     * 符号链接文件从来没备份），此时 `allowPartial` 让能回退的照常回退，
+     * 碰不得的原样留在磁盘上并如实报出来——绝不为了"删干净"去做无备份删除。
+     */
+    const workspaceRoot = rt.sessions.workspaceOf(sessionId);
+    const prior = [...(await rt.checkpoints.list(sessionId))]
+      .reverse()
+      .find((entry) => entry.endSeq < toSeq);
+    let restoredPaths: string[] = [];
+    let removedPaths: string[] = [];
+    let unrestoredPaths: string[] = [];
+    if (workspaceRoot !== undefined && prior !== undefined) {
+      try {
+        const restored = await rt.checkpoints.restore({
+          sessionId,
+          workspaceRoot,
+          session: rt.sessions.sessionServiceFor(sessionId),
+          checkpointId: prior.checkpointId,
+          allowPartial: true,
+        });
+        restoredPaths = [...restored.restoredPaths];
+        removedPaths = [...restored.removedPaths];
+        unrestoredPaths = [...restored.unrestoredPaths];
+      } catch {
+        // 备份本身坏了/读不出来：文件一个都没动，全部算"无法回退"
+        unrestoredPaths = [...changedPaths].sort();
+      }
+    } else if (workspaceRoot !== undefined && changedPaths.size > 0) {
+      // 第一轮就没有"修改前"的快照：没有依据把文件写回去，只能交给模型重新生成
+      unrestoredPaths = [...changedPaths].sort();
+    }
+    // 被撤回那一轮的检查点不能再参与"最新状态"计算，否则下一次 capture 会继承已撤回的改动
+    await rt.checkpoints.discardFrom(sessionId, toSeq);
+
+    rt.sessions.sessionServiceFor(sessionId).append({
+      type: "session/rewound",
+      data: {
+        toSeq,
+        discarded: rewound.discarded,
+        restoredPaths,
+        removedPaths,
+        unrestoredPaths,
+      },
+    });
+
+    /*
+     * ③ 订阅换到新的内存镜像上。
+     *
+     * `rewind` 换掉了整只 store，而 `ensureSessionWatch` 的撤销器绑的是**旧 store**；
+     * 不重订的话，新轮的事件一条也到不了界面（表现为"点了重发，界面纹丝不动"）。
+     */
+    sessionWatch.get(sessionId)?.();
+    sessionWatch.delete(sessionId);
+    turnFailureWatch.get(sessionId)?.();
+    turnFailureWatch.delete(sessionId);
+    reportedTurnErrors.delete(sessionId);
+
+    const { agent_id } = await rt.agents.resume({ session_id: sessionId });
+    // 旧轮遗留的待发送消息属于被撤回的那一轮，清掉再重发
+    await rt.agents.clearQueued({ agent_id });
+    await ensureSessionWatch(sessionId);
+    watchTurnFailure(sessionId);
+
+    /*
+     * 无法回退的文件交给模型处理：注入一段**只进本轮上下文**的宿主提示
+     * （经 systemPrompt 的 injected_* 变量进入请求），让它在回复里说清楚
+     * 哪些改动没撤销、并把需要的内容重新生成出来。
+     */
+    if (unrestoredPaths.length > 0) {
+      await rt.agents.inject({
+        agent_id,
+        content: [{ type: "text", text: rewindNotice(unrestoredPaths) }],
+      });
+    }
+
+    const receipt = await rt.agents.followup({
+      agent_id,
+      content: [{ type: "text", text }],
+    });
+    pushToRenderer("lcode:session.changed", { session_id: sessionId });
+    return {
+      ...receipt,
+      agent_id,
+      rewind: { ...rewound, restored: restoredPaths, removed: removedPaths, unrestored: unrestoredPaths },
+    };
+  },
+);
+
+/** 回退失败时给模型的宿主提示（不进用户可见消息，只进本轮系统上下文）。 */
+function rewindNotice(paths: readonly string[]): string {
+  return [
+    "宿主提示（不是用户的新消息）：用户撤回了上一轮任务并重写了提问，相关记录已删除。",
+    "上一轮修改过、但无法自动回退的文件：",
+    ...paths.map((path) => `- ${path}`),
+    "如果本次任务涉及这些文件，请重新生成它们；并在最终回复里明确告知用户哪些改动没能回退。",
+  ].join("\n");
+}
 
 ipcMain.handle(
   "lcode:agent.cancel",
@@ -1502,6 +1794,9 @@ interface SaveInput {
   readonly model: string;
   readonly base_url: string;
   readonly api_key: string;
+  readonly context_window_in?: number;
+  readonly context_window_max?: number;
+  readonly context_window_out?: number;
 }
 
 /** 收窄渲染层传来的形状（**渲染进程是不受信的**，21 §1.1 边界②） */
@@ -1522,12 +1817,23 @@ function parseSaveInput(input: unknown): SaveInput {
   // **非空校验不在这里**：权威那一处是 CustomModelStore.validate，
   // 这里再写一遍会出现两套规则互相追不上的情况。
   const trimmedModel = typeof model === "string" ? model.trim() : "";
+  const windowIn = parsePositiveInteger(record["context_window_in"]);
+  const windowMax = parsePositiveInteger(record["context_window_max"]);
+  const windowOut = parsePositiveInteger(record["context_window_out"]);
   return {
     label: label.trim(),
     model: trimmedModel === "" ? label.trim() : trimmedModel,
     base_url: baseUrl.trim(),
     api_key: apiKey,
+    ...(windowIn === undefined ? {} : { context_window_in: windowIn }),
+    ...(windowMax === undefined ? {} : { context_window_max: windowMax }),
+    ...(windowOut === undefined ? {} : { context_window_out: windowOut }),
   };
+}
+
+function parsePositiveInteger(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isInteger(value) || value <= 0) return undefined;
+  return value;
 }
 
 function parseProbeInput(input: unknown): { provider: string; model?: string } {

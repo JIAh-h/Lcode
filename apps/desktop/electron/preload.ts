@@ -33,6 +33,8 @@ const api = {
     ipcRenderer.invoke('app:close-answer', input),
   /** 已展示自绘确认框（主进程据此不再回落原生对话框） */
   ackClose: (): Promise<void> => ipcRenderer.invoke('app:close-ack'),
+  /** 用系统浏览器打开链接（仅 http/https） */
+  openExternal: (url: string): Promise<void> => ipcRenderer.invoke('app:open-external', url),
   /** 侧栏本地视图状态（置顶 / 归档 / 折叠） */
   getSidebar: (): Promise<unknown> => ipcRenderer.invoke('app:get-sidebar'),
   setSidebar: (input: unknown): Promise<unknown> => ipcRenderer.invoke('app:set-sidebar', input),
@@ -48,6 +50,12 @@ const api = {
     list: (): Promise<unknown> => ipcRenderer.invoke('lcode:model.list'),
     /** 保存一份自定义模型（含 API Key；值由主进程写进凭据存储，不进 settings） */
     save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:model.save', input),
+    /** 供应商对单个模型给出的资源上限（拿不到返回空对象） */
+    limits: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:model.limits', input),
+    /** 用未保存的 URL/Key 探测可用模型（测试连接） */
+    discover: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:model.discover', input),
+    /** 用未保存的 URL/Key 查单个模型的窗口上限（下拉选中后用） */
+    limitsUnsaved: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:model.limitsUnsaved', input),
     remove: (name: string): Promise<unknown> => ipcRenderer.invoke('lcode:model.remove', name),
     /** 连通性自检（"测试连接"）。**永不抛错**，返回六类归因之一 */
     probe: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:model.probe', input),
@@ -82,6 +90,12 @@ const api = {
     checkpoints: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.checkpoints', input),
     fileCheckpoints: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.fileCheckpoints', input),
     restoreCheckpoint: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.checkpoint.restore', input),
+    /** 编辑后重发：回退文件与日志到该提问之前，再把它重新发出去 */
+    rewindSend: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.rewindSend', input),
+    /** 输入框状态栏：当前会话的上下文占用估算 */
+    contextUsage: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:session.contextUsage', sessionId),
+    /** 手动压缩较早历史（当前默认模型生成摘要） */
+    compact: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:session.compact', sessionId),
     /** 订阅结构/表面事件（即时） */
     onEvent: (handler: (payload: unknown) => void): (() => void) => {
       const listener = (_e: unknown, payload: unknown): void => handler(payload)
@@ -133,6 +147,10 @@ const api = {
   workspaceTrust: {
     list: (): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.list'),
     set: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.set', input),
+  },
+  /** 输入框状态栏：工作区 Git 信息（只读） */
+  workspace: {
+    gitInfo: (path: string): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitInfo', path),
   },
   permissions: {
     get: (): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.get'),

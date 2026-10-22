@@ -44,7 +44,48 @@ describe('P7-02 local compaction', () => {
     ])
   })
 
-  it('无收益、工具边界和未闭合事务均 fail-closed', () => {
+  it('完整的工具调用事务可以压缩，拆散配对仍然拒绝', () => {
+    const store = new InMemorySessionStore(asSessionId('tool-compaction'))
+    store.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '旧目标：先读文件。' }] } })
+    store.append({
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'c1', name: 'read', input: { path: 'a.ts' } }] } },
+    })
+    store.append({ type: 'tool/call', data: { turn: 1, step: 1, callId: 'c1', name: 'read', arguments: '{}' } })
+    store.append({
+      type: 'tool/result',
+      data: { turn: 1, step: 1, message: { role: 'user', toolCallId: 'c1', content: 'file content', isError: false } },
+    })
+    store.append({
+      type: 'assistant/message',
+      data: { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: '读完了。' }] } },
+    })
+    store.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '保留的新问题。' }] } })
+
+    const compact = createLocalCompactionSummary()
+    // 表面：user / assistant(tool_use) / tool result / assistant / user
+    // 旧实现只要见到 tool result 就拒绝，导致真实会话几乎永远没有可压区间
+    expect(compact.compact({ session: store, summary: '旧轮已读 a.ts。', start: 0, end: 4 })).toMatchObject({ status: 'compacted' })
+    expect(store.deriveMessages().map((message) => JSON.stringify(message))).toEqual([
+      expect.stringContaining('旧轮已读 a.ts。'),
+      expect.stringContaining('保留的新问题。'),
+    ])
+
+    const split = session()
+    split.append({
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'c9', name: 'read', input: {} }] } },
+    })
+    split.append({ type: 'tool/call', data: { turn: 1, step: 1, callId: 'c9', name: 'read', arguments: '{}' } })
+    split.append({
+      type: 'tool/result',
+      data: { turn: 1, step: 1, message: { role: 'user', toolCallId: 'c9', content: 'x', isError: false } },
+    })
+    // 起点落在 tool result 上：调用在区间外、结果在区间内
+    expect(createLocalCompactionSummary().compact({ session: split, summary: '拆散', start: 3, end: 4 }).status).toBe('tool-boundary')
+  })
+
+  it('无收益、未闭合事务均 fail-closed', () => {
     const noBenefit = session()
     expect(createLocalCompactionSummary().compact({ session: noBenefit, summary: 'x'.repeat(1_000), start: 0, end: 2 }).status).toBe('not-beneficial')
 

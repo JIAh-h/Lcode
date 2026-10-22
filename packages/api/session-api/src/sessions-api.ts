@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { EpochHeader, ModelMessage, SessionEvent, SessionService, StreamChunk, ToolResultMessage } from '@lcode/session'
 import { InMemorySessionStore, deriveMessages } from '@lcode/session'
@@ -16,6 +16,7 @@ import {
   listSessionFiles,
   loadLog,
   loadLogWithSpans,
+  packFrames,
   planRecovery,
   writeFileAtomicSync,
 } from '@lcode/session-persistence-jsonl'
@@ -103,6 +104,8 @@ import type {
   RestoreSessionResult,
   ResumeSessionInput,
   ResumeSessionResult,
+  RewindSessionInput,
+  RewindSessionResult,
   ReplayDecision,
   ReplaySnapshot,
   ReplayToolCall,
@@ -694,6 +697,89 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
     return { session_id: childId, last_seq: store.length - 1 }
   }
 
+  /**
+   * 就地回退到某条用户消息之前（「编辑后重发」的日志侧；与 `fork` 相对）。
+   *
+   * fork 保全长历史、另起一个新会话；rewind 改的是**这个会话自己的**权威日志，
+   * 所以一次调用必须同时落下三层状态，漏掉任何一层都会让人读到已经删掉的那一轮：
+   *
+   * ```
+   * ① JSONL 文件      截断重写（原子 tmp→rename，22 §4.3），seq 天然连续
+   * ② 进程内内存镜像   换掉整只 store —— 引擎持有的是 store 本体，不是快照
+   * ③ SQLite 投影     重开写句柄 + flush：投影是整会话替换，被删的那段随之消失
+   * ```
+   *
+   * ①必须在②之前、且夹着一次 `flush` + `close`：write-behind 里还有待写事件时
+   * 直接重写文件，那些事件会在下一次批写时被追加到已截断的文件尾部——那才是真损坏。
+   *
+   * 切点判据与 `fork` 同一条（前缀里不能有未闭合的轮），外加一条产品约束：
+   * 只能回退到一条 `user/message` 之前——"重发"的语义就是"这句话重新说过一遍"。
+   */
+  async rewind(input: RewindSessionInput): Promise<RewindSessionResult> {
+    const sessionId = input.session_id
+    const target = input.to_seq
+    if (!Number.isInteger(target) || target < 0) throw invalidParams(`to_seq 非法：${target}`)
+
+    // ensureOpen：归档件在这一步被还原成 `.jsonl`，之后的重写才有一个可续写的活文件
+    const session = await this.ensureOpen(sessionId)
+    const events = session.store.events()
+    if (target > events.length) throw forkBoundary(`切点越界：${target}，日志长度 ${events.length}`)
+    if (events[target]?.type !== 'user/message') {
+      throw invalidParams(`to_seq ${target} 处不是用户消息，无法回退到它之前`)
+    }
+
+    /*
+     * 真正的截断点在这个提问所属轮的 `turn/start` **之前**，而不是紧贴用户消息：
+     * 用户消息排在 turn/start 之后，切在它前面会留下一个没有终点的空轮
+     * （`isSafeForkBoundary` 会拒绝，投影也会看到一个坏日志）。
+     */
+    let cut = -1
+    for (let index = target - 1; index >= 0; index -= 1) {
+      if (events[index]?.type === 'turn/start') {
+        cut = index
+        break
+      }
+    }
+    if (cut < 0) throw invalidParams(`to_seq ${target} 的提问不属于任何一轮，无法回退`)
+    // 一轮里可能还有插话（steer）形成的 user/message；撤回它们等于把整轮拿掉，
+    // 而"重新编辑"只对应这一轮的第一条提问。
+    for (let index = cut + 1; index < target; index += 1) {
+      if (events[index]?.type === 'user/message') {
+        throw invalidParams('只能回退到这一轮的第一条提问')
+      }
+    }
+    const prefix = events.slice(0, cut)
+    if (!isSafeForkBoundary(prefix)) throw forkBoundary(`切点 ${cut} 落在未闭合的轮内`)
+
+    const id = asSessionId(sessionId)
+    await this.persistence.flush(id)
+    const file = this.persistence.filePathOf(sessionId) ?? findSessionFile(this.home, sessionId)
+    if (file === null) throw notFound(sessionId)
+    await this.persistence.close(id)
+
+    const loaded = loadLog(file)
+    if (cut > loaded.events.length) {
+      throw forkBoundary(`切点越界：${cut}，磁盘日志长度 ${loaded.events.length}`)
+    }
+    const frames = loaded.events.slice(0, cut)
+    writeFileAtomicSync(file, encodeJsonl(packFrames(loaded.header, frames)))
+
+    this.sessions.delete(sessionId)
+    const store = new InMemorySessionStore(id)
+    if (frames.length > 0) store.appendMany(frames.map(toEventInput))
+    this.sessions.set(sessionId, { store, cwd: loaded.header.cwd })
+
+    await this.persistence.open(id, loaded.header.cwd === null ? {} : { cwd: loaded.header.cwd })
+    await this.persistence.flush(id)
+    await this.index.drain()
+
+    return {
+      session_id: sessionId,
+      last_seq: store.length - 1,
+      discarded: loaded.events.length - frames.length,
+    }
+  }
+
   async append(input: AppendEventInput): Promise<SessionEvent> {
     const session = await this.ensureOpen(input.session_id)
     let event: SessionEvent
@@ -1054,7 +1140,18 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
     }
 
     const at = this.now()
+    // 索引写入是写后异步的；标签从投影取，先排空避免刚说完的话取不到
+    await this.index.drain()
+    // 标签必须在删除索引行之前取：回收站里只留文件，没有标题可查
+    const label = this.trashLabel(sessionId)
     const trashedPath = moveToTrash(this.home, file, sessionId, at)
+    if (label !== '') {
+      try {
+        writeFileSync(`${trashedPath}.meta.json`, JSON.stringify({ label }), 'utf8')
+      } catch {
+        // sidecar 写失败不影响硬删；列表会回落到日志预览
+      }
+    }
     // 索引行删除会经外键 CASCADE 带走 session_log_index / turns / steps / events /
     // messages_projection / tool_calls / checkpoints；FTS 由触发器随行删除同步
     // `file_changes` 没有外键，按 22 §9.5「显式清理」
@@ -1080,6 +1177,7 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
       path: entry.path,
       bytes: entry.bytes,
       deleted_at: entry.deleted_at,
+      label: entry.label,
       // 时间基准必须与 pruneTrash 一致：都用条目自带的 deleted_at
       expires_in_ms: Math.max(0, entry.deleted_at + TRASH_RETENTION_MS - now),
     }))
@@ -1402,6 +1500,30 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
     const db = openIndexDb({ home: this.home })
     const row = db.prepare('SELECT * FROM sessions WHERE session_id = ?').get(sessionId) as SessionRowLike | undefined
     return row === undefined ? null : rowToMeta(row)
+  }
+
+  /** 硬删前取一条可展示的内容标签：首条用户消息优先，其次标题 */
+  private trashLabel(sessionId: string): string {
+    try {
+      const db = openIndexDb({ home: this.home })
+      const message = db
+        .prepare(
+          `SELECT summary FROM messages_projection
+           WHERE session_id = ? AND role = 'user' AND is_active = 1
+           ORDER BY surface_index ASC LIMIT 1`,
+        )
+        .get(sessionId) as { summary?: string } | undefined
+      const summary = (message?.summary ?? '').replace(/\s+/g, ' ').trim()
+      if (summary !== '') return summary
+      const row = db.prepare('SELECT title FROM sessions WHERE session_id = ?').get(sessionId) as
+        | { title?: string }
+        | undefined
+      const title = (row?.title ?? '').trim()
+      if (title !== '') return title
+    } catch {
+      // 索引不可用/缺行时返回空，列表会回落到日志预览
+    }
+    return ''
   }
 
   /** 按需把单个会话投影进索引（索引缺行时的补救，不影响其它会话） */

@@ -1,8 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { SessionEvent, ModelMessage, ContentBlock } from '@lcode/session'
 import { t } from '../i18n/index.ts'
+import { Markdown } from './Markdown.tsx'
+import { toast } from './toast.ts'
 import { ToolCard, type ToolCardCall, type ToolCardResult } from './ToolCard.tsx'
 import { ApprovalCard, type ApprovalDecision } from './ApprovalCard.tsx'
+import { ComposerBar, withAttachments, type Attachment } from './ComposerBar.tsx'
 
 /**
  * 真实会话流（T5.4）。
@@ -38,6 +41,15 @@ interface SessionBridge {
   onTurnFailed(handler: (payload: unknown) => void): () => void
   send(input: { session_id: string; text: string }): Promise<unknown>
   cancel(sessionId: string): Promise<unknown>
+  rewindSend(input: { session_id: string; to_seq: number; text: string }): Promise<{
+    readonly accepted: true
+    readonly rewind: {
+      readonly discarded: number
+      readonly restored: readonly string[]
+      readonly removed: readonly string[]
+      readonly unrestored: readonly string[]
+    }
+  }>
 }
 
 function bridge(): SessionBridge | undefined {
@@ -60,6 +72,7 @@ function bridge(): SessionBridge | undefined {
     onTurnFailed: (h) => lcode.session!.onTurnFailed(h),
     send: (input) => lcode.agent!.send(input),
     cancel: (id) => lcode.agent!.cancel(id),
+    rewindSend: (input) => lcode.session!.rewindSend(input),
   }
 }
 
@@ -76,14 +89,19 @@ export function SessionStream({
   sessionId,
   onSendStateChange,
   onPausedStateChange,
+  onRewound,
 }: {
   readonly sessionId: string
   /** 把"是否在运行"告诉父组件（按钮要禁用/变成停止） */
   readonly onSendStateChange?: ((running: boolean) => void) | undefined
   readonly onPausedStateChange?: ((paused: boolean) => void) | undefined
+  /** 日志被就地截断后通知父页面重新打开（右栏的变更/计划都来自它自己那份事件副本） */
+  readonly onRewound?: (() => void) | undefined
 }) {
   /** 全部事件（open 时的历史 + 事件流推来的增量）——投影的唯一输入 */
   const [events, setEvents] = useState<readonly SessionEvent[]>([])
+  /** 回退重发后自增：重新 open 一次，把已经渲染出来的旧轮次从内存里抹掉 */
+  const [reloadEpoch, setReloadEpoch] = useState(0)
   /** 流式中的增量文本（`assistant/message` 落盘前的"打字过程"） */
   const [streaming, setStreaming] = useState<string>('')
   /**
@@ -99,20 +117,35 @@ export function SessionStream({
   /** `open()` 时主进程告诉我们"日志末尾是一个失败的轮"（历史里没有 turn/end 这种结构事件） */
   const [historyTurnFailed, setHistoryTurnFailed] = useState(false)
   /**
-   * 时间线渲染窗口：只挂载最近 N 行，避免长会话一次创建上万个 DOM 节点。
-   * "加载更早"以倍增方式扩容，10 万行量级十来次点击就能回到开头。
+   * 时间线渲染窗口：只挂载最近 N **轮**（同一轮的执行过程折叠在一起），
+   * 避免长会话一次创建上万个 DOM 节点；"加载更早"以倍增方式扩容。
    */
-  const [visibleLimit, setVisibleLimit] = useState(150)
+  const [visibleLimit, setVisibleLimit] = useState(40)
+  /** 用户手动展开/收起过的轮；未记录的轮默认在运行时展开、结束后收起 */
+  const [openBlocks, setOpenBlocks] = useState<Record<string, boolean>>({})
+  /** 正在原位编辑的最新提问（seq）与草稿 */
+  const [editingSeq, setEditingSeq] = useState<number | null>(null)
+  const [draft, setDraft] = useState('')
+  const [sendingEdit, setSendingEdit] = useState(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const scrollerRef = useRef<HTMLDivElement>(null)
   /** 视口是否贴底；用户向上翻阅历史时为 false，新事件不再强制滚动 */
   const stickRef = useRef(true)
+  /**
+   * 日志里当前是否有开着的轮。chunk 是**批量**到达的（主进程 33ms 合帧），
+   * 最后一批可能晚于 `turn/end` 落到渲染层；没有这道闸，它会：
+   * ① 把已经结束的轮重新标成"正在执行" ② 在最终消息下面再长出一条流式气泡。
+   */
+  const liveTurnRef = useRef(false)
   /** 扩容前记录的 scrollHeight；扩容后用它把视口锚在原位置，避免内容从上方插入时跳动 */
   const anchorRef = useRef<number | null>(null)
 
   useEffect(() => {
-    setVisibleLimit(150)
-  }, [sessionId])
+    setVisibleLimit(40)
+    setOpenBlocks({})
+    setEditingSeq(null)
+    setDraft('')
+  }, [sessionId, reloadEpoch])
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current
@@ -144,6 +177,7 @@ export function SessionStream({
     setStreaming('')
     setHistoryTurnFailed(false)
     setPaused(false)
+    liveTurnRef.current = false
 
     void api
       .open(sessionId)
@@ -160,14 +194,19 @@ export function SessionStream({
         // 页面在轮已开跑后才挂载时，实时 `turn/start` 可能已经错过；
         // 以日志末尾结构事件恢复真实运行态，避免按钮错误地显示为“发送”。
         const lastStart = [...unique].reverse().find((event) => event.type === 'turn/start')
-        setRunning(
+        const openNow =
           lastStart !== undefined &&
-            (lastTurn === undefined || lastStart.seq > lastTurn.seq),
-        )
+          (lastTurn === undefined || lastStart.seq > lastTurn.seq)
+        setRunning(openNow)
+        liveTurnRef.current = openNow
         historyReady = true
       })
       .catch((err: unknown) => {
-        if (alive) setError(err instanceof Error ? err.message : String(err))
+        if (!alive) return
+        const message = err instanceof Error ? err.message : String(err)
+        // 会话已被删除/归档：工作台页面会回首页，这里不要再闪一个错误条
+        if (message.includes('ES-SESSION_NOT_FOUND') || message.includes('会话不存在或日志缺失')) return
+        setError(message)
       })
 
     const stopEvent = api.onEvent((payload) => {
@@ -182,10 +221,12 @@ export function SessionStream({
       // 事件落地后清掉流式缓冲：`assistant/message` 才是权威（06 §4.1 的不对称）
       if (event.type === 'assistant/message') setStreaming('')
       if (event.type === 'turn/start') {
+        liveTurnRef.current = true
         setRunning(true)
         setPaused(false)
       }
       if (event.type === 'turn/end') {
+        liveTurnRef.current = false
         setRunning(false)
         setStreaming('')
         setPaused(event.data.reason === 'cancelled')
@@ -198,6 +239,8 @@ export function SessionStream({
         chunks?: readonly { type: string; text?: string }[]
       }
       if (!alive || record.session_id !== sessionId || record.chunks === undefined) return
+      // 迟到的批次不再属于任何开着的轮：丢掉，别把已收尾的轮重新点亮
+      if (!liveTurnRef.current) return
       setRunning(true)
       setPaused(false)
       const text = record.chunks
@@ -220,6 +263,7 @@ export function SessionStream({
     const stopFailed = api.onTurnFailed((payload) => {
       const record = payload as { session_id?: string }
       if (!alive || record.session_id !== sessionId) return
+      liveTurnRef.current = false
       setRunning(false)
       setStreaming('')
       setFailureEpoch((n) => n + 1)
@@ -231,7 +275,7 @@ export function SessionStream({
       stopChunks()
       stopFailed()
     }
-  }, [sessionId])
+  }, [sessionId, reloadEpoch])
 
   // 自动滚到底（新内容到达时）；用户向上翻阅历史时不打断
   useEffect(() => {
@@ -284,8 +328,166 @@ export function SessionStream({
     () => events.filter((event) => event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/call' || event.type === 'approval/asked'),
     [events],
   )
-  const hiddenCount = Math.max(0, timeline.length - visibleLimit)
-  const visibleTimeline = hiddenCount === 0 ? timeline : timeline.slice(hiddenCount)
+  /** 按用户消息切轮：同一轮的工具调用、审批与中间回复归入「执行过程」 */
+  const blocks = useMemo(() => {
+    const out: { key: string; user: SessionEvent | null; events: SessionEvent[] }[] = []
+    let current: (typeof out)[number] | null = null
+    for (const event of timeline) {
+      if (event.type === 'user/message') {
+        current = { key: `turn-${event.seq}`, user: event, events: [] }
+        out.push(current)
+        continue
+      }
+      if (current === null) {
+        current = { key: `turn-${event.seq}`, user: null, events: [] }
+        out.push(current)
+      }
+      current.events.push(event)
+    }
+    return out
+  }, [timeline])
+  const hiddenCount = Math.max(0, blocks.length - visibleLimit)
+  const visibleBlocks = hiddenCount === 0 ? blocks : blocks.slice(hiddenCount)
+  const lastUserSeq = useMemo(() => {
+    for (let index = blocks.length - 1; index >= 0; index -= 1) {
+      const user = blocks[index]?.user
+      if (user !== null && user !== undefined) return user.seq
+    }
+    return null
+  }, [blocks])
+
+  const messageText = (event: SessionEvent): string => {
+    if (event.type === 'user/message') return blocksToText(event.data.content)
+    if (event.type === 'assistant/message') return blocksToText(event.data.message.content)
+    return ''
+  }
+
+  const copyText = (text: string): void => {
+    void navigator.clipboard
+      .writeText(text)
+      .then(() => toast(t('已复制')))
+      .catch(() => undefined)
+  }
+
+  const submitEdit = (attachments: readonly Attachment[] = []): void => {
+    const text = draft.trim()
+    const seq = editingSeq
+    if (text === '' || seq === null || sendingEdit) return
+    const api = bridge()
+    if (api === undefined) return
+    setSendingEdit(true)
+    setRunning(true)
+    void api
+      .rewindSend({ session_id: sessionId, to_seq: seq, text: withAttachments(text, attachments) })
+      .then((result) => {
+        setEditingSeq(null)
+        setDraft('')
+        if (result.rewind.unrestored.length > 0) {
+          toast(t('有 {n} 个文件无法回退，已请模型重新生成', { n: result.rewind.unrestored.length }))
+        } else if (result.rewind.restored.length > 0 || result.rewind.removed.length > 0) {
+          toast(t('已撤回上一轮的文件改动'))
+        }
+      })
+      .catch((err: unknown) => {
+        setRunning(false)
+        toast(err instanceof Error ? err.message : t('重新发送失败'))
+      })
+      .finally(() => {
+        setSendingEdit(false)
+        // 截断可能已经发生（哪怕后续发送失败）：重新 open 一次，内存里别留着旧轮次
+        onRewound?.()
+        setReloadEpoch((n) => n + 1)
+      })
+  }
+
+  const renderMessage = (event: SessionEvent) => {
+    if (event.type !== 'user/message' && event.type !== 'assistant/message') return null
+    const text = messageText(event)
+    if (text === '') return null
+    const role = event.type === 'user/message' ? 'user' : 'assistant'
+    const latestUser = event.type === 'user/message' && event.seq === lastUserSeq && !running
+    const editing = event.type === 'user/message' && editingSeq === event.seq
+    return (
+      <div
+        className={`ssmsg ss-${role}${editing ? ' editing' : ''}`}
+        key={`message-${event.seq}`}
+      >
+        {editing ? null : (
+          <div className="ssbody">
+            <Markdown text={text} />
+          </div>
+        )}
+        {latestUser && !editing && (
+          <div className="ss-actions">
+            <button
+              type="button"
+              className="ss-icon"
+              title={t('编辑')}
+              onClick={() => {
+                setDraft(text)
+                setEditingSeq(event.seq)
+              }}
+            >
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <path d="M10.8 2.7l2.5 2.5M3 13l.7-3 7.6-7.6a.9.9 0 011.3 0l1 1a.9.9 0 010 1.3L6 12.3l-3 .7z" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button type="button" className="ss-icon" title={t('复制')} onClick={() => copyText(text)}>
+              <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                <rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
+                <path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" stroke="currentColor" strokeWidth="1.3" />
+              </svg>
+            </button>
+          </div>
+        )}
+        {editing && (
+          <div className="ss-edit">
+            <div className="cin">
+              <ComposerBar
+                value={draft}
+                onChange={setDraft}
+                onSend={(attachments) => submitEdit(attachments)}
+                onCancel={() => {
+                  setEditingSeq(null)
+                  setDraft('')
+                }}
+                sendTitle="重新发送"
+                placeholder={t('修改后发送：会撤回上一轮并重新执行')}
+                hint={t('会撤回这一轮的模型回复与文件改动，然后重新开始')}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  const renderProcessEvent = (event: SessionEvent) => {
+    if (event.type === 'tool/call') {
+      const finished = toolResults.get(event.data.callId)
+      const call: ToolCardCall = {
+        seq: event.seq,
+        callId: event.data.callId,
+        name: event.data.name,
+        arguments: event.data.arguments,
+        ...(event.data.card === undefined ? {} : { card: event.data.card }),
+      }
+      return <ToolCard key={`tool-${event.seq}`} sessionId={sessionId} call={call} result={finished?.result} resultSeq={finished?.seq} />
+    }
+    if (event.type === 'approval/asked') {
+      return (
+        <ApprovalCard
+          key={`approval-${event.seq}`}
+          callId={event.data.callId}
+          action={event.data.action}
+          basis={event.data.basis}
+          impact={event.data.impact}
+          decision={approvalDecisions.get(event.data.callId)}
+        />
+      )
+    }
+    return renderMessage(event)
+  }
 
   return (
     <div
@@ -306,50 +508,53 @@ export function SessionStream({
             setVisibleLimit((n) => n * 2)
           }}
         >
-          {t('加载更早的 {n} 条', { n: Math.min(hiddenCount, visibleLimit) })}
+          {t('加载更早的 {n} 轮', { n: Math.min(hiddenCount, visibleLimit) })}
         </button>
       )}
-      {timeline.length === 0 && streaming === '' && shownError === null && (
+      {blocks.length === 0 && streaming === '' && shownError === null && (
         <div className="ssempty">{t('还没有内容。在下面输入一句话开始。')}</div>
       )}
-      {visibleTimeline.map((event) => {
-        if (event.type === 'tool/call') {
-          const finished = toolResults.get(event.data.callId)
-          const call: ToolCardCall = {
-            seq: event.seq,
-            callId: event.data.callId,
-            name: event.data.name,
-            arguments: event.data.arguments,
-            ...(event.data.card === undefined ? {} : { card: event.data.card }),
-          }
-          return <ToolCard key={`tool-${event.seq}`} sessionId={sessionId} call={call} result={finished?.result} resultSeq={finished?.seq} />
-        }
-        if (event.type === 'approval/asked') {
-          return (
-            <ApprovalCard
-              key={`approval-${event.seq}`}
-              callId={event.data.callId}
-              action={event.data.action}
-              basis={event.data.basis}
-              impact={event.data.impact}
-              decision={approvalDecisions.get(event.data.callId)}
-            />
-          )
-        }
-        const message = event.type === 'assistant/message' ? event.data.message : event.data
-        const text = blocksToText(message.content)
-        if (text === '' && message.role === 'assistant') return null
+      {visibleBlocks.map((block, index) => {
+        const isLast = index === visibleBlocks.length - 1
+        const blockRunning = isLast && running
+        /** 正在编辑这一轮：隐藏它的执行过程与回复——它们马上会被撤回 */
+        const editingTurn =
+          block.user !== null && editingSeq !== null && block.user.seq === editingSeq
+        const final =
+          [...block.events]
+            .reverse()
+            .find(
+              (event) => event.type === 'assistant/message' && blocksToText(event.data.message.content) !== '',
+            ) ?? null
+        const process = block.events.filter((event) => final === null || event.seq !== final.seq)
+        const open = openBlocks[block.key] ?? blockRunning
         return (
-          <div className={`ssmsg ss-${message.role}`} key={`message-${event.seq}`}>
-            <div className="ssrole">{message.role === 'user' ? t('你') : t('Lcode')}</div>
-            <div className="ssbody">{text}</div>
+          <div className="turn" key={block.key}>
+            {block.user !== null ? renderMessage(block.user) : null}
+            {!editingTurn && process.length > 0 && (
+              <button
+                type="button"
+                className={'turn-toggle' + (open ? ' open' : '')}
+                aria-expanded={open}
+                onClick={() => setOpenBlocks((prev) => ({ ...prev, [block.key]: !open }))}
+              >
+                <span className="chev">▸</span>
+                {blockRunning ? <span className="spin" /> : null}
+                <span>
+                  {blockRunning
+                    ? t('正在执行 · {n} 步', { n: process.length })
+                    : t('执行过程 · {n} 步', { n: process.length })}
+                </span>
+              </button>
+            )}
+            {!editingTurn && process.length > 0 && open && <div className="turn-process">{process.map(renderProcessEvent)}</div>}
+            {!editingTurn && final !== null ? renderMessage(final) : null}
           </div>
         )
       })}
       {/* 流式增量：`assistant/message` 一到就被清掉，避免与权威内容重复显示 */}
       {streaming !== '' && (
         <div className="ssmsg ss-assistant">
-          <div className="ssrole">{t('Lcode')}</div>
           <div className="ssbody">
             {streaming}
             <span className="sscursor" />

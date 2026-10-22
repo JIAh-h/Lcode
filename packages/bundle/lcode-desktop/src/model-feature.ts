@@ -4,8 +4,8 @@ import type { Context } from '@lcode/context'
 import { LocalCredentialsService } from '@lcode/credentials-local'
 import { InMemoryLlmRegistry } from '@lcode/llm'
 import { OpenAiCompatibleAdapter } from '@lcode/llm-openai-compatible'
-import { LocalModelApi } from '@lcode/model-api'
-import type { CustomModelInfo } from '@lcode/model-api'
+import { LocalModelApi, toProbeFailure } from '@lcode/model-api'
+import type { CustomModelInfo, ProbeFailure } from '@lcode/model-api'
 import { setNativePackageRoot } from '@lcode/session-persistence-sqlite'
 import { LocalSettingsService, MODEL_FIELD_DESCRIPTORS, providerSettingKeys } from '@lcode/settings-file'
 import { CustomModelStore } from '@lcode/settings-file'
@@ -192,11 +192,45 @@ export interface DesktopModelFeatureOptions extends CreateServicesOptions {
   readonly services?: DesktopServices | undefined
 }
 
+export interface DiscoveredModel {
+  readonly id: string
+  readonly name?: string
+  readonly contextWindow?: number
+}
+
+export type DiscoverResult =
+  | { readonly ok: true; readonly models: readonly DiscoveredModel[] }
+  | { readonly ok: false; readonly failure: ProbeFailure }
+
 export interface DesktopModelFeature {
   readonly api: LocalModelApi
   readonly ctx: Context
   readonly services: DesktopServices
   providers(): readonly string[]
+  /**
+   * 用**未保存**的端点与密钥探测 `/models`（设置页「测试连接」）。
+   *
+   * 不写 settings、不写凭据、不注册适配器：测试连接只回答"这个 URL + Key 能不能列出模型"。
+   * 成功返回模型列表，供「模型名称」下拉筛选；失败返回六类归因。
+   */
+  discover(input: {
+    readonly base_url: string
+    readonly api_key?: string
+    /** 编辑模式留空 Key 时用已保存的凭据引用（值只在主进程解析） */
+    readonly credential_ref?: string
+  }): Promise<DiscoverResult>
+  /**
+   * 用**未保存**的端点与密钥查单个模型的窗口上限。
+   *
+   * 「模型名称」下拉里选中一个模型后要用它（列表往往不带窗口字段，详情才带）。
+   * 永不抛错：拿不到返回空对象。
+   */
+  limitsUnsaved(input: {
+    readonly base_url: string
+    readonly model: string
+    readonly api_key?: string
+    readonly credential_ref?: string
+  }): Promise<{ readonly context_window?: number; readonly max_output_tokens?: number }>
   saveCustom(input: Parameters<LocalModelApi['saveCustom']>[0]): Promise<{
     readonly saved: true
     readonly provider: string
@@ -280,11 +314,114 @@ export async function createDesktopModelFeature(
     }
   }
 
+  /*
+   * 老配置没有 `context_window_max`：后台补齐，不阻塞启动。
+   *
+   * 窗口上限是编辑体验/预算的输入，不是启动依赖；拿不到就留空，设置页仍会回落 128K。
+   * 只在缺失时补，避免每次启动都打供应商接口。
+   */
+  void (async () => {
+    const saved = await store.list()
+    let changed = false
+    for (const config of saved) {
+      const limits = await api.modelLimits({ provider: config.name, model: config.model })
+      if (limits.contextWindow === undefined) continue
+      // 已经不低于供应商上报值就不再写；低于（例如旧值只是部署默认 env）则刷新上去
+      if (config.context_window_max !== undefined && config.context_window_max >= limits.contextWindow) continue
+      await api.saveCustom({
+        name: config.name,
+        label: config.label,
+        model: config.model,
+        base_url: config.base_url,
+        api_key_ref: config.api_key_ref,
+        ...(config.models === undefined ? {} : { models: config.models }),
+        // 用户显式设的窗口原样保留：供应商报的是部署默认值，不能反过来压小用户的选择
+        ...(config.context_window_in === undefined ? {} : { context_window_in: config.context_window_in }),
+        context_window_max: limits.contextWindow,
+      })
+      changed = true
+    }
+    if (changed) await syncProviders()
+  })().catch(() => undefined)
+
+  /**
+   * 「测试连接 / 未保存配置查上限」用的临时适配器。
+   * 只在本次调用内存在：不写 settings、不写凭据、不进 `ctx.llm` 注册表。
+   */
+  const buildTempAdapter = async (
+    baseUrl: string,
+    typedKey: string,
+    credentialRef?: string,
+  ): Promise<OpenAiCompatibleAdapter> => {
+    const key = typedKey.trim()
+    const savedKey = key === '' && credentialRef !== undefined && credentialRef !== ''
+      ? (await credentials.resolve(credentialRef))?.value ?? ''
+      : ''
+    const apiKey = key === '' ? savedKey : key
+    return new OpenAiCompatibleAdapter({
+      id: 'model-discover',
+      name: 'model-discover',
+      baseUrl,
+      apiKeyRef: apiKey === '' ? '' : 'MODEL_DISCOVER_KEY',
+      ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+      credentials: {
+        resolve: async (ref) =>
+          ref === 'MODEL_DISCOVER_KEY' && apiKey !== ''
+            ? { refName: ref, value: apiKey, source: 'env' }
+            : undefined,
+        describeSource: async () => undefined,
+      },
+    })
+  }
+
   return {
     api,
     ctx,
     services,
     providers: () => [...disposers.keys()],
+    async discover(input) {
+      const baseUrl = input.base_url.trim()
+      const adapter = await buildTempAdapter(baseUrl, input.api_key ?? '', input.credential_ref)
+      try {
+        const models = await adapter.listModels(AbortSignal.timeout(10_000))
+        return {
+          ok: true as const,
+          models: models.map((model) => ({
+            id: model.id,
+            ...(model.name === undefined ? {} : { name: model.name }),
+            ...(model.contextWindow === undefined ? {} : { contextWindow: model.contextWindow }),
+          })),
+        }
+      } catch (err) {
+        return { ok: false as const, failure: toProbeFailure(err) }
+      }
+    },
+    async limitsUnsaved(input) {
+      const model = input.model.trim()
+      if (model === '') return {}
+      const adapter = await buildTempAdapter(input.base_url.trim(), input.api_key ?? '', input.credential_ref)
+      const describe = adapter.describeModel?.bind(adapter)
+      if (describe !== undefined) {
+        try {
+          const detail = await describe({ provider: 'model-discover', model }, { signal: AbortSignal.timeout(10_000) })
+          if (detail.contextWindow !== undefined || detail.maxOutputTokens !== undefined) {
+            return {
+              ...(detail.contextWindow === undefined ? {} : { context_window: detail.contextWindow }),
+              ...(detail.maxOutputTokens === undefined ? {} : { max_output_tokens: detail.maxOutputTokens }),
+            }
+          }
+        } catch {
+          // 详情不是协议标准：回落到列表
+        }
+      }
+      try {
+        const models = await adapter.listModels(AbortSignal.timeout(10_000))
+        const found = models.find((candidate) => candidate.id === model)
+        return found?.contextWindow === undefined ? {} : { context_window: found.contextWindow }
+      } catch {
+        return {}
+      }
+    },
     async saveCustom(input) {
       const result = await api.saveCustom(input)
       // 立刻注册：不这样的话用户"保存成功"却要重启才能用，是最难自查的一类问题

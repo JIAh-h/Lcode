@@ -50,6 +50,8 @@ export type {
   RestoreSessionResult,
   ResumeSessionInput,
   ResumeSessionResult,
+  RewindSessionInput,
+  RewindSessionResult,
   ReplayDecision,
   ReplaySnapshot,
   ReplayToolCall,
@@ -70,7 +72,7 @@ export { LocalSessionsApi } from './sessions-api.ts'
 export type { LocalSessionsApiOptions } from './sessions-api.ts'
 
 export { createLocalFileCheckpointService, LocalFileCheckpointService } from './file-checkpoints.ts'
-export type { FileCheckpoint, FileCheckpointService, FileCheckpointSkipped, LocalFileCheckpointOptions } from './file-checkpoints.ts'
+export type { FileCheckpoint, FileCheckpointRestoreInput, FileCheckpointRestoreResult, FileCheckpointService, FileCheckpointSkipped, LocalFileCheckpointOptions } from './file-checkpoints.ts'
 
 export { CACHE_LIMIT_BYTES, TRASH_RETENTION_MS, dirBytes } from './storage.ts'
 export type { PruneCacheResult, PruneTrashResult, StorageUsage } from './storage.ts'

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { ComposerBar } from '../components/ComposerBar.tsx'
+import { ComposerBar, withAttachments, type Attachment } from '../components/ComposerBar.tsx'
 import { toast } from '../components/toast.ts'
 import { t } from '../i18n/index.ts'
 import { notifySessionChanged, sessionBridge } from '../store/sessionBridge.ts'
@@ -102,7 +102,7 @@ export function HomePage() {
    * 之前这里是 `navigate('/sessions/demo-1')`——一个写死的会话 id，
    * 于是无论说什么都进同一个空壳（工作台里显示的还是一张与输入无关的假总结卡）。
    */
-  const submit = async () => {
+  const submit = async (attachments: readonly Attachment[] = []) => {
     const value = text.trim()
     if (value.length === 0) return
     const api = (
@@ -123,7 +123,7 @@ export function HomePage() {
       const cwd = proj?.path ?? ''
       const created = await api.session.create({ cwd, title })
       // 首句**在这里就发出去**：用户已经表达完了意图，没必要进去再发一次
-      await api.agent.send({ session_id: created.session_id, text: value })
+      await api.agent.send({ session_id: created.session_id, text: withAttachments(value, attachments) })
       notifySessionChanged()
       navigate(`/sessions/${created.session_id}`)
     } catch (err) {

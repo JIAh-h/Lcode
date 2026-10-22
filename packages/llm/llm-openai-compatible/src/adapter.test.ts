@@ -581,6 +581,25 @@ describe('① 错误归因（六类，与 model-api 的 probe 对齐）', () => 
     expect(await probeWith(404)).toBe(ERROR_CODES.EL_UNKNOWN_MODEL)
   })
 
+  it('400 + 上下文超限文案 → EL-CONTEXT_OVERFLOW；普通 400 仍是 EL-MODEL_ERROR', async () => {
+    const overflow = makeAdapter({
+      fetch: (async () =>
+        new Response(JSON.stringify({ error: { code: 'context_length_exceeded', message: "This model's maximum context length is 8192 tokens" } }), {
+          status: 400,
+        })) as typeof globalThis.fetch,
+    })
+    await expect(overflow.listModels(new AbortController().signal)).rejects.toMatchObject({
+      code: ERROR_CODES.EL_CONTEXT_OVERFLOW,
+    })
+
+    const generic = makeAdapter({
+      fetch: (async () => new Response('{"error":"invalid temperature"}', { status: 400 })) as typeof globalThis.fetch,
+    })
+    await expect(generic.listModels(new AbortController().signal)).rejects.toMatchObject({
+      code: ERROR_CODES.EL_MODEL_ERROR,
+    })
+  })
+
   it('429 → EL-RATE_LIMITED，且标为可重试', async () => {
     expect(await probeWith(429)).toBe(ERROR_CODES.EL_RATE_LIMITED)
     const adapter = makeAdapter({ fetch: (async () => new Response('', { status: 429 })) as typeof globalThis.fetch })
@@ -642,6 +661,58 @@ describe('① 模型清单与重试策略', () => {
     expect(models[1]!.name).toBe('DeepSeek Chat')
   })
 
+  it('listModels 读取供应商返回的 context_window（官方 DeepSeek 形态）', async () => {
+    const adapter = makeAdapter({
+      fetch: (async () =>
+        new Response(JSON.stringify({ data: [{ id: 'deepseek-flash', context_window: 1_048_576, max_output_tokens: 393_216 }] }), {
+          status: 200,
+        })) as typeof globalThis.fetch,
+    })
+    const models = await adapter.listModels(new AbortController().signal)
+    expect(models[0]).toMatchObject({ id: 'deepseek-flash', contextWindow: 1_048_576 })
+  })
+
+  it('describeModel 读取 /models/{id} 的百炼额外字段', async () => {
+    let requested = ''
+    const adapter = makeAdapter({
+      fetch: (async (url: string) => {
+        requested = url
+        return new Response(JSON.stringify({
+          id: 'deepseek-v4.1-flash',
+          extra_info: { default_envs: { max_input_tokens: 129_024, max_output_tokens: 8_192 } },
+        }), { status: 200 })
+      }) as typeof globalThis.fetch,
+    })
+    const limits = await adapter.describeModel(
+      { provider: 'custom', model: 'deepseek-v4.1-flash' },
+      { signal: new AbortController().signal },
+    )
+    expect(requested).toBe('https://api.example.com/v1/models/deepseek-v4.1-flash')
+    expect(limits).toEqual({ contextWindow: 129_024, maxOutputTokens: 8_192 })
+  })
+
+  it('describeModel 兼容把详情包在 data: 帧里的网关', async () => {
+    const adapter = makeAdapter({
+      fetch: (async () =>
+        new Response(
+          `data:${JSON.stringify({ id: 'm', extra_info: { default_envs: { max_input_tokens: 200_000 } } })}\n\ndata: [DONE]\n\n`,
+          { status: 200, headers: { 'content-type': 'text/event-stream' } },
+        )) as typeof globalThis.fetch,
+    })
+    await expect(
+      adapter.describeModel({ provider: 'custom', model: 'm' }, { signal: new AbortController().signal }),
+    ).resolves.toEqual({ contextWindow: 200_000 })
+  })
+
+  it('describeModel 遇到无字段的响应时返回空对象，不猜', async () => {
+    const adapter = makeAdapter({
+      fetch: (async () => new Response(JSON.stringify({ id: 'm' }), { status: 200 })) as typeof globalThis.fetch,
+    })
+    await expect(
+      adapter.describeModel({ provider: 'custom', model: 'm' }, { signal: new AbortController().signal }),
+    ).resolves.toEqual({})
+  })
+
   it('listModels 兼容百炼以 SSE data 帧包装的模型清单', async () => {
     const adapter = makeAdapter({
       fetch: (async () =>
@@ -676,5 +747,54 @@ describe('① SSE 解析器', () => {
   it('只取 data: 行，跳过空行与注释，兼容 CRLF', () => {
     const text = 'event: message\r\ndata: {"a":1}\r\n\r\n: keep-alive\r\ndata: [DONE]\r\n\r\n'
     expect([...parseSse(text)]).toEqual(['{"a":1}', '[DONE]'])
+  })
+})
+
+describe('① DashScope 原生目录（model_info.context_window）', () => {
+  it('原生目录的 context_window 优先于 /models/{id} 的 default_envs', async () => {
+    const adapter = makeAdapter({
+      baseUrl: 'https://ds-catalog-a.example.com/compatible-mode/v1',
+      fetch: (async (url: string) => {
+        const u = String(url)
+        if (u.includes('/api/v1/models')) {
+          return new Response(JSON.stringify({
+            output: {
+              total: 1,
+              page_no: 1,
+              page_size: 100,
+              models: [{ model: 'deepseek-v4.1-flash-1017', model_info: { context_window: 1_000_000, max_input_tokens: 1_000_000, max_output_tokens: 393_216 } }],
+            },
+          }), { status: 200 })
+        }
+        if (u.includes('/compatible-mode/v1/models/')) {
+          return new Response(JSON.stringify({ id: 'deepseek-v4.1-flash-1017', extra_info: { default_envs: { max_input_tokens: 129_024 } } }), { status: 200 })
+        }
+        return new Response('{}', { status: 404 })
+      }) as typeof globalThis.fetch,
+    })
+    await expect(
+      adapter.describeModel({ provider: 'custom', model: 'deepseek-v4.1-flash-1017' }, { signal: new AbortController().signal }),
+    ).resolves.toEqual({ contextWindow: 1_000_000, maxOutputTokens: 393_216 })
+  })
+
+  it('listModels 用原生目录补齐 /models 缺失的窗口', async () => {
+    const adapter = makeAdapter({
+      baseUrl: 'https://ds-catalog-b.example.com/compatible-mode/v1',
+      fetch: (async (url: string) => {
+        const u = String(url)
+        if (u.includes('/api/v1/models')) {
+          return new Response(JSON.stringify({
+            output: { total: 1, page_no: 1, page_size: 100, models: [{ model: 'qwen3.8-flash', model_info: { context_window: 1_000_000, max_output_tokens: 131_072 } }] },
+          }), { status: 200 })
+        }
+        if (u.endsWith('/models')) {
+          return new Response(JSON.stringify({ data: [{ id: 'qwen3.8-flash' }, { id: 'other-model' }] }), { status: 200 })
+        }
+        return new Response('{}', { status: 404 })
+      }) as typeof globalThis.fetch,
+    })
+    const models = await adapter.listModels(new AbortController().signal)
+    expect(models.find((m) => m.id === 'qwen3.8-flash')?.contextWindow).toBe(1_000_000)
+    expect(models.find((m) => m.id === 'other-model')?.contextWindow).toBeUndefined()
   })
 })

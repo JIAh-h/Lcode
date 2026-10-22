@@ -20,7 +20,6 @@
     "@lcode/context-local": "workspace:*",
     "@lcode/context-budget": "workspace:*",
     "@lcode/compaction": "workspace:*",
-    "@lcode/compaction-policy": "workspace:*",
     "@lcode/compaction-summary": "workspace:*",
     "@lcode/code-runtime": "workspace:*",
     "@lcode/code-runtime-subprocess": "workspace:*",

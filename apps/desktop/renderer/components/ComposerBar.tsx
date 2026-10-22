@@ -35,16 +35,33 @@ function baseName(p: string): string {
   return p.split(/[\\/]/).filter(Boolean).pop() ?? p
 }
 
+/**
+ * 把附件引用拼进消息正文。
+ *
+ * 现阶段的附件是**引用**而不是内联内容（`+` 菜单里也是这么写的）：模型拿到路径后
+ * 自己用 read/grep 去读，用户也能在气泡里看见"这句话带了哪些文件"。
+ * 图片/文件上传要到附件通道接通后才会有独立的内容块。
+ */
+export function withAttachments(text: string, attachments: readonly Attachment[]): string {
+  if (attachments.length === 0) return text
+  const lines = attachments.map(
+    (a) => `- ${a.kind === 'folder' ? '文件夹' : '文件'}：${a.path}`,
+  )
+  return `${text}\n\n附件引用：\n${lines.join('\n')}`
+}
+
 export function ComposerBar({
   value,
   onChange,
   onSend,
+  onCancel,
   primaryAction = 'send',
   onPrimaryAction,
   placeholder,
   sendTitle = '发送',
   hint,
   leading,
+  footer,
   planActive = false,
   planReady = false,
   onPlanAction,
@@ -56,7 +73,9 @@ export function ComposerBar({
 }: {
   value: string
   onChange: (next: string) => void
-  onSend: () => void
+  onSend: (attachments: readonly Attachment[]) => void
+  /** 提供时在发送键左侧渲染一个取消键（原位编辑用） */
+  onCancel?: (() => void) | undefined
   primaryAction?: 'send' | 'pause' | 'resume'
   onPrimaryAction?: (() => void) | undefined
   placeholder?: string
@@ -65,6 +84,8 @@ export function ComposerBar({
   hint?: string
   /** textarea 之前的插槽（首页用它放「选择项目」行） */
   leading?: ReactNode
+  /** 工具条下方的状态行（工作台用它放工作区/分支与上下文用量） */
+  footer?: ReactNode
   /** 会话级计划模式；激活时该按钮表示“确认并开始执行”。 */
   planActive?: boolean
   /** 是否已有可确认的结构化计划。 */
@@ -118,7 +139,7 @@ export function ComposerBar({
     // 与 Codex 一致：Enter 提交，Shift+Enter 明确保留换行；输入法候选确认不能误发。
     if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return
     e.preventDefault()
-    if (value.trim() !== '') onSend()
+    if (value.trim() !== '') onSend(attachments)
   }
 
   const textOfQueued = (item: QueuedMessage): string =>
@@ -162,7 +183,10 @@ export function ComposerBar({
     {
       id: 'manage',
       label: prefs.models.length === 0 ? '添加模型' : '管理模型',
-      hint: '设置 → 模型',
+      separator: true,
+      compact: true,
+      // 与左侧栏底部的设置入口同一个字形，保持全局一致
+      icon: '⚙',
     },
   ]
 
@@ -292,17 +316,23 @@ export function ComposerBar({
             toast(t('已切换模型：{name}', { name: prefs.models.find((m) => m.name === id)?.src ?? id }))
           }}
         />
+        {onCancel !== undefined ? (
+          <button type="button" className="sendcancel" title={t('取消')} aria-label={t('取消')} onClick={onCancel}>
+            {t('取消')}
+          </button>
+        ) : null}
         <button
           className={'send' + (primaryAction === 'pause' ? ' stop' : '')}
           title={t(primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : sendTitle)}
           aria-label={t(primaryAction === 'pause' ? '暂停' : primaryAction === 'resume' ? '继续' : sendTitle)}
-          onClick={onPrimaryAction ?? onSend}
+          onClick={onPrimaryAction ?? (() => onSend(attachments))}
           disabled={cannotSend}
         >
           {primaryAction === 'pause' ? '■' : primaryAction === 'resume' ? '▶' : '↑'}
         </button>
       </div>
       {hint ? <div className="chint">{hint}</div> : null}
+      {footer}
     </>
   )
 }

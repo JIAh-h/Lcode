@@ -1,6 +1,7 @@
 export type {
   ProviderInfo,
   ModelInfo,
+  ModelLimits,
   PreparedCall,
   RetryPolicy,
   PrepareOpts,

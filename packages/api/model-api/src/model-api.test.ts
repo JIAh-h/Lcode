@@ -57,6 +57,36 @@ describe('model.listProviders / listModels', () => {
     expect(providers[0]).toMatchObject({ id: 'replay', name: 'replay' })
   })
 
+  describe('model.modelLimits', () => {
+    it('优先用 describeModel 的详情字段', async () => {
+      let called = 0
+      const adapter: LlmAdapter = {
+        ...failingAdapter(ERROR_CODES.EL_MODEL_ERROR, 'meta'),
+        describeModel: async () => {
+          called += 1
+          return { contextWindow: 129_024, maxOutputTokens: 8_192 }
+        },
+      }
+      const { api } = makeApi({ adapters: [adapter] })
+      await expect(api.modelLimits({ provider: 'meta', model: 'deepseek-v4.1-flash' })).resolves.toEqual({
+        contextWindow: 129_024,
+        maxOutputTokens: 8_192,
+      })
+      expect(called).toBe(1)
+    })
+
+    it('详情不可用时回落到列表；两者都失败或供应商不存在时返回空对象', async () => {
+      const listOnly: LlmAdapter = {
+        ...failingAdapter(ERROR_CODES.EL_MODEL_ERROR, 'list'),
+        listModels: async () => [{ id: 'm', contextWindow: 200_000 }],
+      }
+      const { api } = makeApi({ adapters: [listOnly, failingAdapter(ERROR_CODES.EL_MODEL_ERROR, 'broken')] })
+      await expect(api.modelLimits({ provider: 'list', model: 'm' })).resolves.toEqual({ contextWindow: 200_000 })
+      await expect(api.modelLimits({ provider: 'broken', model: 'm' })).resolves.toEqual({})
+      await expect(api.modelLimits({ provider: 'missing', model: 'm' })).resolves.toEqual({})
+    })
+  })
+
   it('listModels：回放适配器返回内置清单；未知 provider → EL-NO_ADAPTER；空名 → EC-INVALID_PARAMS', async () => {
     const { api } = await makeApi()
     await expect(api.listModels({ provider: 'replay' })).resolves.toEqual([{ id: 'replay-model' }])

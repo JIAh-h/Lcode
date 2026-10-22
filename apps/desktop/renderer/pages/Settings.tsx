@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { ChipGroup, Seg, Select, Switch, SwitchRow, TextArea, TextInput } from '../components/controls.tsx'
+import { CONTEXT_WINDOW_STEP, FALLBACK_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '@lcode/model-api'
+import { Seg, Select, Switch, SwitchRow, TextArea, TextInput } from '../components/controls.tsx'
 import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
 import { toast } from '../components/toast.ts'
 import { setLocale, t, useLocale } from '../i18n/index.ts'
@@ -337,8 +338,30 @@ interface ModelDraft {
   readonly model?: string
   readonly base_url: string
   readonly api_key: string
+  /** 输入上下文窗口（tokens）；缺省 = 使用供应商返回的模型上限 */
+  readonly context_window_in?: number
+  /** 供应商返回的窗口上限（探测缓存） */
+  readonly context_window_max?: number
   /** 编辑模式带上：配置条目的 id（`custom-xxx`），主进程据此原地更新 */
   readonly id?: string
+}
+
+function formatWindowTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${Number((tokens / 1_000_000).toFixed(1))}M`
+  return `${Math.round(tokens / 1_000)}K`
+}
+
+/**
+ * 滑块的常用节点：不铺满整条轨道，只给几个"主流窗口"——
+ * 1M 上给 200K / 400K / 1M（对齐 Qoder），200K 上给 64K / 128K / 200K。
+ * 节点可点，点一下就等于把滑块拖过去。
+ */
+function windowNodes(maxTokens: number): number[] {
+  if (maxTokens >= 1_000_000) return [200_000, 400_000, maxTokens]
+  if (maxTokens >= 400_000) return [Math.round(maxTokens * 0.25), Math.round(maxTokens * 0.5), maxTokens]
+  if (maxTokens >= 200_000) return [64_000, 128_000, maxTokens]
+  if (maxTokens >= 128_000) return [32_000, 64_000, maxTokens]
+  return [Math.round(maxTokens / 2), maxTokens]
 }
 
 function AddModelModal({
@@ -347,7 +370,7 @@ function AddModelModal({
   editing,
 }: {
   onClose: () => void
-  onSave: (draft: ModelDraft, opts?: { readonly probe?: boolean }) => Promise<void>
+  onSave: (draft: ModelDraft) => Promise<void>
   /** 传入即为**编辑**模式：预填现有配置，供应商不可改（id 是它的身份） */
   editing?: CustomModelInfo | undefined
 }) {
@@ -368,8 +391,13 @@ function AddModelModal({
    */
   const [modelId, setModelId] = useState(editing?.model ?? editing?.label ?? '')
   const [showKey, setShowKey] = useState(false) // 默认密文（闭眼）
-  const [inTok, setInTok] = useState('')
-  const [outTok, setOutTok] = useState('')
+  const [ctxWindow, setCtxWindow] = useState<number | null>(editing?.context_window_in ?? null)
+  /** 供应商返回的窗口上限；**带模型 id**：换模型后旧值立即失效 */
+  const [providerLimit, setProviderLimit] = useState<{ readonly model: string; readonly value: number } | null>(null)
+  /** 「测试连接」成功后缓存的可用模型；未保存配置，只用于下拉筛选 */
+  const [availableModels, setAvailableModels] = useState<readonly DiscoveredModel[]>([])
+  const [modelsOpen, setModelsOpen] = useState(false)
+  const modelFieldRef = useRef<HTMLDivElement>(null)
   const [saving, setSaving] = useState(false)
   const [probing, setProbing] = useState(false)
   const [keyPresent, setKeyPresent] = useState<boolean | null>(null)
@@ -396,10 +424,114 @@ function AddModelModal({
     }
   }, [editing])
 
+  /* 编辑已有模型时向供应商现取窗口上限（`/models/{id}` 或列表字段） */
+  useEffect(() => {
+    if (editing === undefined) return
+    const bridge = modelBridge()
+    if (bridge === undefined) return
+    let alive = true
+    void bridge
+      .limits({ provider: editing.name, model: editing.model })
+      .then((limits) => {
+        if (!alive) return
+        const value = limits?.context_window
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+          setProviderLimit({ model: editing.model, value })
+        }
+      })
+      .catch(() => undefined)
+    return () => {
+      alive = false
+    }
+  }, [editing])
+
+  /* 模型下拉：点外面或 Esc 关闭 */
+  useEffect(() => {
+    if (!modelsOpen) return
+    const close = (event: MouseEvent): void => {
+      if (modelFieldRef.current !== null && !modelFieldRef.current.contains(event.target as Node)) setModelsOpen(false)
+    }
+    const onKey = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setModelsOpen(false)
+    }
+    document.addEventListener('mousedown', close)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', close)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [modelsOpen])
+
   /* 当前供应商的预设：决定要不要填地址、要不要填密钥、模型名怎么举例 */
   const preset = PROVIDER_PRESETS.find((p) => p.id === provider) ?? PROVIDER_PRESETS[0]!
   /** 最终生效的接口地址：内置供应商用适配器默认值，自定义用用户输入 */
   const effectiveBase = preset.baseUrl ?? base.trim()
+
+  /*
+   * 上下文窗口滑块：max 取**供应商返回的模型上限**（`/models/{id}` 的 max_input_tokens、
+   * 或列表里的 context_window）。供应商没给就回落到 128K，并在下方标注。
+   * 「默认」= 直接吃这个上限，不存数字；只有真的调小了才写 `context_window_in`。
+   */
+  const providerMax = (() => {
+    const selected = modelId.trim()
+    if (selected === '') return editing?.context_window_max ?? null
+    // 上限只对"查它的那个模型"有效：换了模型就重新查，绝不沿用旧值
+    if (providerLimit !== null && providerLimit.model === selected) return providerLimit.value
+    if (selected === (editing?.model ?? '')) return editing?.context_window_max ?? null
+    return null
+  })()
+  /*
+   * 滑块最大值 = 供应商返回的模型窗口。
+   * DashScope 原生目录的 `model_info.context_window`（1M）优先；没有才回落 128K。
+   */
+  const windowMax = Math.max(providerMax ?? FALLBACK_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW)
+  const windowMin = Math.min(MIN_CONTEXT_WINDOW, windowMax)
+  const windowValue = Math.min(windowMax, Math.max(windowMin, ctxWindow ?? windowMax))
+  const nodes = windowNodes(windowMax).filter((value) => value > windowMin && value <= windowMax)
+
+  const modelQuery = modelId.trim().toLowerCase()
+  const filteredModels = modelQuery === ''
+    ? availableModels
+    : availableModels.filter((model) => `${model.id} ${model.name ?? ''}`.toLowerCase().includes(modelQuery))
+
+  const resetDiscovered = (): void => {
+    setAvailableModels([])
+    setModelsOpen(false)
+  }
+
+  /** 查当前模型在供应商那边的窗口上限（未保存配置也能查；列表不带窗口时用它） */
+  const refreshLimit = (id: string): void => {
+    const bridge = modelBridge()
+    if (bridge === undefined || id === '') return
+    setProviderLimit(null)
+    const typedKey = key.trim()
+    const credentialRef = typedKey === '' && isEdit ? editing.api_key_ref : undefined
+    void bridge
+      .limitsUnsaved({
+        base_url: effectiveBase,
+        model: id,
+        api_key: typedKey,
+        ...(credentialRef === undefined ? {} : { credential_ref: credentialRef }),
+      })
+      .then((limits) => {
+        const value = limits?.context_window
+        if (typeof value === 'number' && Number.isFinite(value) && value > 0) setProviderLimit({ model: id, value })
+      })
+      .catch(() => undefined)
+  }
+
+  const selectModel = (model: DiscoveredModel): void => {
+    setModelId(model.id)
+    // 显示名称默认跟随模型名；用户之后仍可改
+    setName(model.name ?? model.id)
+    setModelsOpen(false)
+    if (model.contextWindow !== undefined) {
+      setProviderLimit({ model: model.id, value: model.contextWindow })
+      return
+    }
+    // 列表没带窗口字段（百炼这类）：选中后立刻查这个模型的详情
+    refreshLimit(model.id)
+  }
 
   /* 供应商一换，地址/密钥/模型名都是**该供应商专属**的，留着会串味（比如把 gpt-4o 存成 DeepSeek 的模型） */
   const changeProvider = (next: string): void => {
@@ -408,17 +540,16 @@ function AddModelModal({
     setKey('')
     setName('')
     setModelId('')
+    setCtxWindow(null)
+    setProviderLimit(null)
+    resetDiscovered()
   }
 
   /** 收集当前表单（校验留给主进程的权威实现，这里只做"别提交空表单"的即时提示） */
   const draft = (): ModelDraft | null => {
-    if (!name.trim()) {
-      toast(t('请先填写模型名称'))
-      nameRef.current?.focus()
-      return null
-    }
     if (!modelId.trim()) {
       toast(t('请填写要调用的模型名'))
+      nameRef.current?.focus()
       return null
     }
     if (preset.baseUrl === null && !base.trim()) {
@@ -430,11 +561,16 @@ function AddModelModal({
       toast(t('请填写 API Key'))
       return null
     }
+    const chosen = ctxWindow === null ? null : Math.min(windowMax, Math.max(windowMin, ctxWindow))
+    // 等于上限 = 默认，不落数字；只有用户真的调小才写 context_window_in
+    const configuredWindow = chosen === null || chosen >= windowMax ? undefined : chosen
     return {
-      label: name.trim(),
+      label: name.trim() === '' ? modelId.trim() : name.trim(),
       model: modelId.trim(),
       base_url: effectiveBase,
       api_key: key.trim(),
+      ...(configuredWindow === undefined ? {} : { context_window_in: configuredWindow }),
+      ...(providerMax === null ? {} : { context_window_max: providerMax }),
       ...(isEdit ? { id: editing.name } : {}),
     }
   }
@@ -458,11 +594,39 @@ function AddModelModal({
    * ——少一次"测试通过但保存后不通"的意外。
    */
   const testConnection = async (): Promise<void> => {
-    const input = draft()
-    if (input === null) return
+    if (preset.baseUrl === null && !base.trim()) {
+      toast(t('自定义供应商需要填写接口地址'))
+      return
+    }
+    const canReuseSavedKey = isEdit && editing.api_key_ref !== ''
+    if (preset.needsKey && !key.trim() && !canReuseSavedKey) {
+      toast(t('请填写 API Key'))
+      return
+    }
+    const bridge = modelBridge()
+    if (bridge === undefined) {
+      toast(t('当前环境没有主进程桥，无法测试连接'))
+      return
+    }
     setProbing(true)
     try {
-      await onSave(input, { probe: true })
+      // 编辑模式留空 Key = 用已保存的凭据；值只在主进程解析
+      const credentialRef = key.trim() === '' && isEdit ? editing.api_key_ref : undefined
+      const result = await bridge.discover({
+        base_url: effectiveBase,
+        api_key: key.trim(),
+        ...(credentialRef === undefined ? {} : { credential_ref: credentialRef }),
+      })
+      if (!result.ok) {
+        toast(probeMessage(result))
+        return
+      }
+      setAvailableModels(result.models)
+      toast(probeMessage(result))
+      nameRef.current?.focus()
+      setModelsOpen(result.models.length > 0)
+    } catch (err) {
+      toast(err instanceof Error ? err.message : t('测试连接失败'))
     } finally {
       setProbing(false)
     }
@@ -504,7 +668,14 @@ function AddModelModal({
           {preset.baseUrl === null && (
             <label className="mmfield">
               <span className="mmlab">{t('接口地址')}</span>
-              <TextInput value={base} onChange={setBase} placeholder="https://api.example.com/v1" />
+              <TextInput
+                value={base}
+                onChange={(value) => {
+                  setBase(value)
+                  resetDiscovered()
+                }}
+                placeholder="https://api.example.com/v1"
+              />
             </label>
           )}
 
@@ -530,7 +701,10 @@ function AddModelModal({
                   <TextInput
                     type={showKey ? 'text' : 'password'}
                     value={key}
-                    onChange={setKey}
+                    onChange={(value) => {
+                      setKey(value)
+                      resetDiscovered()
+                    }}
                     placeholder={isEdit ? t('留空则不修改') : t('输入你的 API Key')}
                     autoComplete="off"
                   />
@@ -560,18 +734,72 @@ function AddModelModal({
               </div>
             </div>
           )}
-          <label className="mmfield">
+          <div className="mmfield" ref={modelFieldRef}>
             <span className="mmlab">
               {t('模型名称')}
               <em>{t('（接口文档里那个，例如 deepseek-chat）')}</em>
             </span>
-            <TextInput
-              inputRef={nameRef}
-              value={modelId}
-              onChange={setModelId}
-              placeholder={t(preset.modelHint)}
-            />
-          </label>
+            <div
+              className="modelpick"
+              onClick={() => {
+                if (availableModels.length > 0) setModelsOpen(true)
+              }}
+              onBlurCapture={() => {
+                // 手打模型 id 时也要跟上供应商上限（没有下拉可用时）
+                const id = modelId.trim()
+                if (id !== '' && (providerLimit === null || providerLimit.model !== id)) refreshLimit(id)
+              }}
+            >
+              <TextInput
+                inputRef={nameRef}
+                value={modelId}
+                onChange={(value) => {
+                  setModelId(value)
+                  if (availableModels.length > 0) setModelsOpen(true)
+                }}
+                onEnter={() => {
+                  const first = filteredModels[0]
+                  if (modelsOpen && first !== undefined) selectModel(first)
+                }}
+                placeholder={t(preset.modelHint)}
+              />
+              {availableModels.length > 0 ? <span className="modelpick-chev">▾</span> : null}
+              {modelsOpen ? (
+                <div className="modelpick-menu" role="listbox" aria-label={t('可用模型')}>
+                  {filteredModels.length === 0 ? (
+                    <div className="modelpick-empty">{t('没有匹配的模型')}</div>
+                  ) : (
+                    filteredModels.slice(0, 100).map((model) => (
+                      <button
+                        type="button"
+                        key={model.id}
+                        className="modelpick-item"
+                        role="option"
+                        aria-selected={model.id === modelId}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          selectModel(model)
+                        }}
+                      >
+                        <span className="mpi">{model.id}</span>
+                        {model.name !== undefined && model.name !== model.id ? (
+                          <span className="mpn">{model.name}</span>
+                        ) : null}
+                        {model.contextWindow !== undefined ? (
+                          <span className="mpw">{formatWindowTokens(model.contextWindow)}</span>
+                        ) : null}
+                      </button>
+                    ))
+                  )}
+                </div>
+              ) : null}
+            </div>
+            {availableModels.length > 0 ? (
+              <div className="modelpick-hint">
+                {t('已发现 {n} 个可用模型，点击输入框选择', { n: availableModels.length })}
+              </div>
+            ) : null}
+          </div>
           <label className="mmfield">
             <span className="mmlab">
               {t('显示名称')}
@@ -579,21 +807,57 @@ function AddModelModal({
             </span>
             <TextInput value={name} onChange={setName} placeholder={t('例如 主力模型')} />
           </label>
-          <div style={{ display: 'flex', gap: 18 }}>
-            <ChipGroup
-              label="输入"
-              hint="（不选则使用该模型默认值）"
-              options={['', '32K', '64K', '128K', '256K']}
-              value={inTok}
-              onChange={setInTok}
-            />
-            <ChipGroup
-              label="输出"
-              hint="（不选则使用该模型默认值）"
-              options={['', '8K', '16K', '32K', '64K']}
-              value={outTok}
-              onChange={setOutTok}
-            />
+          <div className="mmfield">
+            <span className="mmlab">
+              {t('上下文窗口')}
+              <em>{t('（模型输入上限；默认使用该模型的最大值）')}</em>
+            </span>
+            <div className="ctxwin">
+              <div className="ctxwin-head">
+                <span className="ctxwin-val">{formatWindowTokens(windowValue)}</span>
+                <span className={ctxWindow === null ? 'ctxwin-tag' : 'ctxwin-tag custom'}>
+                  {ctxWindow === null ? t('模型默认') : t('自定义')}
+                </span>
+                {ctxWindow === null ? null : (
+                  <button type="button" className="ctxwin-reset" onClick={() => setCtxWindow(null)}>
+                    {t('恢复默认')}
+                  </button>
+                )}
+              </div>
+              <input
+                className="ctxrange"
+                type="range"
+                min={windowMin}
+                max={windowMax}
+                step={CONTEXT_WINDOW_STEP}
+                value={windowValue}
+                aria-label={t('上下文窗口')}
+                onChange={(event) => setCtxWindow(Number(event.target.value))}
+              />
+              <div className="ctxwin-ticks">
+                {nodes.map((value) => {
+                  const ratio = (value - windowMin) / (windowMax - windowMin)
+                  return (
+                    <button
+                      type="button"
+                      key={value}
+                      className={'ctxwin-node' + (windowValue === value ? ' on' : '')}
+                      style={{ left: `${ratio * 100}%`, transform: value >= windowMax ? 'translateX(-100%)' : 'translateX(-50%)' }}
+                      onClick={() => setCtxWindow(value >= windowMax ? null : value)}
+                    >
+                      {formatWindowTokens(value)}
+                    </button>
+                  )
+                })}
+              </div>
+              <div className="ctxwin-hint">
+                {providerMax === null
+                  ? t('供应商没报窗口上限，暂按 128K。')
+                  : t('供应商返回的模型上限（{n}）。', { n: formatWindowTokens(providerMax) })}
+                {' '}
+                {t('点节点切换常用窗口，输出上限用供应商默认值。')}
+              </div>
+            </div>
           </div>
         </div>
         <div className="mf" style={{ justifyContent: 'flex-end' }}>
@@ -620,10 +884,20 @@ interface ModelBridge {
     model?: string
     base_url: string
     api_key: string
+    context_window_in?: number
+    context_window_max?: number
+    context_window_out?: number
   }): Promise<{
     provider: string
     api_key_ref: string
+    context_window_max?: number | null
   }>
+  /** 供应商对单个模型给出的资源上限；拿不到返回空对象 */
+  limits(input: { provider: string; model: string }): Promise<{ context_window?: number; max_output_tokens?: number }>
+  /** 用未保存的 URL/Key 探测可用模型（测试连接） */
+  discover(input: { base_url: string; api_key: string; credential_ref?: string }): Promise<DiscoverResult>
+  /** 用未保存的 URL/Key 查单个模型的窗口上限（下拉选中/手填模型 id 后） */
+  limitsUnsaved(input: { base_url: string; model: string; api_key: string; credential_ref?: string }): Promise<{ context_window?: number; max_output_tokens?: number }>
   remove(name: string): Promise<{ removed: boolean }>
   probe(input: { provider: string; model?: string }): Promise<ProbeResult>
   /** 某个凭据引用**有没有值**（只问在不在，不问是什么——I7） */
@@ -639,6 +913,9 @@ interface CustomModelInfo {
   readonly model: string
   readonly base_url: string
   readonly api_key_ref: string
+  readonly context_window_in?: number | undefined
+  readonly context_window_max?: number | undefined
+  readonly context_window_out?: number | undefined
 }
 
 /** 六类归因（18 §8.2 / 19 §6.4）：每类配**独立**文案，不合并成一句"失败" */
@@ -650,9 +927,25 @@ type ProbeFailureKind =
   | 'provider-not-running'
   | 'not-configured'
 
+type ProbeFailure = {
+  readonly kind: ProbeFailureKind
+  readonly code: string
+  readonly message: string
+}
+
 type ProbeResult =
   | { readonly ok: true; readonly models: readonly { readonly id: string }[] }
-  | { readonly ok: false; readonly failure: { readonly kind: ProbeFailureKind; readonly code: string; readonly message: string } }
+  | { readonly ok: false; readonly failure: ProbeFailure }
+
+interface DiscoveredModel {
+  readonly id: string
+  readonly name?: string
+  readonly contextWindow?: number
+}
+
+type DiscoverResult =
+  | { readonly ok: true; readonly models: readonly DiscoveredModel[] }
+  | { readonly ok: false; readonly failure: ProbeFailure }
 
 /** 归因 → 人话（18 §8.2 的表格逐条对应） */
 function probeMessage(result: ProbeResult): string {
@@ -789,6 +1082,9 @@ function ModelSection() {
                   {/* 只显示主机名，完整地址放 tooltip——列表里塞长 URL 会挤掉别的列 */}
                   {hostOf(m.base_url)}
                 </span>
+                <span className="mctx" title={t('上下文窗口')}>
+                  {formatWindowTokens(m.context_window_in ?? m.context_window_max ?? FALLBACK_CONTEXT_WINDOW)}
+                </span>
                 <span className="macts">
                   <button
                     title={t('编辑')}
@@ -836,7 +1132,7 @@ function ModelSection() {
         <AddModelModal
           editing={editing}
           onClose={closeModal}
-          onSave={async (draft, opts) => {
+          onSave={async (draft) => {
             const bridge = modelBridge()
             if (bridge === undefined) {
               toast(t('当前环境没有主进程桥，无法保存'))
@@ -845,10 +1141,10 @@ function ModelSection() {
             try {
               const saved = await bridge.save(draft)
               await refresh()
-              // 18 §8.2：保存后**必须**立即自检并给可读结果
-              const result = await bridge.probe({ provider: saved.provider, model: draft.label })
+              // 18 §8.2：保存后**必须**立即自检并给可读结果（用模型 id，不是显示名）
+              const result = await bridge.probe({ provider: saved.provider, model: draft.model ?? draft.label })
               toast(probeMessage(result))
-              if (result.ok || opts?.probe !== true) closeModal()
+              closeModal()
             } catch (err) {
               toast(err instanceof Error ? err.message : t('保存失败'))
             }
@@ -1418,16 +1714,8 @@ function ArchiveSection() {
         ) : (
           trash.map((item) => (
             <div className="srow" key={item.path}>
-              <div className="sl mono" title={item.session_id}>
-                {item.session_id.slice(0, 8)}…
-              </div>
-              <div className="sr">
-                <span className="src">
-                  {formatBytes(item.bytes)} · {new Date(item.deleted_at).toLocaleString()} ·{' '}
-                  {item.expires_in_ms === 0
-                    ? t('已过期，可清理')
-                    : t('{n} 天后可清理', { n: Math.ceil(item.expires_in_ms / 86_400_000) })}
-                </span>
+              <div className="trash-label" title={item.label || t('未命名会话')}>
+                {item.label || t('未命名会话')}
               </div>
             </div>
           ))

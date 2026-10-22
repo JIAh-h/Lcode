@@ -10,6 +10,7 @@ import type { SessionService } from '@lcode/session'
 import { initZstd } from '@lcode/session-persistence-jsonl'
 import type { DesktopServices } from './model-feature.ts'
 import { createServices } from './model-feature.ts'
+import { FALLBACK_CONTEXT_WINDOW } from '@lcode/model-api'
 
 /**
  * **agent 运行时装配**（docs/24 T5.2/T5.3；20 §5.6）。
@@ -59,7 +60,7 @@ export interface AgentRuntimeOptions {
   readonly modelRouting?: ModelRoutingService | undefined
   /** 可替换的代码运行器；默认 provider 仅在真实只读沙箱下运行。 */
   readonly codeRuntime?: CodeRuntime | undefined
-  /** 显式摘要器；省略时自动压缩只记录候选，绝不隐藏额外模型调用。 */
+  /** 显式摘要器；只在用户手动压缩时调用，不参与自动触发。 */
   readonly compactionSummarizer?: CompactionSummarizer | undefined
 }
 
@@ -88,9 +89,9 @@ import { createLocalAgentPresets, type PresetSnapshot } from '@lcode/agent-prese
 import { composeRuntimeProfile, type InternalBundleEntry, type RuntimeCompositionSnapshot } from '@lcode/runtime-composition'
 import { registerLocalContextSources } from '@lcode/context-local'
 import { registerContextBudget } from '@lcode/context-budget'
+import type { TokenMeasurement } from '@lcode/context-budget'
 import { createLocalCompactionSummary } from '@lcode/compaction-summary'
-import type { CompactionService } from '@lcode/compaction'
-import { registerAutoCompactionPolicy, type CompactionSummarizer } from '@lcode/compaction-policy'
+import type { CompactionResult, CompactionService } from '@lcode/compaction'
 import { registerCompactionPrune } from '@lcode/compaction-prune'
 import { registerLocalSpill } from '@lcode/spill-local'
 import { registerInprocessSubagents } from '@lcode/subagent-inprocess'
@@ -106,12 +107,25 @@ import { createSubprocessCodeRuntime } from '@lcode/code-runtime-subprocess'
 import { createCodeTool } from '@lcode/tool-code'
 import { join } from 'node:path'
 import { createBuiltinRuntimeProfile, type BuiltinRuntimeProfileId } from './runtime-profile.ts'
+import { createModelCompactionSummarizer, type CompactionSummarizer } from './compaction-summarizer.ts'
 
 declare module '@lcode/context' {
   interface Services {
     /** `session-api` 发布契约，desktop bundle 负责把本地 provider 挂进 root Context。 */
     sessions: RuntimeSessionsService
   }
+}
+
+export interface SessionContextUsage {
+  /** 当前默认模型配置的输入窗口；未配置时 null（不猜） */
+  readonly contextWindowTokens: number | null
+  /** 当前上下文占用；优先采用供应商 usage 基线 */
+  readonly usedTokens: number
+  /** 占用百分比（0–100）；未配置窗口时 null */
+  readonly percent: number | null
+  /** provider = 整段有实测基线；mixed = 实测基线 + 新增估算；estimate = 纯本地估算 */
+  readonly usageSource: 'provider' | 'mixed' | 'estimate'
+  readonly measurement: TokenMeasurement
 }
 
 export interface AgentRuntime {
@@ -132,6 +146,16 @@ export interface AgentRuntime {
   readonly presets: RuntimePresetService
   /** P7-02：显式压缩事务；自动触发与成本判定由后续 provider 决定。 */
   readonly compaction: CompactionService
+  /**
+   * 当前会话的上下文占用估算。返回的是**估算值**（2 字符/token），
+   * 供输入框状态栏显示；真实计费仍以 provider usage 为准。
+   */
+  contextUsage(input: { readonly sessionId: string }): Promise<SessionContextUsage>
+  /**
+   * 手动压缩较早历史：用当前默认模型生成摘要，并提交 `trigger:'manual'` 事务。
+   * 有回合正在执行时拒绝（表面正在被写入，切点不安全）。
+   */
+  compactSession(input: { readonly sessionId: string }): Promise<CompactionResult>
   /** P7-04：受限的进程内子代理 provider；不能取得审批端口或扩展 root Context。 */
   readonly subagents: InprocessSubagentService
   /** 当前实际的内置组合；只含 service 关系，不含凭据、路径或运行时句柄。 */
@@ -230,11 +254,11 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
     (ctx) => mountCodeRuntimeBundle(options, ctx),
     (ctx) => {
       if (sessions === undefined || checkpoints === undefined) throw new Error('内部组合缺少 agent provider 依赖')
-      return mountAgentBundle(options, services, sessions, checkpoints, ctx)
+      return mountAgentBundle(options, sessions, checkpoints, ctx)
     },
     async () => {
       if (sessions === undefined || checkpoints === undefined || extensionFacade === undefined) throw new Error('内部组合缺少 extension provider')
-      mounted = await mountDesktopSpine(services, sessions, checkpoints, extensionFacade)
+      mounted = await mountDesktopSpine(options, services, sessions, checkpoints, extensionFacade)
       return async () => { await mounted?.dispose() }
     },
     profileExtras,
@@ -255,6 +279,18 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
   const unregisterTools = ctx.set('tools', tools)
   const systemPrompt = createSystemPromptService(tools)
   systemPrompt.section('base', BASE_SYSTEM_PROMPT)
+  /*
+   * `agents.inject` 的内容经 `injected_*` 变量到达装配点。变量本身不会自动出现在
+   * 提示词里——没有这一段，"注入"就是静默丢失。只在真有内容时追加，正常轮次
+   * 的系统提示与指纹保持原样。
+   */
+  systemPrompt.context('host-injected', (assembleCtx) => {
+    const notes = Object.entries(assembleCtx.variables)
+      .filter(([name]) => name.startsWith('injected_'))
+      .map(([, content]) => content.trim())
+      .filter((content) => content !== '')
+    return notes.length === 0 ? '' : `## 本轮补充上下文\n\n${notes.join('\n\n')}`
+  })
   const unregisterPrompt = ctx.set('systemPrompt', systemPrompt)
   const workspaceOf = (sessionId: string) => sessions.workspaceOf(sessionId)
   for (const tool of createFsTools({ fs: ctx.get('fs'), workspaceRoot, workspaceOf, spill: ctx.get('spill') })) tools.register(tool)
@@ -435,7 +471,6 @@ function mountExecutionBundle(options: AgentRuntimeOptions, services: DesktopSer
 /** `agent-local` 只装配内置 agent 协作服务；具体实现仍归各能力包所有。 */
 function mountAgentBundle(
   options: AgentRuntimeOptions,
-  services: DesktopServices,
   sessions: LocalSessionsApi,
   checkpoints: FileCheckpointService,
   ctx: DesktopServices['ctx'],
@@ -479,19 +514,9 @@ function mountAgentBundle(
   // ⑤ 活体 agent 注册表（依赖 ctx 与 getSession）
   unregisterServices.push(ctx.set('agents', new InMemoryAgentStore(ctx, getSession)))
   const unregisterContextSources = registerLocalContextSources({ ctx, workspaceRoot, systemPrompt, sessions })
-  const unregisterContextBudget = registerContextBudget({
-    ctx,
-    systemPrompt,
-    sessionOf: getSession,
-    contextWindowOf: () => activeContextWindow(services),
-  })
+  const unregisterContextBudget = registerContextBudget({ ctx })
   const compaction = createLocalCompactionSummary()
   unregisterServices.push(ctx.set('compaction', compaction))
-  const unregisterAutoCompaction = registerAutoCompactionPolicy({
-    ctx,
-    sessionOf: getSession,
-    ...(options.compactionSummarizer === undefined ? {} : { summarize: options.compactionSummarizer }),
-  })
   // 发布中的后台作业归属到 agent。对话回合取消不碰它；只有 agent 被销毁时才清理。
   const uninstallJobOwnerCleanup = ctx.on('agent/disposed', async ({ agentId }) => {
     await jobs.disposeOwner(agentId)
@@ -501,7 +526,6 @@ function mountAgentBundle(
     uninstallJobOwnerCleanup()
     unregisterContextBudget()
     unregisterContextSources()
-    unregisterAutoCompaction()
     uninstallCheckpoints()
     for (const unregister of unregisterServices.reverse()) unregister()
   }
@@ -509,6 +533,7 @@ function mountAgentBundle(
 
 /** `lcode-spine` 只将已装配的服务投影为桌面/CLI 共用的产品门面。 */
 async function mountDesktopSpine(
+  options: AgentRuntimeOptions,
   services: DesktopServices,
   sessions: LocalSessionsApi,
   checkpoints: FileCheckpointService,
@@ -530,6 +555,36 @@ async function mountDesktopSpine(
     skills: extensions.skills,
     presets: extensions.presets,
     compaction: ctx.get('compaction') as CompactionService,
+    async contextUsage({ sessionId }) {
+      const session = getSession(sessionId)
+      // 与真正发请求时同一套装配：估算 system / tools 不能各算各的
+      const assembled = await ctx.get('systemPrompt').assemble({ sessionId })
+      const measurement = ctx.get('contextBudget').measure({
+        session,
+        system: assembled.system,
+        tools: assembled.tools,
+      })
+      const contextWindowTokens = activeContextWindow(services) ?? null
+      const usedTokens = measurement.providerTotal ?? measurement.total
+      const usageSource = measurement.providerTotal === undefined
+        ? 'estimate'
+        : (measurement.providerDeltaTokens ?? 0) > 0
+          ? 'mixed'
+          : 'provider'
+      const percent = contextWindowTokens === null
+        ? null
+        : Math.min(100, Math.round((usedTokens / contextWindowTokens) * 1000) / 10)
+      return { contextWindowTokens, usedTokens, percent, usageSource, measurement }
+    },
+    async compactSession({ sessionId }) {
+      const session = getSession(sessionId)
+      const boundary = [...session.events()].reverse().find((event) => event.type === 'turn/start' || event.type === 'turn/end')
+      if (boundary?.type === 'turn/start') throw new Error('这一轮还在执行，先暂停再压缩上下文')
+      // 只在用户显式点击时调用摘要器；没有任何自动触发路径
+      const summarize = options.compactionSummarizer ?? createModelCompactionSummarizer({ ctx })
+      const summary = await summarize({ sessionId, session })
+      return ctx.get('compaction').compact({ session, summary, trigger: 'manual' })
+    },
     subagents: ctx.get('subagents') as InprocessSubagentService,
     watchSession(sessionId, handler) {
       // `sessionServiceFor` 会校验"会话已打开"并抛 ES-SESSION_NOT_FOUND——
@@ -544,9 +599,14 @@ function activeContextWindow(services: DesktopServices): number | undefined {
   const selection = services.ctx.get('agentDefaultModel').get()
   if (selection === undefined) return undefined
   const providers = services.readSetting('model.providers')
-  if (!Array.isArray(providers)) return undefined
-  const config = providers.find((candidate) => typeof candidate === 'object' && candidate !== null && (candidate as { name?: unknown }).name === selection.provider) as { context_window_in?: unknown } | undefined
-  return typeof config?.context_window_in === 'number' && config.context_window_in > 0 ? config.context_window_in : undefined
+  const config = Array.isArray(providers)
+    ? providers.find((candidate) => typeof candidate === 'object' && candidate !== null && (candidate as { name?: unknown }).name === selection.provider) as { context_window_in?: unknown; context_window_max?: unknown } | undefined
+    : undefined
+  if (typeof config?.context_window_in === 'number' && config.context_window_in > 0) return config.context_window_in
+  // 用户没显式配置时用供应商返回的模型上限（保存时探测并缓存）
+  if (typeof config?.context_window_max === 'number' && config.context_window_max > 0) return config.context_window_max
+  // 供应商也没给：保守回落，设置页会明确标注
+  return FALLBACK_CONTEXT_WINDOW
 }
 
 function defaultSandbox(subprocess: ReturnType<typeof createLocalSubprocess>, workspaceRoot: string): SandboxService {

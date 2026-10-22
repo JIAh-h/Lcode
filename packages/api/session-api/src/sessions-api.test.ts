@@ -2,7 +2,7 @@ import { appendFileSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { SessionEvent } from '@lcode/session'
-import { listSessionFiles, loadLog } from '@lcode/session-persistence-jsonl'
+import { findSessionFile, listSessionFiles, loadLog } from '@lcode/session-persistence-jsonl'
 import { closeAllIndexDbs } from '@lcode/session-persistence-sqlite'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { LocalSessionsApi } from './sessions-api.ts'
@@ -49,6 +49,57 @@ async function seedClosedTurn(title = '测试'): Promise<string> {
   await api.flush({ session_id })
   return session_id
 }
+
+describe('sessions.rewind', () => {
+  async function seedTwoTurns(): Promise<string> {
+    const sessionId = await seedClosedTurn()
+    await api.append({ session_id: sessionId, type: 'turn/start', data: { turn: 2 } })
+    await api.append({ session_id: sessionId, type: 'user/message', data: { role: 'user', content: '第二问' } })
+    await api.append({
+      session_id: sessionId,
+      type: 'assistant/message',
+      data: { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '第二答' }] } },
+    })
+    await api.append({ session_id: sessionId, type: 'turn/end', data: { turn: 2, reason: 'completed' } })
+    await api.flush({ session_id: sessionId })
+    return sessionId
+  }
+
+  it('把日志截断到目标用户消息之前，并同步内存镜像、磁盘与索引', async () => {
+    const sessionId = await seedTwoTurns()
+
+    // 第五个事件是第二轮的 user/message；真正的截断点在它所属轮的 turn/start（seq 4）
+    const result = await api.rewind({ session_id: sessionId, to_seq: 5 })
+    expect(result).toEqual({ session_id: sessionId, last_seq: 3, discarded: 4 })
+
+    const file = findSessionFile(home, sessionId)!
+    const loaded = loadLog(file)
+    expect(loaded.events).toHaveLength(4)
+    expect(loaded.events.at(-1)).toMatchObject({ type: 'turn/end', data: { turn: 1 } })
+
+    // 内存镜像是新 store（不是旧快照），派生历史里没有已撤回的那一轮
+    expect(api.sessionServiceFor(sessionId).length).toBe(4)
+    const derived = await api.derive({ session_id: sessionId })
+    expect(derived.messages.map((message) => message.role)).toEqual(['user', 'assistant'])
+    // 索引被重新投影：last_seq 跟着退回去，而不是留着旧值
+    expect((await api.meta({ session_id: sessionId })).last_seq).toBe(3)
+
+    // 写句柄已经在新文件上重开，后续事件从截断点继续编号
+    const next = await api.append({ session_id: sessionId, type: 'turn/start', data: { turn: 2 } })
+    expect(next.seq).toBe(4)
+  })
+
+  it('只接受用户消息作为切点，且不接受轮内插话', async () => {
+    const sessionId = await seedClosedTurn()
+    await expect(api.rewind({ session_id: sessionId, to_seq: 0 })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
+    await expect(api.rewind({ session_id: sessionId, to_seq: 99 })).rejects.toMatchObject({ code: 'ES-FORK_BOUNDARY_INVALID' })
+
+    await api.append({ session_id: sessionId, type: 'turn/start', data: { turn: 2 } })
+    await api.append({ session_id: sessionId, type: 'user/message', data: { role: 'user', content: '第一问' } })
+    await api.append({ session_id: sessionId, type: 'user/message', data: { role: 'user', content: '插话' } })
+    await expect(api.rewind({ session_id: sessionId, to_seq: 6 })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
+  })
+})
 
 describe('sessions.create / list / meta', () => {
   it('create 返回新会话与 last_seq = -1，并出现在 list 里', async () => {
@@ -421,6 +472,14 @@ describe('sessions.export', () => {
     expect(withDeleted.items.find((item) => item.session_id === sessionId)?.deleted_at).not.toBeNull()
     await api.restore({ session_id: sessionId })
     expect((await api.list()).items.some((item) => item.session_id === sessionId)).toBe(true)
+  })
+
+  it('回收站条目带内容标签，供设置页展示而不是 ID', async () => {
+    const sessionId = await seedClosedTurn('回收站标签')
+    await api.purge({ session_id: sessionId, force: true })
+    const trash = await api.listTrash()
+    expect(trash.items).toHaveLength(1)
+    expect(trash.items[0]?.label).toContain('把 parse.ts')
   })
 })
 

@@ -12,7 +12,7 @@ import type { SessionService } from "@lcode/session";
 import { createSystemPromptService } from "@lcode/system-prompt";
 import { InMemoryToolRegistry } from "@lcode/tools";
 import type { ToolDefinition } from "@lcode/tools";
-import { asAgentId, asSessionId } from "@lcode/util";
+import { ERROR_CODES, LcodeErrorImpl, asAgentId, asSessionId } from "@lcode/util";
 import { createAgentLoop } from "./agent-loop.ts";
 import { TurnEngine } from "./engine.ts";
 import type { CapturedRequest } from "./agent-loop.ts";
@@ -199,6 +199,61 @@ describe("批次③ · 无密钥跑通一次循环", () => {
       },
     });
     expect(handle.status).toBe("idle");
+  });
+
+  it("请求超窗：恢复协作点推进表面后自动重试，失败步被闭合", async () => {
+    const inner = new ReplayLlmAdapter(textScript("恢复后成功"));
+    let calls = 0;
+    const adapter: LlmAdapter = {
+      providerInfo: () => inner.providerInfo(),
+      listModels: (signal) => inner.listModels(signal),
+      resolveModel: (selection) => inner.resolveModel(selection),
+      prepareCall: (selection, opts) => inner.prepareCall(selection, opts),
+      providerRetryPolicy: () => inner.providerRetryPolicy(),
+      stream: (call, signal) => {
+        calls += 1;
+        if (calls === 1) {
+          return (async function* () {
+            throw new LcodeErrorImpl({
+              code: ERROR_CODES.EL_CONTEXT_OVERFLOW,
+              message: "maximum context length exceeded",
+              userMessage: "上下文超限",
+              retryable: false,
+            });
+          })();
+        }
+        return inner.stream(call, signal);
+      },
+    };
+    const h = await makeHarness(textScript("unused"), { adapter });
+    h.ctx.on("agent/request-error", (async (
+      payload: { session: SessionService },
+      next: () => Promise<{ readonly retry: boolean }>,
+    ) => {
+      void next;
+      payload.session.append({
+        type: "user/message",
+        data: { role: "user", content: [{ type: "text", text: "[summary] 旧历史已压缩" }] },
+        surfaceOp: { op: "replace", start: 0, end: 1 },
+      } as never);
+      return { retry: true };
+    }) as never);
+
+    const handle = await h.loop.create({ sessionId: asSessionId("s1"), id: asAgentId("a1") });
+    await handle.followup({ kind: "text", text: "开始" });
+
+    expect(calls).toBe(2);
+    const events = h.session.events();
+    expect(events.filter((event) => event.type === "request/header")).toHaveLength(2);
+    // 失败的那一步不能留一个没有终点的区间
+    expect(events.filter((event) => event.type === "step/start")).toHaveLength(2);
+    expect(events.filter((event) => event.type === "step/end")).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({ type: "turn/end", data: { turn: 1, reason: "completed" } });
+    // 重试请求看到的是压缩后的表面：摘要 + 本轮回复
+    expect(deriveMessages(events)).toEqual([
+      { role: "user", content: [{ type: "text", text: "[summary] 旧历史已压缩" }] },
+      { role: "assistant", content: [{ type: "text", text: "恢复后成功" }] },
+    ]);
   });
 
   it("工具循环：两段脚本驱动，raw args 原样落盘，I3 配对完整", async () => {

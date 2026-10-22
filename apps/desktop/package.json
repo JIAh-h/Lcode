@@ -24,7 +24,8 @@
     "better-sqlite3": "^11.10.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0"
+    "react-router-dom": "^6.28.0",
+    "@lcode/model-api": "workspace:*"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",

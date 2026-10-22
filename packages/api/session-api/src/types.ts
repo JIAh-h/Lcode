@@ -148,6 +148,25 @@ export interface ForkSessionResult {
   readonly last_seq: number
 }
 
+/**
+ * 就地回退到某条用户消息之前（「编辑后重发」的日志侧）。
+ *
+ * 与 `fork` 的分工：fork 保全长历史并产出新会话；rewind 把**这个会话自己的**权威
+ * 日志截断，让那一条消息及其之后的所有记录像没发生过一样重新发出。
+ */
+export interface RewindSessionInput {
+  readonly session_id: string
+  /** 回退目标（该 `user/message` 的 seq）：截断后日志为 `[0, to_seq)` */
+  readonly to_seq: number
+}
+
+export interface RewindSessionResult {
+  readonly session_id: string
+  readonly last_seq: number
+  /** 被丢弃的事件条数（审计与提示用） */
+  readonly discarded: number
+}
+
 export interface AppendEventInput {
   readonly session_id: string
   readonly type: string
@@ -295,6 +314,8 @@ export interface TrashEntry {
   readonly path: string
   readonly bytes: number
   readonly deleted_at: number
+  /** 展示用内容标签（首条用户消息或标题）；旧条目可能为空 */
+  readonly label: string
   /** 距到期被硬删还剩多少毫秒；已过期则为 0 */
   readonly expires_in_ms: number
 }
@@ -515,6 +536,8 @@ export interface SessionsApi {
   meta(input: SessionMetaInput): Promise<SessionMetaResult>
   rename(input: RenameSessionInput): Promise<RenameSessionResult>
   fork(input: ForkSessionInput): Promise<ForkSessionResult>
+  /** 就地回退到某条用户消息之前（编辑后重发）；截断权威日志并重建投影 */
+  rewind(input: RewindSessionInput): Promise<RewindSessionResult>
   append(input: AppendEventInput): Promise<SessionEvent>
   derive(input: DeriveInput): Promise<DeriveResult>
   flush(input: FlushInput): Promise<FlushResult>

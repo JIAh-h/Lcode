@@ -1,11 +1,8 @@
 import type { Context } from '@lcode/context'
-import type {} from '@lcode/agent'
-import type {} from '@lcode/agent-loop'
-import type { SessionService } from '@lcode/session'
-import type { SystemPromptService } from '@lcode/system-prompt'
+import type { SessionEvent, SessionService, VisibleSurfaceItem } from '@lcode/session'
+import { deriveVisibleSurfaceItems } from '@lcode/session'
 import type { ToolSchema } from '@lcode/tools'
 import type { Disposer } from '@lcode/util'
-import { asAgentId } from '@lcode/util'
 
 export interface TokenMeasurement {
   /** 取样时的日志长度；日志变更后该快照即过期。 */
@@ -17,71 +14,41 @@ export interface TokenMeasurement {
   /** provider 已返回的真实用量，只用于校准和审计，绝不再重复相加到 total。 */
   readonly observedInputTokens: number
   readonly observedOutputTokens: number
-}
-
-export interface ContextBudgetDecision {
-  readonly status: 'below-threshold' | 'summary-candidate' | 'no-context-window'
-  readonly measurement: TokenMeasurement
-  readonly thresholdTokens?: number | undefined
-  readonly requiredSavingsTokens?: number | undefined
+  /**
+   * 以最近一次仍有效的供应商 usage 为基线的当前上下文大小：
+   * `input + output + 其后新增表面的估算`。没有可用基线时缺省。
+   */
+  readonly providerTotal?: number | undefined
+  /** providerTotal 中属于"基线之后新增内容"的估算部分；0 表示整段来自实测。 */
+  readonly providerDeltaTokens?: number | undefined
 }
 
 export interface ContextBudgetService {
   measure(input: { readonly session: SessionService; readonly system: string; readonly tools: readonly ToolSchema[] }): TokenMeasurement
-  assess(input: { readonly measurement: TokenMeasurement; readonly contextWindowTokens?: number | undefined; readonly reserveOutputTokens?: number | undefined }): ContextBudgetDecision
-  inspect(sessionId: string): ContextBudgetDecision | undefined
 }
 
 declare module '@lcode/context' {
   interface Services { contextBudget: ContextBudgetService }
 }
 
-/**
- * 上下文预算 provider。它只记录步前测量和收益候选，绝不自行摘要或重试请求。
- * 估算按 2 字符/token 保守折算，避免把中文和混合代码上下文系统性低估。
- */
-export function registerContextBudget(input: {
-  readonly ctx: Context
-  readonly systemPrompt: SystemPromptService
-  readonly sessionOf: (sessionId: string) => SessionService
-  readonly contextWindowOf: () => number | undefined
-  readonly reserveOutputTokens?: number | undefined
-}): Disposer {
-  const snapshots = new Map<string, ContextBudgetDecision>()
-  const service: ContextBudgetService = {
-    measure,
-    assess,
-    inspect: (sessionId) => snapshots.get(sessionId),
-  }
-  const unregisterService = input.ctx.set('contextBudget', service)
-  const unregisterStep = input.ctx.on('agent/pre-step', async ({ agentId }) => {
-    const agent = input.ctx.get('agents').get(asAgentId(agentId))
-    if (agent === undefined) return
-    const system = await input.systemPrompt.assemble({ sessionId: agent.sessionId })
-    const measurement = service.measure({ session: input.sessionOf(agent.sessionId), system: system.system, tools: system.tools })
-    snapshots.set(agent.sessionId, service.assess({
-      measurement,
-      contextWindowTokens: input.contextWindowOf(),
-      ...(input.reserveOutputTokens === undefined ? {} : { reserveOutputTokens: input.reserveOutputTokens }),
-    }))
-  })
-  return () => {
-    unregisterStep()
-    unregisterService()
-    snapshots.clear()
-  }
+/** 只提供测量快照；是否压缩、何时压缩由用户显式触发，不做任何自动动作。 */
+export function registerContextBudget(input: { readonly ctx: Context }): Disposer {
+  return input.ctx.set('contextBudget', { measure })
 }
 
 export function measure(input: { readonly session: SessionService; readonly system: string; readonly tools: readonly ToolSchema[] }): TokenMeasurement {
-  const surface = input.session.deriveMessages().map((message) => JSON.stringify(message)).join('\n')
+  const events = input.session.events()
+  const items = deriveVisibleSurfaceItems(events)
+  const surface = items.map((item) => JSON.stringify(item.message)).join('\n')
   const schemas = JSON.stringify(input.tools)
   let observedInputTokens = 0
   let observedOutputTokens = 0
-  for (const event of input.session.events()) {
+  for (const event of events) {
     if (event.type !== 'assistant/message') continue
     observedInputTokens += event.data.usage?.input ?? 0
     observedOutputTokens += event.data.usage?.output ?? 0
   }
+  const provider = providerBaseline(events, items)
   const systemTokens = estimateTokens(input.system)
   const toolSchemaTokens = estimateTokens(schemas)
   const surfaceTokens = estimateTokens(surface)
@@ -93,22 +60,63 @@ export function measure(input: { readonly session: SessionService; readonly syst
     total: surfaceTokens + systemTokens + toolSchemaTokens,
     observedInputTokens,
     observedOutputTokens,
+    ...(provider === undefined ? {} : { providerTotal: provider.total, providerDeltaTokens: provider.delta }),
   })
 }
 
-export function assess(input: { readonly measurement: TokenMeasurement; readonly contextWindowTokens?: number | undefined; readonly reserveOutputTokens?: number | undefined }): ContextBudgetDecision {
-  if (input.contextWindowTokens === undefined || input.contextWindowTokens <= 0) return { status: 'no-context-window', measurement: input.measurement }
-  const reserve = Math.max(1_024, input.reserveOutputTokens ?? Math.floor(input.contextWindowTokens * 0.2))
-  const thresholdTokens = Math.max(0, input.contextWindowTokens - reserve)
-  if (input.measurement.total <= thresholdTokens) return { status: 'below-threshold', measurement: input.measurement, thresholdTokens }
-  return {
-    status: 'summary-candidate',
-    measurement: input.measurement,
-    thresholdTokens,
-    requiredSavingsTokens: input.measurement.total - thresholdTokens + 1,
+/**
+ * 最近一次仍可对齐到当前表面的供应商 usage。
+ *
+ * usage 是请求**发出时**的 prompt 大小；之后的助手输出、工具结果和用户消息
+ * 只能按估算补进来。压缩或回退会改写表面，旧基线随之作废。
+ */
+function providerBaseline(
+  events: readonly SessionEvent[],
+  items: readonly VisibleSurfaceItem[],
+): { readonly total: number; readonly delta: number } | undefined {
+  let baselineIndex = -1
+  let baseline: { readonly seq: number; readonly input: number; readonly output: number } | undefined
+  for (let index = 0; index < events.length; index += 1) {
+    const event = events[index]
+    if (event === undefined || event.type !== 'assistant/message') continue
+    const usage = event.data.usage
+    if (usage === undefined || usage.input <= 0) continue
+    baselineIndex = index
+    baseline = { seq: event.seq, input: usage.input, output: usage.output }
   }
+  if (baseline === undefined) return undefined
+  for (let index = baselineIndex + 1; index < events.length; index += 1) {
+    const type = events[index]?.type
+    if (type === 'compaction/start' || type === 'compaction/end' || type === 'session/rewound') return undefined
+  }
+  const itemIndex = items.findIndex((item) => item.sourceSeq === baseline.seq)
+  if (itemIndex < 0) return undefined
+  let delta = 0
+  for (const item of items.slice(itemIndex + 1)) delta += estimateTokens(JSON.stringify(item.message))
+  return { total: baseline.input + baseline.output + delta, delta }
 }
 
-function estimateTokens(text: string): number {
-  return text === '' ? 0 : Math.ceil(text.length / 2)
+/**
+ * 本地估算：CJK 字符约 1 token/字，其余字符约 1 token/3.5 字符。
+ * 供应商返回 usage 时以实测为准，这里只负责补齐"上次请求之后新增"的部分。
+ */
+export function estimateTokens(text: string): number {
+  if (text === '') return 0
+  let cjk = 0
+  let other = 0
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0
+    if (isCjk(code)) cjk += 1
+    else other += 1
+  }
+  return cjk + Math.ceil(other / 3.5)
+}
+
+function isCjk(code: number): boolean {
+  return (
+    (code >= 0x2e80 && code <= 0x9fff) || // 部首扩展、CJK 统一表意文字
+    (code >= 0xac00 && code <= 0xd7af) || // 韩文
+    (code >= 0xf900 && code <= 0xfaff) || // CJK 兼容表意文字
+    (code >= 0xff00 && code <= 0xffef) // 全角标点/字符
+  )
 }

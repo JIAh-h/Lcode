@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import { t } from '../i18n/index.ts'
@@ -25,6 +25,12 @@ export interface PopMenuItem {
   /** 选中态（当前生效项） */
   readonly checked?: boolean
   readonly disabled?: boolean
+  /** 左侧图标（替代勾选位；用于菜单底部的动作入口） */
+  readonly icon?: ReactNode
+  /** 在这一项之前画一条分隔线 */
+  readonly separator?: boolean
+  /** 次级样式：更小字号与次要颜色，和普通选项区分 */
+  readonly compact?: boolean
 }
 
 const MENU_WIDTH = 260
@@ -131,23 +137,29 @@ export function PopMenu({
             >
               {header ? <div className="picklab">{t(header)}</div> : null}
               {items.map((item) => (
-                <a
-                  key={item.id}
-                  role="menuitemradio"
-                  aria-checked={item.checked === true}
-                  className={(item.checked ? 'on' : '') + (item.disabled ? ' disabled' : '')}
-                  onClick={() => {
-                    if (item.disabled) return
-                    setPos(null)
-                    onSelect(item.id)
-                  }}
-                >
-                  <span className="pmk">{item.checked ? '✓' : ''}</span>
-                  <span className="pml">
-                    {t(item.label)}
-                    {item.hint ? <em>{t(item.hint)}</em> : null}
-                  </span>
-                </a>
+                <Fragment key={item.id}>
+                  {item.separator === true ? <div className="pmsep" role="separator" /> : null}
+                  <a
+                    role="menuitemradio"
+                    aria-checked={item.checked === true}
+                    className={
+                      (item.checked ? 'on' : '') +
+                      (item.disabled ? ' disabled' : '') +
+                      (item.compact ? ' compact' : '')
+                    }
+                    onClick={() => {
+                      if (item.disabled) return
+                      setPos(null)
+                      onSelect(item.id)
+                    }}
+                  >
+                    <span className="pmk">{item.icon ?? (item.checked ? '✓' : '')}</span>
+                    <span className="pml">
+                      {t(item.label)}
+                      {item.hint ? <em>{t(item.hint)}</em> : null}
+                    </span>
+                  </a>
+                </Fragment>
               ))}
               {footer ? <div className="pickhint">{t(footer)}</div> : null}
             </div>,

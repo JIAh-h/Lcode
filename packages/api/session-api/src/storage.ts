@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, readSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { CACHE_DIR, EXPORTS_DIR, SESSIONS_DIR, spillRoot, trashRoot } from '@lcode/util'
 
@@ -93,6 +93,62 @@ export interface TrashEntryInfo {
   readonly path: string
   readonly deleted_at: number
   readonly bytes: number
+  /** 展示用内容标签：purge 时写的元数据，旧条目回落到日志首条用户消息 */
+  readonly label: string
+}
+
+/** `purge` 时写在回收站文件旁的元数据（`<file>.meta.json`），用于展示内容而非 ID */
+export interface TrashMeta {
+  readonly label?: string
+}
+
+function readTrashMeta(path: string): TrashMeta {
+  try {
+    return JSON.parse(readFileSync(`${path}.meta.json`, 'utf8')) as TrashMeta
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * 旧条目没有元数据时，从日志开头 64KB 里找第一条用户消息。
+ * 只读前缀：回收站文件可能很大，列表页不该把整份日志读进内存。
+ * 压缩日志读不出可读文本时返回空串（渲染层回落「未命名会话」）。
+ */
+function readTrashPreview(path: string): string {
+  try {
+    const fd = openSync(path, 'r')
+    try {
+      const buf = Buffer.alloc(64 * 1024)
+      const read = readSync(fd, buf, 0, buf.length, 0)
+      if (read <= 0) return ''
+      for (const line of buf.subarray(0, read).toString('utf8').split('\n')) {
+        if (line.trim() === '') continue
+        try {
+          const frame = JSON.parse(line) as { type?: string; data?: { content?: unknown } }
+          if (frame.type !== 'user/message') continue
+          const content = frame.data?.content
+          if (typeof content === 'string') return content.replace(/\s+/g, ' ').trim()
+          if (Array.isArray(content)) {
+            return content
+              .filter((block): block is { type: string; text?: string } => typeof block === 'object' && block !== null)
+              .filter((block) => block.type === 'text' && typeof block.text === 'string')
+              .map((block) => block.text ?? '')
+              .join(' ')
+              .replace(/\s+/g, ' ')
+              .trim()
+          }
+        } catch {
+          // 撕裂尾或非 JSON 帧：跳过
+        }
+      }
+    } finally {
+      closeSync(fd)
+    }
+  } catch {
+    // 读不了就当没有预览
+  }
+  return ''
 }
 
 /** 回收站文件名的命名约定（22 §2.1）：`trash/<session-id>.jsonl.<ts>` */
@@ -117,11 +173,14 @@ export function readTrashEntry(name: string, path: string): TrashEntryInfo | nul
     return null
   }
   const match = TRASH_NAME.exec(name)
+  const meta = readTrashMeta(path)
+  const label = (meta.label ?? '').trim() !== '' ? String(meta.label).trim() : readTrashPreview(path)
   return {
     session_id: match?.[1] ?? name,
     path,
     deleted_at: match === null ? mtimeMs : Number(match[2]),
     bytes,
+    label,
   }
 }
 
@@ -131,6 +190,8 @@ export function listTrashEntries(home: string): TrashEntryInfo[] {
   if (!existsSync(root)) return []
   const out: TrashEntryInfo[] = []
   for (const entry of readdirSync(root, { withFileTypes: true })) {
+    // 元数据 sidecar 不是会话条目
+    if (entry.name.endsWith('.meta.json')) continue
     const parsed = readTrashEntry(entry.name, join(root, entry.name))
     if (parsed !== null) out.push(parsed)
   }
@@ -156,6 +217,7 @@ export function pruneTrash(home: string, opts?: { readonly now?: number; readonl
     }
     try {
       rmSync(entry.path, { recursive: true, force: true })
+      rmSync(`${entry.path}.meta.json`, { force: true })
       removed.push({ path: entry.path, bytes: entry.bytes })
     } catch {
       kept += 1 // 删不掉（占用中）就留着，宁可多留一次也不误报
@@ -252,9 +314,11 @@ export function emptyTrash(home: string): PruneTrashResult {
   const removed: { path: string; bytes: number }[] = []
   for (const entry of readdirSync(root, { withFileTypes: true })) {
     const path = join(root, entry.name)
+    const isMeta = entry.name.endsWith('.meta.json')
     const bytes = entry.isDirectory() ? dirBytes(path) : statSync(path).size
     rmSync(path, { recursive: true, force: true })
-    removed.push({ path, bytes })
+    // sidecar 是条目的附属文件，不单独算一项
+    if (!isMeta) removed.push({ path, bytes })
   }
   return { removed, freedBytes: removed.reduce((sum, item) => sum + item.bytes, 0), kept: 0 }
 }

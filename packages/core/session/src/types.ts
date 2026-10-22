@@ -322,6 +322,21 @@ export interface SessionEventMap {
     readonly checkpointId: string
     readonly restoredPaths: readonly string[]
     readonly removedPaths: readonly string[]
+    /** 没有备份、因此被刻意留在磁盘上的路径（尽力回退时出现） */
+    readonly unrestoredPaths?: readonly string[] | undefined
+  }
+  /**
+   * 就地回退（编辑后重发）：某个用户消息及其之后的记录已被截断，
+   * 这一条落在截断后的新尾部，用来向用户解释"刚才那轮被撤销了什么"。
+   *
+   * 它**不是**表面事件——不进入模型历史，也不该被当成一条消息渲染。
+   */
+  'session/rewound': {
+    readonly toSeq: number
+    readonly discarded: number
+    readonly restoredPaths: readonly string[]
+    readonly removedPaths: readonly string[]
+    readonly unrestoredPaths: readonly string[]
   }
   /** P6-05：预设的最终纯数据快照；重放可解释该会话采用了哪些来源与覆盖顺序。 */
   'preset/snapshot': {

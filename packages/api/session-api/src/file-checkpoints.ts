@@ -25,10 +25,38 @@ export interface FileCheckpoint {
   readonly skipped: readonly FileCheckpointSkipped[]
 }
 
+export interface FileCheckpointRestoreInput {
+  readonly sessionId: string
+  readonly workspaceRoot: string
+  readonly session: SessionService
+  readonly checkpointId: string
+  /**
+   * 尽力回退：目标检查点不完整时不再整笔拒绝，而是回退能回退的那些文件，
+   * 并把**碰不得**的路径原样留在磁盘上、如实报给调用方（见返回值的 `unrestoredPaths`）。
+   *
+   * 为什么需要它：编辑后重发要"把这一轮撤销干净"，但二进制/超大/符号链接文件
+   * 从来没有备份。此时**什么都不动**远好过把它们删掉——删了就是真的丢数据，
+   * 而不删只是回到一个不完美但可继续的状态，模型下一轮会重新生成并告知用户。
+   */
+  readonly allowPartial?: boolean | undefined
+}
+
+export interface FileCheckpointRestoreResult {
+  readonly restoredPaths: readonly string[]
+  readonly removedPaths: readonly string[]
+  /** 无法回退、因此**未被触碰**的路径 */
+  readonly unrestoredPaths: readonly string[]
+}
+
 export interface FileCheckpointService {
   capture(input: { readonly sessionId: string; readonly workspaceRoot: string; readonly session: SessionService; readonly turn: number; readonly endSeq: number }): Promise<FileCheckpoint>
   list(sessionId: string): Promise<readonly FileCheckpoint[]>
-  restore(input: { readonly sessionId: string; readonly workspaceRoot: string; readonly session: SessionService; readonly checkpointId: string }): Promise<{ readonly restoredPaths: readonly string[]; readonly removedPaths: readonly string[] }>
+  restore(input: FileCheckpointRestoreInput): Promise<FileCheckpointRestoreResult>
+  /**
+   * 丢弃落在 `fromSeq` 及之后的检查点（编辑后重发会删掉一轮，它的快照不能再参与
+   * "最新状态"的计算——否则下一次 capture 会把已经撤回的改动当成基线继承下来）。
+   */
+  discardFrom(sessionId: string, fromSeq: number): Promise<number>
 }
 
 export interface LocalFileCheckpointOptions {
@@ -103,7 +131,7 @@ export class LocalFileCheckpointService implements FileCheckpointService {
     return checkpoints.sort((left, right) => left.endSeq - right.endSeq)
   }
 
-  async restore(input: { readonly sessionId: string; readonly workspaceRoot: string; readonly session: SessionService; readonly checkpointId: string }): Promise<{ readonly restoredPaths: readonly string[]; readonly removedPaths: readonly string[] }> {
+  async restore(input: FileCheckpointRestoreInput): Promise<FileCheckpointRestoreResult> {
     assertSessionId(input.sessionId)
     assertCheckpointId(input.checkpointId)
     const checkpoint = await this.readManifest(input.sessionId, input.checkpointId)
@@ -111,7 +139,7 @@ export class LocalFileCheckpointService implements FileCheckpointService {
     if (workspaceRoot !== checkpoint.workspaceRoot) {
       throw conflict('检查点属于另一个工作区，已拒绝恢复。')
     }
-    if (checkpoint.partial) {
+    if (checkpoint.partial && input.allowPartial !== true) {
       throw conflict('该检查点含二进制、大文件、符号链接或不可读文件，无法保证完整恢复。')
     }
 
@@ -119,7 +147,20 @@ export class LocalFileCheckpointService implements FileCheckpointService {
     const tracked = new Set(all.flatMap((entry) => entry.trackedPaths))
     const expected = new Map(checkpoint.files.map((file) => [file.path, file]))
     const restorePaths = [...expected.keys()].sort()
-    const removePaths = [...tracked].filter((path) => !expected.has(path)).sort()
+    /*
+     * 没有任何备份的路径：尽力回退时**不删也不改**，只如实报出去。
+     *
+     * `restore` 的删除逻辑原本会把"后面几轮 tracked、但目标检查点里没有"的路径都当
+     * "后来新建的文件"删掉——对二进制/超大/符号链接文件来说那是无备份的删除。
+     * 回退到旧轮次时，"删得干净"必须让位于"不丢数据"。
+     */
+    const unrestorable = new Set(
+      all
+        .filter((entry) => entry.endSeq >= checkpoint.endSeq)
+        .flatMap((entry) => entry.skipped.map((skip) => skip.path)),
+    )
+    const removePaths = [...tracked].filter((path) => !expected.has(path) && !unrestorable.has(path)).sort()
+    const unrestoredPaths = [...tracked].filter((path) => !expected.has(path) && unrestorable.has(path)).sort()
 
     // 所有路径和 blob 先验证完，再触碰工作区；失败不会留下“已写了一半”的事件记录。
     const contents = new Map<string, Buffer>()
@@ -150,9 +191,26 @@ export class LocalFileCheckpointService implements FileCheckpointService {
     }
     input.session.append({
       type: 'checkpoint/restored',
-      data: { checkpointId: checkpoint.checkpointId, restoredPaths: restorePaths, removedPaths: removePaths },
+      data: {
+        checkpointId: checkpoint.checkpointId,
+        restoredPaths: restorePaths,
+        removedPaths: removePaths,
+        ...(unrestoredPaths.length === 0 ? {} : { unrestoredPaths }),
+      },
     })
-    return { restoredPaths: restorePaths, removedPaths: removePaths }
+    return { restoredPaths: restorePaths, removedPaths: removePaths, unrestoredPaths }
+  }
+
+  async discardFrom(sessionId: string, fromSeq: number): Promise<number> {
+    assertSessionId(sessionId)
+    const all = await this.list(sessionId)
+    let removed = 0
+    for (const checkpoint of all) {
+      if (checkpoint.endSeq < fromSeq) continue
+      await rm(manifestPath(this.options.home, sessionId, checkpoint.checkpointId), { force: true })
+      removed += 1
+    }
+    return removed
   }
 
   private async latest(sessionId: string): Promise<FileCheckpoint | undefined> {

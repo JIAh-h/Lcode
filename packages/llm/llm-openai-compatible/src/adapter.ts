@@ -3,6 +3,7 @@ import type { CredentialsService } from '@lcode/credentials'
 import type {
   LlmAdapter,
   ModelInfo,
+  ModelLimits,
   PrepareOpts,
   PreparedCall,
   ProviderInfo,
@@ -59,10 +60,28 @@ export interface OpenAiCompatibleOptions {
   readonly timeoutMs?: number | undefined
 }
 
-/** OpenAI 协议的默认上下文窗口（各家不同，这里只作为"没告诉我们就用这个"的兜底） */
-const DEFAULT_CONTEXT_WINDOW = 128_000
-
 const DEFAULT_TIMEOUT_MS = 120_000
+
+/**
+ * DashScope（百炼）原生模型目录缓存。
+ *
+ * `GET /api/v1/models` 的 `output.models[].model_info.context_window` 才是**权威窗口**
+ * （如 deepseek-v4.1-flash = 1000000）；而 `/compatible-mode/v1/models/{id}` 里的
+ * `extra_info.default_envs.max_input_tokens` 只是部署默认 env（实测 129024，且 13 万 tokens
+ * 的输入照常被接受）。目录有 300+ 条、分页返回，所以缓存 5 分钟。
+ */
+const CATALOG_TTL_MS = 5 * 60 * 1000
+const CATALOG_PAGE_SIZE = 100
+const CATALOG_MAX_PAGES = 6
+const catalogCache = new Map<string, { readonly at: number; readonly models: Map<string, ModelLimits> }>()
+
+/** `…/compatible-mode/v1` → `…/api/v1`；非 DashScope 形态返回 undefined */
+function nativeApiBase(baseUrl: string): string | undefined {
+  const marker = '/compatible-mode'
+  const at = baseUrl.indexOf(marker)
+  if (at < 0) return undefined
+  return `${baseUrl.slice(0, at)}/api/v1`
+}
 
 export class OpenAiCompatibleAdapter implements LlmAdapter {
   private readonly options: OpenAiCompatibleOptions
@@ -87,16 +106,105 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
    */
   async listModels(signal: AbortSignal): Promise<readonly ModelInfo[]> {
     const { baseUrl, headers } = await this.resolveEndpoint()
-    const res = await this.request(`${baseUrl}/models`, { method: 'GET', headers, signal })
+    const jsonHeaders = { ...headers, accept: 'application/json' }
+    const res = await this.request(`${baseUrl}/models`, { method: 'GET', headers: jsonHeaders, signal })
     const body = parseModelListResponse(await res.text())
     const list = Array.isArray(body.data) ? body.data : []
-    return list
-      .filter((item): item is { id: string; name?: string } => typeof item.id === 'string')
-      .map((item) => ({
-        id: item.id,
-        name: typeof item.name === 'string' ? item.name : item.id,
-        contextWindow: DEFAULT_CONTEXT_WINDOW,
-      }))
+    const models: ModelInfo[] = list
+      .filter((item): item is Record<string, unknown> & { id: string } => typeof item === 'object' && item !== null && typeof (item as { id?: unknown }).id === 'string')
+      .map((item) => {
+        const limits = extractModelLimits(item)
+        return {
+          id: item.id,
+          name: typeof item.name === 'string' ? item.name : item.id,
+          ...(limits.contextWindow === undefined ? {} : { contextWindow: limits.contextWindow }),
+        }
+      })
+    // 有原生目录时用它补上窗口：`/models` 常常只给 id
+    const native = nativeApiBase(baseUrl)
+    if (native !== undefined) {
+      const catalog = await this.loadNativeCatalog(native, jsonHeaders, signal)
+      if (catalog !== undefined) {
+        for (const model of models) {
+          if (model.contextWindow !== undefined) continue
+          const hit = catalog.get(model.id)
+          if (hit?.contextWindow !== undefined) (model as { contextWindow?: number }).contextWindow = hit.contextWindow
+        }
+      }
+    }
+    return models
+  }
+
+  /**
+   * 读取供应商对单个模型的资源上限。
+   *
+   * OpenAI 的 `/models` 标准里没有窗口字段，但不少网关额外提供
+   * `GET /models/{id}`（百炼的 `extra_info.default_envs.max_input_tokens`、
+   * OpenRouter 的 `top_provider.context_length` 等）。拿不到就让调用方回落。
+   */
+  async describeModel(sel: ModelSelection, opts: PrepareOpts): Promise<ModelLimits> {
+    opts.signal.throwIfAborted()
+    const { baseUrl, headers } = await this.resolveEndpoint()
+    const jsonHeaders = { ...headers, accept: 'application/json' }
+    // DashScope 系优先读原生目录：`model_info.context_window` 才是权威窗口
+    const native = nativeApiBase(baseUrl)
+    if (native !== undefined) {
+      const catalog = await this.loadNativeCatalog(native, jsonHeaders, opts.signal)
+      const hit = catalog?.get(sel.model)
+      if (hit !== undefined && (hit.contextWindow !== undefined || hit.maxOutputTokens !== undefined)) return hit
+    }
+    const res = await this.request(`${baseUrl}/models/${encodeURIComponent(sel.model)}`, {
+      method: 'GET',
+      // 元数据接口要 JSON；默认的 SSE accept 会让部分网关把响应包成 `data:` 帧
+      headers: jsonHeaders,
+      signal: opts.signal,
+    })
+    const value = parseMetadataJson(await res.text())
+    if (value === undefined) return {}
+    const root = isRecord(value) && isRecord(value['data']) ? value['data'] : value
+    return extractModelLimits(root)
+  }
+
+  /**
+   * 拉取（并缓存）DashScope 原生模型目录：`output.models[].model_info`。
+   * 失败返回 undefined——这只是"更准的来源"，不该让主路径失败。
+   */
+  private async loadNativeCatalog(
+    native: string,
+    headers: Record<string, string>,
+    signal: AbortSignal,
+  ): Promise<Map<string, ModelLimits> | undefined> {
+    const cached = catalogCache.get(native)
+    if (cached !== undefined && Date.now() - cached.at < CATALOG_TTL_MS) return cached.models
+    try {
+      const models = new Map<string, ModelLimits>()
+      for (let page = 1; page <= CATALOG_MAX_PAGES; page += 1) {
+        const res = await this.request(`${native}/models?page_no=${page}&page_size=${CATALOG_PAGE_SIZE}`, {
+          method: 'GET',
+          headers,
+          signal,
+        })
+        const body = parseMetadataJson(await res.text())
+        const output = isRecord(body) && isRecord(body['output']) ? body['output'] : undefined
+        const list = output !== undefined && Array.isArray(output['models']) ? output['models'] : []
+        for (const item of list) {
+          if (!isRecord(item)) continue
+          const id = item['model']
+          if (typeof id !== 'string' || id === '') continue
+          const info = isRecord(item['model_info']) ? item['model_info'] : undefined
+          if (info === undefined) continue
+          const limits = extractModelLimits(info)
+          if (limits.contextWindow === undefined && limits.maxOutputTokens === undefined) continue
+          models.set(id, limits)
+        }
+        const total = output !== undefined && typeof output['total'] === 'number' ? output['total'] : list.length
+        if (list.length === 0 || page * CATALOG_PAGE_SIZE >= total) break
+      }
+      catalogCache.set(native, { at: Date.now(), models })
+      return models
+    } catch {
+      return undefined
+    }
   }
 
   /** OpenAI 兼容协议里 provider 与 model 是同一个坐标系，这里只做形状归一 */
@@ -339,7 +447,7 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
         cause,
       })
     }
-    if (!res.ok) throw httpError(res, url)
+    if (!res.ok) throw await httpError(res, url)
     return res
   }
 }
@@ -349,15 +457,15 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
  * Some gateways, including BaiLian workspace endpoints, wrap that same object in
  * SSE `data:` frames. Treat both transport envelopes as one model-list contract.
  */
-function parseModelListResponse(text: string): { data?: { id?: unknown; name?: unknown }[] } {
+function parseModelListResponse(text: string): { data?: unknown[] } {
   try {
-    return JSON.parse(text) as { data?: { id?: unknown; name?: unknown }[] }
+    return JSON.parse(text) as { data?: unknown[] }
   } catch {
     for (const event of parseSse(text)) {
       if (event === '[DONE]') continue
       try {
         const parsed = JSON.parse(event) as { data?: unknown }
-        if (Array.isArray(parsed.data)) return parsed as { data?: { id?: unknown; name?: unknown }[] }
+        if (Array.isArray(parsed.data)) return parsed as { data?: unknown[] }
       } catch {
         // Ignore malformed heartbeat frames; a later frame may carry the list.
       }
@@ -639,7 +747,7 @@ function isAbort(err: unknown): boolean {
 }
 
 /** HTTP 非 2xx → 可路由错误（**不回显响应体里的敏感内容**，只取短前缀） */
-function httpError(res: Response, url: string): LcodeErrorImpl {
+async function httpError(res: Response, url: string): Promise<LcodeErrorImpl> {
   const status = res.status
   const base = { message: `${redact(url)} 返回 HTTP ${status}`, retryable: false } as const
   // 状态码 → 错误码的映射是固定的：**归因由这里定死**，`model-api` 的 probe 只是转述
@@ -666,8 +774,23 @@ function httpError(res: Response, url: string): LcodeErrorImpl {
     })
   }
   if (status === 400 || status === 422) {
+    /*
+     * 上下文溢出在 OpenAI 兼容生态里几乎都以 400/422 出现，**协议本身没有结构化错误码**
+     * （只有 `context_length_exceeded` 这类文案）。把这段翻译收在适配器里：
+     * 上层只认 `EL-CONTEXT_OVERFLOW`，绝不按供应商文案分支（09 §5.3）。
+     */
+    const detail = await readErrorBody(res)
+    if (isContextOverflowText(detail)) {
+      return new LcodeErrorImpl({
+        ...base,
+        message: `${base.message}：${detail}`,
+        code: ERROR_CODES.EL_CONTEXT_OVERFLOW,
+        userMessage: '这次请求超出了模型的上下文窗口。',
+      })
+    }
     return new LcodeErrorImpl({
       ...base,
+      message: detail === '' ? base.message : `${base.message}：${detail}`,
       code: ERROR_CODES.EL_MODEL_ERROR,
       userMessage: '模型服务说这次请求不合法（多半是参数或上下文太长）。',
     })
@@ -687,7 +810,99 @@ function httpError(res: Response, url: string): LcodeErrorImpl {
   })
 }
 
+/** 读取并裁剪错误响应体；读不出来不影响归因（空串即可） */
+async function readErrorBody(res: Response): Promise<string> {
+  try {
+    return (await res.text()).replace(/\s+/g, ' ').trim().slice(0, 500)
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * 供应商错误文案 → 上下文溢出。这是**唯一**允许按文案判断的地方：
+ * 适配器本来就负责协议/供应商差异，再往上一层就必须只看错误码。
+ */
+function isContextOverflowText(detail: string): boolean {
+  if (detail === '') return false
+  return [
+    /context[ _-]?(length|window)/i,
+    /maximum context/i,
+    /too many tokens/i,
+    /prompt is too long/i,
+    /input is too long/i,
+    /reduce (the )?(length|size)/i,
+    /exceed(?:s|ed)?[^.]{0,40}(token|context)/i,
+    /上下文[^。]{0,20}(超|过长|长度)/,
+    /超出[^。]{0,20}上下文/,
+  ].some((pattern) => pattern.test(detail))
+}
+
 /** 去掉 URL 里的查询串（可能含 `?key=` 之类的凭据），只留路径 */
+/**
+ * 从 `/models` 或 `/models/{id}` 的单项里提取资源上限。
+ *
+ * 已知形态：
+ * - 官方 DeepSeek：`context_window` / `max_output_tokens`
+ * - 百炼：`extra_info.default_envs.max_input_tokens` / `max_output_tokens`
+ * - OpenRouter：`top_provider.context_length`
+ * - vLLM/TGI 风格：`max_model_len` / `max_context_length`
+ * 字段缺失就留空——**不猜**，由调用方回落到保守值。
+ */
+/** 元数据接口的 JSON：兼容少数网关把 JSON 包在 `data:` SSE 帧里的形态 */
+function parseMetadataJson(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown
+  } catch {
+    for (const event of parseSse(text)) {
+      if (event === '[DONE]') continue
+      try {
+        return JSON.parse(event) as unknown
+      } catch {
+        // 继续看下一帧
+      }
+    }
+    return undefined
+  }
+}
+
+function extractModelLimits(value: unknown): ModelLimits {
+  if (!isRecord(value)) return {}
+  const extraInfo = isRecord(value['extra_info']) ? value['extra_info'] : undefined
+  const envs = extraInfo !== undefined && isRecord(extraInfo['default_envs']) ? extraInfo['default_envs'] : undefined
+  const topProvider = isRecord(value['top_provider']) ? value['top_provider'] : undefined
+  const contextWindow = firstPositive(
+    value['context_window'],
+    value['context_length'],
+    value['max_context_length'],
+    value['max_input_tokens'],
+    value['input_token_limit'],
+    value['max_model_len'],
+    envs?.['max_input_tokens'],
+    topProvider?.['context_length'],
+  )
+  const maxOutputTokens = firstPositive(
+    value['max_output_tokens'],
+    value['max_completion_tokens'],
+    envs?.['max_output_tokens'],
+  )
+  return {
+    ...(contextWindow === undefined ? {} : { contextWindow }),
+    ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+  }
+}
+
+function firstPositive(...values: unknown[]): number | undefined {
+  for (const value of values) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.floor(value)
+  }
+  return undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 function redact(url: string): string {
   const at = url.indexOf('?')
   return at < 0 ? url : `${url.slice(0, at)}?…`

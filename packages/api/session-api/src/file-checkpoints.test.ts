@@ -33,6 +33,7 @@ describe('LocalFileCheckpointService', () => {
     await expect(checkpoints.restore({ sessionId: 'session-1', workspaceRoot: workspace, session, checkpointId: first.checkpointId })).resolves.toEqual({
       restoredPaths: [existing.replaceAll('\\', '/')],
       removedPaths: [createdLater.replaceAll('\\', '/')],
+      unrestoredPaths: [],
     })
     await expect(readFile(existing, 'utf8')).resolves.toBe('first')
     await expect(readFile(createdLater, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
@@ -51,6 +52,36 @@ describe('LocalFileCheckpointService', () => {
     await expect(checkpoints.restore({ sessionId: 'session-1', workspaceRoot: workspace, session, checkpointId: checkpoint.checkpointId })).rejects.toMatchObject({
       code: 'EC-CONFLICT',
     })
+  })
+
+  it('allowPartial 回退能回退的文本，绝不删除没有备份的二进制文件', async () => {
+    const { workspace, session } = harness()
+    const checkpoints = createLocalFileCheckpointService({ home: roots.at(-1)!, maxFileBytes: 8 })
+    const text = join(workspace, 'note.txt')
+    const binary = join(workspace, 'asset.bin')
+    writeFileSync(text, 'before', 'utf8')
+    const first = await captureTurn(session, checkpoints, workspace, 1, [{ callId: 't1', path: text }])
+
+    writeFileSync(text, 'after', 'utf8')
+    writeFileSync(binary, Buffer.from([0, 1, 2]))
+    const second = await captureTurn(session, checkpoints, workspace, 2, [
+      { callId: 't2', path: text },
+      { callId: 'b1', path: binary },
+    ])
+    expect(second).toMatchObject({ partial: true, skipped: [{ path: binary.replaceAll('\\', '/'), reason: 'binary' }] })
+
+    const restored = await checkpoints.restore({
+      sessionId: 'session-1',
+      workspaceRoot: workspace,
+      session,
+      checkpointId: first.checkpointId,
+      allowPartial: true,
+    })
+    // 文本恢复到第一轮之后；二进制没有备份 → 原样保留并如实上报，而不是当作“后来新建的文件”删掉
+    expect(restored.restoredPaths).toEqual([text.replaceAll('\\', '/')])
+    expect(restored.unrestoredPaths).toEqual([binary.replaceAll('\\', '/')])
+    await expect(readFile(text, 'utf8')).resolves.toBe('before')
+    await expect(readFile(binary)).resolves.toEqual(Buffer.from([0, 1, 2]))
   })
 
   it('只使用成功 write/edit 的受影响路径，不会因为伪造元数据快照工作区外文件', async () => {

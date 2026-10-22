@@ -56,6 +56,12 @@ export interface PrepareOpts {
   readonly params?: ModelSelection['params']
 }
 
+/** 单个模型的资源上限（供应商支持时返回；拿不到就留空，不猜） */
+export interface ModelLimits {
+  readonly contextWindow?: number
+  readonly maxOutputTokens?: number
+}
+
 /**
  * LlmAdapter —— 一个模型供应商的实现（文档 00 §6 术语表）。
  * 注册进 `ctx.llm`；消费方按 provider 名查找，绝不 import 具体包。
@@ -71,6 +77,12 @@ export interface LlmAdapter {
   prepareCall(sel: ModelSelection, opts: PrepareOpts): Promise<PreparedCall>
   stream(call: PreparedCall, signal: AbortSignal): AsyncIterable<StreamChunk>
   providerRetryPolicy(): RetryPolicy
+  /**
+   * 可选：读取供应商对**单个模型**给出的上限（上下文窗口 / 输出上限）。
+   * OpenAI 兼容的 `/models/{id}`、或列表里的 `context_window` 都属于这个来源。
+   * 拿不到时返回空对象，调用方回落到保守值。
+   */
+  describeModel?(sel: ModelSelection, opts: PrepareOpts): Promise<ModelLimits>
 }
 
 /** ctx key 声明（合并进 @lcode/context） */
