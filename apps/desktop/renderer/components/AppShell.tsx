@@ -61,6 +61,12 @@ function workspaceName(workspace: string | null): string {
   return workspace.split(/[\\/]/).filter(Boolean).pop() ?? workspace
 }
 
+const IS_MAC = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
+const APP_VERSION = '0.1.0'
+/** 菜单里显示的快捷键必须和全局监听一致，避免“看起来有、按了没用”。 */
+const keyLabel = (key: string, shift = false): string =>
+  IS_MAC ? `⌘${shift ? '⇧' : ''}${key}` : `Ctrl+${shift ? 'Shift+' : ''}${key}`
+
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
@@ -69,9 +75,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
   const [loadingMore, setLoadingMore] = useState(false)
   const [sidebar, setSidebar] = useState<SidebarState>(EMPTY_SIDEBAR)
-  const [showArchived, setShowArchived] = useState(false)
   const barRef = useRef<HTMLDivElement | null>(null)
   const zoomRef = useRef(1)
+  /** 打开菜单前谁拥有焦点；Edit 菜单的 execCommand 需要作用回这个输入框 */
+  const menuFocusRef = useRef<HTMLElement | null>(null)
 
   const loadSidebar = useCallback(async () => {
     const value = await window.lcode.getSidebar()
@@ -151,6 +158,9 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   const editCmd = (cmd: string, name: string) =>
     act(() => {
+      // 点击菜单会把焦点从输入框移走；先还回去，execCommand 才作用于用户原来的编辑目标
+      const target = menuFocusRef.current
+      if (target !== null && target.isConnected) target.focus()
       let ok = false
       try {
         ok = document.execCommand(cmd)
@@ -219,7 +229,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       return
     }
     void bridge
-      .export({ session_id: currentSessionId, format: 'jsonl' })
+      .export({ session_id: currentSessionId, format: 'bundle' })
       .then((result) => toast(t('已导出到 {path}（SHA-256 {hash}）', { path: result.path, hash: result.sha256.slice(0, 12) })))
       .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导出会话失败')))
   })
@@ -249,10 +259,26 @@ export function AppShell({ children }: { children: ReactNode }) {
       toast(t('工作区已归档'))
     }
   }
+  /** 没有选择工作区的会话单独归入「最近任务」，不再伪装成某个工作区 */
+  const recentSessions = useMemo(() => {
+    const pinnedSessions = sidebar.pinnedSessions
+    return sessions
+      .filter((session) => session.workspace === null || session.workspace === '')
+      .sort((a, b) => {
+        const ia = pinnedSessions.indexOf(a.session_id)
+        const ib = pinnedSessions.indexOf(b.session_id)
+        if (ia === -1 && ib === -1) return 0
+        if (ia === -1) return 1
+        if (ib === -1) return -1
+        return ia - ib
+      })
+  }, [sessions, sidebar.pinnedSessions])
   const sessionGroups = useMemo(() => {
     const groups = new Map<string, { workspace: string | null; name: string; items: SessionMeta[] }>()
     for (const session of sessions) {
-      const key = session.workspace ?? ''
+      // 空工作区不进工作区树：它属于「最近任务」
+      if (session.workspace === null || session.workspace === '') continue
+      const key = session.workspace
       const group = groups.get(key) ?? { workspace: session.workspace, name: workspaceName(session.workspace), items: [] }
       group.items.push(session)
       groups.set(key, group)
@@ -282,61 +308,44 @@ export function AppShell({ children }: { children: ReactNode }) {
     })
     return entries
   }, [sessions, sidebar])
-  const archivedGroups = useMemo(() => {
-    const names = new Map<string, string>()
-    for (const session of sessions) {
-      const key = session.workspace ?? ''
-      if (sidebar.archivedWorkspaces.includes(key) && !names.has(key)) names.set(key, workspaceName(session.workspace))
-    }
-    return sidebar.archivedWorkspaces.map(
-      (key) => [key, names.get(key) ?? (key === '' ? t('未命名工作区') : key)] as const,
-    )
-  }, [sessions, sidebar.archivedWorkspaces])
-
   /* 菜单文案：标签与提示统一过 t()；`label` 同时用作 key，仍保留中文原文 */
   const MENUS: { id: string; label: string; items: MItem[] }[] = [
     {
       id: 'file',
       label: t('文件'),
       items: [
-        { label: t('新对话'), kbd: '⌃N', run: act(() => navigate('/')) },
-        { label: t('新建临时对话'), kbd: '⌃⇧N', run: act(() => navigate('/')) },
+        { label: t('新对话'), kbd: keyLabel('N'), run: act(() => navigate('/')) },
         { hr: true },
-        { label: t('打开文件夹…'), kbd: '⌃O', run: openFolder },
+        { label: t('打开文件夹…'), kbd: keyLabel('O'), run: openFolder },
         { label: t('导入会话…'), run: importSession },
         { label: t('导出当前会话…'), run: exportSession },
         { hr: true },
-        { label: t('关闭会话'), kbd: '⌃W', run: act(() => navigate('/')) },
+        { label: t('关闭会话'), kbd: keyLabel('W'), run: act(() => navigate('/')) },
         { hr: true },
-        { label: t('退出'), kbd: '⌃Q', run: act(() => void window.lcode.requestClose()) },
+        { label: t('退出'), kbd: keyLabel('Q'), run: act(() => void window.lcode.requestClose()) },
       ],
     },
     {
       id: 'edit',
       label: t('编辑'),
       items: [
-        { label: t('撤销'), kbd: '⌃Z', run: editCmd('undo', '撤销') },
-        { label: t('重做'), kbd: '⌃⇧Z', run: editCmd('redo', '重做') },
+        { label: t('撤销'), kbd: keyLabel('Z'), run: editCmd('undo', '撤销') },
+        { label: t('重做'), kbd: keyLabel('Z', true), run: editCmd('redo', '重做') },
         { hr: true },
-        { label: t('剪切'), kbd: '⌃X', run: editCmd('cut', '剪切') },
-        { label: t('复制'), kbd: '⌃C', run: editCmd('copy', '复制') },
-        { label: t('粘贴'), kbd: '⌃V', run: editCmd('paste', '粘贴') },
+        { label: t('剪切'), kbd: keyLabel('X'), run: editCmd('cut', '剪切') },
+        { label: t('复制'), kbd: keyLabel('C'), run: editCmd('copy', '复制') },
+        { label: t('粘贴'), kbd: keyLabel('V'), run: editCmd('paste', '粘贴') },
         { hr: true },
-        { label: t('全选'), kbd: '⌃A', run: editCmd('selectAll', '全选') },
+        { label: t('全选'), kbd: keyLabel('A'), run: editCmd('selectAll', '全选') },
         { hr: true },
-        { label: t('设置…'), kbd: '⌃,', run: act(() => navigate('/settings')) },
+        { label: t('设置…'), kbd: keyLabel(','), run: act(() => navigate('/settings')) },
       ],
     },
     {
       id: 'view',
       label: t('视图'),
       items: [
-        { label: t('切换侧边栏'), kbd: '⌃B', run: toggleSide },
-        {
-          label: t('切换变更/文件面板'),
-          kbd: '⌃J',
-          run: say(t('请使用工作台标题栏中的面板按钮')),
-        },
+        { label: t('切换侧边栏'), kbd: keyLabel('B'), run: toggleSide },
         { hr: true },
         {
           label: t('工作台'),
@@ -344,52 +353,103 @@ export function AppShell({ children }: { children: ReactNode }) {
         },
         {
           label: t('回放时间轴'),
-          kbd: '⌃R',
+          kbd: keyLabel('R'),
           run: act(() => navigate(currentSessionId === undefined ? '/' : `/sessions/${currentSessionId}/replay`)),
         },
         { hr: true },
         { label: t('切换深色/浅色主题'), run: toggleTheme },
         { hr: true },
-        { label: t('放大'), kbd: '⌃⇧=', run: zoomBy(0.1) },
-        { label: t('缩小'), kbd: '⌃-', run: zoomBy(-0.1) },
-        { label: t('实际大小'), kbd: '⌃0', run: zoomBy(null) },
+        { label: t('放大'), kbd: keyLabel('='), run: zoomBy(0.1) },
+        { label: t('缩小'), kbd: keyLabel('-'), run: zoomBy(-0.1) },
+        { label: t('实际大小'), kbd: keyLabel('0'), run: zoomBy(null) },
         { hr: true },
         { label: t('切换全屏'), kbd: 'F11', run: toggleFullscreen },
-        { hr: true },
-        {
-          label: t('状态与异常'),
-          run: act(() => navigate(currentSessionId === undefined ? '/' : `/sessions/${currentSessionId}/error`)),
-        },
-        {
-          label: t('崩溃恢复（演示入口）'),
-          run: act(() => navigate(currentSessionId === undefined ? '/' : `/sessions/${currentSessionId}/recovery`)),
-        },
       ],
     },
     {
       id: 'help',
       label: t('帮助'),
       items: [
-        {
-          label: t('文档'),
-          run: say(t('演示：打开 Lcode 文档（桌面版跳转官网）')),
-        },
-        { label: t('显示键盘快捷键'), kbd: '⌃/', run: goSettingsSec('keys') },
+        { label: t('显示键盘快捷键'), kbd: keyLabel('/'), run: goSettingsSec('keys') },
         { hr: true },
-        { label: t('故障排除'), run: goSettingsSec('history') },
-        { label: t('反馈…'), run: say(t('感谢反馈！演示版暂不收集反馈内容')) },
-        { hr: true },
-        {
-          label: t('检查更新…'),
-          run: say(t('当前已是最新版本 v1.0.0（mock）')),
-        },
         {
           label: t('关于 Lcode'),
-          run: say(t('Lcode v1.0.0 · 本地优先的 AI 编码工作台')),
+          run: say(t('Lcode v{version} · 本地优先的 AI 编码工作台', { version: APP_VERSION })),
         },
       ],
     },
   ]
+
+  /*
+   * 全局快捷键：菜单里写了什么，这里就必须真的能触发什么。
+   * 用 ref 保存最新处理器，避免每次渲染重挂监听，也避免闭包里拿到旧的 currentSessionId。
+   */
+  const shortcutRef = useRef<(event: KeyboardEvent) => void>(() => {})
+  shortcutRef.current = (event) => {
+    if (event.defaultPrevented || event.isComposing) return
+    // 有模态框时让对话框自己处理键盘，避免快捷操作穿透
+    if (document.querySelector('.overlay, .modal-mask') !== null) return
+    const mod = event.ctrlKey || event.metaKey
+    const key = event.key.toLowerCase()
+    const run = (action: () => void): void => {
+      event.preventDefault()
+      event.stopPropagation()
+      action()
+    }
+    if (key === 'f11') {
+      run(toggleFullscreen)
+      return
+    }
+    if (!mod || event.altKey) return
+    if (event.shiftKey) {
+      if (key === '=' || key === '+') run(() => zoomBy(0.1))
+      return
+    }
+    switch (key) {
+      case 'n':
+        run(act(() => navigate('/')))
+        break
+      case 'o':
+        run(openFolder)
+        break
+      case 'w':
+        run(act(() => navigate('/')))
+        break
+      case 'q':
+        run(act(() => void window.lcode.requestClose()))
+        break
+      case ',':
+        run(act(() => navigate('/settings')))
+        break
+      case 'b':
+        run(toggleSide)
+        break
+      case 'r':
+        run(act(() => navigate(currentSessionId === undefined ? '/' : `/sessions/${currentSessionId}/replay`)))
+        break
+      case '/':
+        run(goSettingsSec('keys'))
+        break
+      case '=':
+      case '+':
+        run(() => zoomBy(0.1))
+        break
+      case '-':
+      case '_':
+        run(() => zoomBy(-0.1))
+        break
+      case '0':
+        run(() => zoomBy(null))
+        break
+      default:
+        break
+    }
+  }
+  useEffect(() => {
+    const listener = (event: KeyboardEvent): void => shortcutRef.current(event)
+    window.addEventListener('keydown', listener)
+    return () => window.removeEventListener('keydown', listener)
+  }, [])
 
   const isSettings = pathname.startsWith('/settings')
 
@@ -409,8 +469,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="mwrap" key={m.id}>
             <button
               className={'mi' + (open === m.id ? ' open' : '')}
+              // 菜单按钮不抢焦点：Edit 的 execCommand 要作用回原来的输入框
+              onMouseDown={(event) => event.preventDefault()}
               onClick={(e) => {
                 e.stopPropagation()
+                menuFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null
                 setOpen(open === m.id ? null : m.id)
               }}
               onMouseEnter={() => {
@@ -424,7 +487,12 @@ export function AppShell({ children }: { children: ReactNode }) {
                 isHr(it) ? (
                   <hr key={i} />
                 ) : (
-                  <a key={i} onClick={it.run}>
+                  <a
+                    key={i}
+                    onClick={it.run}
+                    // Edit 菜单依赖“点击前谁拥有焦点”；不阻止 mousedown 会让 execCommand 作用到菜单上
+                    onMouseDown={(event) => event.preventDefault()}
+                  >
                     {it.label}
                     {it.kbd ? <span className="kbd">{it.kbd}</span> : null}
                   </a>
@@ -479,7 +547,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               `min-height: 0` 是 flex 子项能真正收缩的前提，缺了它会撑破外框。
             */}
             <div className="stree">
-              {sessionGroups.length === 0 && archivedGroups.length === 0 && (
+              {sessionGroups.length === 0 && recentSessions.length === 0 && (
                 <div className="sempty">{t('还没有会话')}</div>
               )}
               {sessionGroups.map(([key, group]) => {
@@ -546,47 +614,27 @@ export function AppShell({ children }: { children: ReactNode }) {
                   </div>
                 )
               })}
-              {archivedGroups.length > 0 && (
-                <div className="sgroup">
-                  <div className="sgh-row">
-                    <button
-                      type="button"
-                      className="sgh"
-                      aria-expanded={showArchived}
-                      onClick={() => setShowArchived((value) => !value)}
-                    >
-                      <svg className={`sgc${showArchived ? '' : ' closed'}`} width="12" height="12" viewBox="0 0 16 16" fill="none">
-                        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                      <span className="sgn">{t('已归档工作区')}</span>
-                    </button>
+              {recentSessions.length > 0 && (
+                <>
+                  <div className="shead recent-head">{t('最近任务')}</div>
+                  <div className="slist">
+                    {recentSessions.map((it) => (
+                      <div
+                        className={'snrow' + (pathname.startsWith(`/sessions/${it.session_id}`) ? ' on' : '')}
+                        key={it.session_id}
+                      >
+                        <NavLink
+                          to={`/sessions/${it.session_id}`}
+                          className="sitem"
+                          title={it.title || t('未命名会话')}
+                        >
+                          <span className="sname">{it.title || t('未命名会话')}</span>
+                        </NavLink>
+                        <SessionActionsMenu session={it} buttonClass="sga sact" pinLabel={t('置顶')} />
+                      </div>
+                    ))}
                   </div>
-                  {showArchived && (
-                    <div className="slist">
-                      {archivedGroups.map(([key, name]) => (
-                        <div className="snrow" key={key}>
-                          <span className="sitem" title={name}>
-                            <span className="sname">{name}</span>
-                          </span>
-                          <button
-                            type="button"
-                            className="sga sact"
-                            title={t('取消归档')}
-                            onClick={() => {
-                              updateSidebar({
-                                ...sidebar,
-                                archivedWorkspaces: sidebar.archivedWorkspaces.filter((item) => item !== key),
-                              })
-                              toast(t('已取消归档'))
-                            }}
-                          >
-                            ↩
-                          </button>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                </>
               )}
               {nextCursor !== undefined && (
                 <button

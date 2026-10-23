@@ -196,7 +196,7 @@ export class LocalModelApi {
           (signal) => describe({ provider, model }, { signal }),
           Math.min(this.timeoutMs, 10_000),
         )
-        if (detail.contextWindow !== undefined || detail.maxOutputTokens !== undefined) return detail
+        if (detail.contextWindow !== undefined || detail.maxOutputTokens !== undefined || detail.vision !== undefined) return detail
       } catch {
         // 详情接口不是协议标准：404/不支持都回落到列表
       }
@@ -204,7 +204,12 @@ export class LocalModelApi {
     try {
       const models = await withTimeout((signal) => adapter.listModels(signal), Math.min(this.timeoutMs, 10_000))
       const found = models.find((candidate) => candidate.id === model)
-      return found?.contextWindow === undefined ? {} : { contextWindow: found.contextWindow }
+      return found === undefined
+        ? {}
+        : {
+            ...(found.contextWindow === undefined ? {} : { contextWindow: found.contextWindow }),
+            ...(found.vision === undefined ? {} : { vision: found.vision }),
+          }
     } catch {
       return {}
     }

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { asSessionId, ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 import { InMemorySessionStore } from './session.ts'
 import { deriveEventMessage, deriveSurfaceItems } from './surface.ts'
+import { deriveRequestItems, deriveTurnMarkers } from './projection.ts'
 import type { SessionEvent } from './types.ts'
 
 function makeStore() {
@@ -244,6 +245,62 @@ describe('onEvent 订阅（UI 数据源）', () => {
     })
     expect(() => store.append({ type: 'turn/start', data: { turn: 1 } })).not.toThrow()
     expect(store.length).toBe(1)
+  })
+})
+
+describe('上下文轮次标记与压缩撤销', () => {
+  it('屏蔽按整轮丢弃，保留工具配对完整', () => {
+    const store = makeStore()
+    store.append({ type: 'user/message', data: { role: 'user', content: '旧目标' } })
+    store.append({ type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'tool_use', id: 'c1', name: 'read', input: {} }] } } })
+    store.append({ type: 'tool/result', data: { turn: 1, step: 1, message: { role: 'user', toolCallId: 'c1', content: 'x', isError: false } } })
+    store.append({ type: 'assistant/message', data: { turn: 1, step: 2, message: { role: 'assistant', content: [{ type: 'text', text: '完成' }] } } })
+    store.append({ type: 'user/message', data: { role: 'user', content: '新问题' } })
+    store.append({ type: 'context/turn-marker', data: { targetSeq: 0, muted: true } })
+    const items = deriveRequestItems(store.events())
+    expect(items.map((item) => item.sourceSeq)).toEqual([4])
+    expect(deriveTurnMarkers(store.events()).get(0)).toEqual({ muted: true, pinned: false })
+  })
+
+  it('restore surfaceOp 把摘要换回原文，并保持表面计数正确', () => {
+    const store = makeStore()
+    store.append({ type: 'user/message', data: { role: 'user', content: 'A' } })
+    store.append({ type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'B' }] } } })
+    store.append({ type: 'user/message', data: { role: 'user', content: 'C' } })
+    store.append({ type: 'compaction/start', data: { compactionId: 'k1', trigger: 'manual' } })
+    store.append({
+      type: 'compaction/summary',
+      data: { compactionId: 'k1', summary: 'S', sourceEventSeqs: [0, 1], originalChars: 2, summaryChars: 1 },
+      compactionId: 'k1',
+    })
+    store.append({
+      type: 'user/message',
+      data: { role: 'user', content: '[Conversation summary]\nS' },
+      surfaceOp: { op: 'replace', start: 0, end: 2 },
+      compactionId: 'k1',
+    })
+    store.append({ type: 'compaction/end', data: { compactionId: 'k1', outcome: 'completed' }, compactionId: 'k1' })
+    expect(store.deriveMessages()).toHaveLength(2)
+
+    store.append({
+      type: 'compaction/undo',
+      data: { compactionId: 'k1', summarySeq: 5, restoredSeqs: [0, 1] },
+      surfaceOp: { op: 'restore', start: 0, eventSeqs: [0, 1] },
+      compactionId: 'k1',
+    })
+    expect(store.deriveMessages().map((message) => (typeof message.content === 'string'
+      ? message.content
+      : message.content.map((block) => (block.type === 'text' ? block.text : '')).join('')))).toEqual(['A', 'B', 'C'])
+    // 撤销后再压缩：surfaceCount 已按 N-1+2 更新，区间仍然合法
+    store.append({
+      type: 'user/message',
+      data: { role: 'user', content: '[Conversation summary]\nS2' },
+      surfaceOp: { op: 'replace', start: 0, end: 2 },
+      compactionId: 'k2',
+    })
+    expect(store.deriveMessages()).toHaveLength(2)
+    const audit = deriveSurfaceItems(store.events())
+    expect(audit.find((item) => item.sourceSeq === 0)?.hidden).toBe(true)
   })
 })
 

@@ -15,7 +15,8 @@
     "@lcode/session": "workspace:*",
     "@lcode/session-persistence-jsonl": "workspace:*",
     "@lcode/session-persistence-sqlite": "workspace:*",
-    "@lcode/util": "workspace:*"
+    "@lcode/util": "workspace:*",
+    "fflate": "^0.8.3"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit"

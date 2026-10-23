@@ -315,6 +315,22 @@ export async function createDesktopModelFeature(
   }
 
   /*
+   * 默认选择里的 model id 必须跟随供应商配置。
+   *
+   * 输入区只让用户选"供应商"，显示的是配置的 label，而真正发给服务端的是
+   * default.model。用户改过某个供应商的模型 id 后，旧默认值会静默残留：
+   * 界面写着 -1017，请求却仍发 -flash（实测导致图片能力表现不一致）。
+   * 启动时以配置里的 `model` 为准对齐一次；没有单独的"按供应商再选子模型"入口。
+   */
+  const currentDefault = await api.getDefault()
+  if (currentDefault !== undefined) {
+    const config = (await store.list()).find((entry) => entry.name === currentDefault.provider)
+    if (config !== undefined && config.model !== currentDefault.model) {
+      await api.setDefault({ selection: { provider: config.name, model: config.model } })
+    }
+  }
+
+  /*
    * 老配置没有 `context_window_max`：后台补齐，不阻塞启动。
    *
    * 窗口上限是编辑体验/预算的输入，不是启动依赖；拿不到就留空，设置页仍会回落 128K。

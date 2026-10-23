@@ -1,18 +1,26 @@
 import { app, BrowserWindow, Menu, ipcMain, dialog, shell } from "electron";
+import type { ImageAttachmentWriter } from "@lcode/lcode-desktop";
 import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
+  buildUserContent,
   createAgentRuntime,
   createDesktopModelFeature,
+  gcSessionAttachments,
+  importSkill,
+  putAttachment,
+  readAttachment,
+  removeUserSkill,
+  seedBuiltinSkills,
 } from "@lcode/lcode-desktop";
 import type { AgentRuntime, DesktopModelFeature } from "@lcode/lcode-desktop";
 import { createApprovalService } from "@lcode/approval";
 import type { ApprovalChannel, ApprovalRequest } from "@lcode/approval";
-import type { ApprovalResult } from "@lcode/session";
+import type { ApprovalResult, ContentBlock } from "@lcode/session";
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL ?? "http://localhost:5173";
 
@@ -205,6 +213,8 @@ function createMainWindow(): BrowserWindow {
     minHeight: 600,
     title: "Lcode",
     backgroundColor: "#FFFFFF",
+    // 窗口/任务栏图标（构建时复制到 dist，见 build-main.mjs 的 copyAppIcon）
+    icon: join(__dirname, "app_icon.ico"),
     // 隐藏系统标题栏，右上角保留原生最小化/最大化/关闭按钮（Windows overlay）。
     // 应用自绘顶栏（侧栏开关 + 菜单）与窗口控制同行，即 WorkBuddy 式标准桌面排版。
     titleBarStyle: "hidden",
@@ -459,6 +469,41 @@ ipcMain.handle("dialog:choose-file", (_e: IpcMainInvokeEvent, title?: string) =>
     properties: ["openFile", "multiSelections"],
   }),
 );
+/**
+ * 拖入路径是文件还是文件夹。
+ *
+ * `dataTransfer.files` 里两者都是 File，渲染层拿不到可靠类型；只回 kind，
+ * 不回大小/时间等内容，避免把这个通道变成任意文件探测接口。
+ */
+ipcMain.handle("lcode:path.kind", (_e: IpcMainInvokeEvent, input: unknown) => {
+  const path = (input as { path?: unknown } | null)?.path;
+  if (typeof path !== "string" || path === "") return { kind: null };
+  try {
+    const info = statSync(path);
+    return { kind: info.isDirectory() ? "folder" : info.isFile() ? "file" : null };
+  } catch {
+    return { kind: null };
+  }
+});
+// 导入技能：单文件 SKILL.md 或单个技能文件夹的 zip
+ipcMain.handle(
+  "dialog:choose-skill-markdown",
+  (_e: IpcMainInvokeEvent, title?: string) =>
+    pickPath({
+      title: title || "选择 SKILL.md",
+      properties: ["openFile"],
+      filters: [{ name: "Skill", extensions: ["md", "markdown"] }],
+    }),
+);
+ipcMain.handle(
+  "dialog:choose-skill-archive",
+  (_e: IpcMainInvokeEvent, title?: string) =>
+    pickPath({
+      title: title || "选择技能 zip",
+      properties: ["openFile"],
+      filters: [{ name: "Skill zip", extensions: ["zip"] }],
+    }),
+);
 // 导入会话（P8-01）：只收导出格式，单选
 ipcMain.handle(
   "dialog:choose-session-file",
@@ -466,7 +511,10 @@ ipcMain.handle(
     pickPath({
       title: title || "选择要导入的会话文件",
       properties: ["openFile"],
-      filters: [{ name: "JSONL 会话", extensions: ["jsonl"] }],
+      filters: [
+        { name: "Lcode 会话包", extensions: ["zip"] },
+        { name: "JSONL 会话", extensions: ["jsonl"] },
+      ],
     }),
 );
 
@@ -587,7 +635,13 @@ ipcMain.handle(
      * 只在**当前没有默认**时才替他选：已经选过的默认不能被一次保存悄悄改掉
      * （用户可能同时配了好几家的模型，正在用的是另一家）。
      */
-    if ((await feature.api.getDefault()) === undefined) {
+    const currentDefault = await feature.api.getDefault();
+    if (currentDefault === undefined) {
+      await feature.api.setDefault({
+        selection: { provider, model: parsed.model },
+      });
+    } else if (currentDefault.provider === provider && currentDefault.model !== parsed.model) {
+      // 改的是当前默认供应商的模型 id：默认选择必须立刻跟随，否则界面写 A、请求发 B
       await feature.api.setDefault({
         selection: { provider, model: parsed.model },
       });
@@ -775,10 +829,17 @@ async function agentRuntime(): Promise<AgentRuntime> {
       return createAgentRuntime({
         services: feature.services,
         approval: createApprovalService({ channel: approvalChannel }),
+        builtinSkillsDir: join(__dirname, "skills"),
       });
     })();
   }
   runtime = await runtimeInit;
+  try {
+    // 随包分发的技能至少要有一份在用户目录；失败不阻塞启动（技能目录仍可从内置根读取）
+    seedBuiltinSkills({ home: runtime.services.home, sourceDir: join(__dirname, "skills") });
+  } catch (error) {
+    console.error("[lcode] 内置技能初始化失败：", error);
+  }
   return runtime;
 }
 
@@ -932,23 +993,27 @@ ipcMain.handle(
   "lcode:session.create",
   async (_e: IpcMainInvokeEvent, input: unknown) => {
     const record = (input ?? {}) as Record<string, unknown>;
+    const rawCwd = record["cwd"];
+    if (rawCwd !== undefined && typeof rawCwd !== "string")
+      throw new Error("cwd 必须是字符串");
+    // 空 cwd = 用户没有选择工作区：不要把它偷换成进程当前目录
     const cwd =
-      typeof record["cwd"] === "string" && record["cwd"] !== ""
-        ? record["cwd"]
-        : process.cwd();
+      typeof rawCwd === "string" && rawCwd.trim() !== "" ? rawCwd : undefined;
     const title =
       typeof record["title"] === "string" ? record["title"] : undefined;
     const rt = await agentRuntime();
     const result = await rt.sessions.create({
-      cwd,
+      ...(cwd === undefined ? {} : { cwd }),
       ...(title === undefined ? {} : { title }),
     });
-    const workspace = rt.sessions.workspaceOf(result.session_id) ?? cwd;
-    const trusted = rt.ctx.get("workspaceTrust").isTrusted(workspace);
-    rt.sessions.sessionServiceFor(result.session_id).append({
-      type: "workspace/trust",
-      data: { workspace, trusted },
-    });
+    const workspace = rt.sessions.workspaceOf(result.session_id);
+    if (workspace !== undefined) {
+      const trusted = rt.ctx.get("workspaceTrust").isTrusted(workspace);
+      rt.sessions.sessionServiceFor(result.session_id).append({
+        type: "workspace/trust",
+        data: { workspace, trusted },
+      });
+    }
     pushToRenderer("lcode:session.changed", { session_id: result.session_id });
     return result;
   },
@@ -1082,7 +1147,11 @@ ipcMain.handle(
       ...(record["exported"] === true ? { exported: true } : {}),
       ...(record["force"] === true ? { force: true } : {}),
     });
+    // 附件是跨会话共享的内容寻址文件：删除会话后重新扫一遍引用再清理。
+    // 放到下一拍执行，别让大目录扫描阻塞删除操作的返回。
+    const home = (await agentRuntime()).services.home;
     pushToRenderer("lcode:session.changed", { session_id: sessionId });
+    setTimeout(() => gcSessionAttachments(home), 0);
     return result;
   },
 );
@@ -1092,9 +1161,12 @@ ipcMain.handle("lcode:session.trash", async () =>
   (await agentRuntime()).sessions.listTrash(),
 );
 
-ipcMain.handle("lcode:session.emptyTrash", async () =>
-  (await agentRuntime()).sessions.prune({ emptyTrash: true, cache: false }),
-);
+ipcMain.handle("lcode:session.emptyTrash", async () => {
+  const rt = await agentRuntime();
+  const result = await rt.sessions.prune({ emptyTrash: true, cache: false });
+  setTimeout(() => gcSessionAttachments(rt.services.home), 0);
+  return result;
+});
 
 ipcMain.handle(
   "lcode:session.export",
@@ -1104,8 +1176,8 @@ ipcMain.handle(
     const format = record["format"];
     if (typeof sessionId !== "string" || sessionId === "")
       throw new Error("session_id 必填");
-    if (format !== "jsonl" && format !== "md")
-      throw new Error("format 必须是 jsonl 或 md");
+    if (format !== "jsonl" && format !== "md" && format !== "bundle")
+      throw new Error("format 必须是 jsonl、md 或 bundle");
     return (await agentRuntime()).sessions.export({
       session_id: sessionId,
       format,
@@ -1217,6 +1289,21 @@ ipcMain.handle("lcode:session.checkpoint.restore", async (_e: IpcMainInvokeEvent
   return result;
 });
 
+function attachmentWriter(home: string): ImageAttachmentWriter {
+  return { put: ({ mediaType, data }) => putAttachment({ home, mediaType, data }) };
+}
+
+ipcMain.handle("lcode:attachments.read", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const hash = record["hash"];
+  const mediaType = record["media_type"];
+  if (typeof hash !== "string" || typeof mediaType !== "string")
+    throw new Error("hash 与 media_type 必填");
+  const data = readAttachment({ home: (await agentRuntime()).services.home, hash, mediaType });
+  if (data === undefined) throw new Error("附件不存在或已被清理");
+  return { media_type: mediaType, data };
+});
+
 const execFileAsync = promisify(execFile);
 
 ipcMain.handle("lcode:session.contextUsage", async (_e: IpcMainInvokeEvent, sessionId: unknown) => {
@@ -1234,6 +1321,82 @@ ipcMain.handle("lcode:session.compact", async (_e: IpcMainInvokeEvent, sessionId
   pushToRenderer("lcode:session.changed", { session_id: sessionId });
   return result;
 });
+
+ipcMain.handle("lcode:session.compactPreview", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const sessionId = record["session_id"];
+  const keepRecentTurns = record["keep_recent_turns"];
+  if (typeof sessionId !== "string" || sessionId === "") throw new Error("session_id 必填");
+  if (keepRecentTurns !== undefined && (typeof keepRecentTurns !== "number" || !Number.isInteger(keepRecentTurns) || keepRecentTurns < 1)) {
+    throw new Error("keep_recent_turns 必须是正整数");
+  }
+  const rt = await agentRuntime();
+  await rt.sessions.resume({ session_id: sessionId });
+  return rt.compactPreview({
+    sessionId,
+    ...(keepRecentTurns === undefined ? {} : { keepRecentTurns }),
+  });
+});
+
+ipcMain.handle("lcode:session.compactApply", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const sessionId = record["session_id"];
+  const previewId = record["preview_id"];
+  if (typeof sessionId !== "string" || sessionId === "") throw new Error("session_id 必填");
+  if (typeof previewId !== "string" || previewId === "") throw new Error("preview_id 必填");
+  const result = await (await agentRuntime()).compactApply({ sessionId, previewId });
+  pushToRenderer("lcode:session.changed", { session_id: sessionId });
+  return result;
+});
+
+ipcMain.handle("lcode:session.compactUndo", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const sessionId = record["session_id"];
+  const compactionId = record["compaction_id"];
+  if (typeof sessionId !== "string" || sessionId === "") throw new Error("session_id 必填");
+  if (typeof compactionId !== "string" || compactionId === "") throw new Error("compaction_id 必填");
+  const result = await (await agentRuntime()).compactUndo({ sessionId, compactionId });
+  pushToRenderer("lcode:session.changed", { session_id: sessionId });
+  return result;
+});
+
+/** 固定/屏蔽某一轮：只写日志事件，不改动消息本身。 */
+ipcMain.handle("lcode:session.marker", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const sessionId = record["session_id"];
+  const targetSeq = record["target_seq"];
+  const pinned = record["pinned"];
+  const muted = record["muted"];
+  if (typeof sessionId !== "string" || sessionId === "") throw new Error("session_id 必填");
+  if (typeof targetSeq !== "number" || !Number.isInteger(targetSeq) || targetSeq < 0) {
+    throw new Error("target_seq 必须是非负整数");
+  }
+  if (pinned !== undefined && typeof pinned !== "boolean") throw new Error("pinned 必须是布尔值");
+  if (muted !== undefined && typeof muted !== "boolean") throw new Error("muted 必须是布尔值");
+  if (pinned === undefined && muted === undefined) throw new Error("pinned 或 muted 必填");
+  const rt = await agentRuntime();
+  await rt.sessions.resume({ session_id: sessionId });
+  const session = rt.sessions.sessionServiceFor(sessionId);
+  const target = session.events().find((event) => event.seq === targetSeq);
+  if (target === undefined || target.type !== "user/message") throw new Error("只能标记用户提问所在的轮次");
+  assertSessionIdle(session);
+  session.append({
+    type: "context/turn-marker",
+    data: {
+      targetSeq,
+      ...(pinned === undefined ? {} : { pinned }),
+      ...(muted === undefined ? {} : { muted }),
+    },
+  });
+  await ensureSessionWatch(sessionId);
+  pushToRenderer("lcode:session.changed", { session_id: sessionId });
+  return { target_seq: targetSeq, pinned: pinned === true, muted: muted === true };
+});
+
+function assertSessionIdle(session: { events(): readonly { readonly type: string }[] }): void {
+  const boundary = [...session.events()].reverse().find((event) => event.type === "turn/start" || event.type === "turn/end");
+  if (boundary?.type === "turn/start") throw new Error("这一轮还在执行，先暂停再调整上下文");
+}
 
 /**
  * 输入框状态栏用：工作区是不是 Git 仓库、当前分支、是否 linked worktree。
@@ -1402,15 +1565,37 @@ function watchTurnFailure(sessionId: string): void {
   })();
 }
 
+ipcMain.handle("lcode:skills.list", async () => {
+  const rt = await agentRuntime();
+  return await rt.skills.catalog();
+});
+
+ipcMain.handle("lcode:skills.import", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const path = (input as { path?: unknown } | null)?.path;
+  if (typeof path !== "string" || path.trim() === "") throw new Error("技能文件 path 必填");
+  const rt = await agentRuntime();
+  return { imported: importSkill({ home: rt.services.home, path }) };
+});
+
+ipcMain.handle("lcode:skills.remove", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const id = (input as { id?: unknown } | null)?.id;
+  if (typeof id !== "string" || id.trim() === "") throw new Error("技能 id 必填");
+  const rt = await agentRuntime();
+  const found = (await rt.skills.catalog()).find((entry) => entry.id === id);
+  if (found?.source !== "user") throw new Error("只能删除用户技能");
+  removeUserSkill({ home: rt.services.home, id });
+  return { removed: true, id };
+});
+
 ipcMain.handle(
   "lcode:agent.send",
   async (_e: IpcMainInvokeEvent, input: unknown) => {
     const record = (input ?? {}) as Record<string, unknown>;
     const sessionId = record["session_id"];
-    const text = record["text"];
+    const text = typeof record["text"] === "string" ? record["text"] : "";
     if (typeof sessionId !== "string" || sessionId === "")
       throw new Error("session_id 必填");
-    if (typeof text !== "string" || text.trim() === "")
+    if (text.trim() === "" && !Array.isArray(record["images"]))
       throw new Error("text 必填");
 
     const rt = await agentRuntime();
@@ -1431,7 +1616,7 @@ ipcMain.handle(
     try {
       receipt = await rt.agents.followup({
         agent_id,
-        content: [{ type: "text", text }],
+        content: await buildUserContent({ text, skills: record["skills"], images: record["images"], attachments: record["attachments"], skillsService: rt.skills, attachmentStore: attachmentWriter(rt.services.home) }),
       });
     } catch (err) {
       /*
@@ -1455,12 +1640,12 @@ ipcMain.handle(
     const record = (input ?? {}) as Record<string, unknown>;
     const sessionId = record["session_id"];
     const toSeq = record["to_seq"];
-    const text = record["text"];
+    const text = typeof record["text"] === "string" ? record["text"] : "";
     if (typeof sessionId !== "string" || sessionId === "")
       throw new Error("session_id 必填");
     if (typeof toSeq !== "number" || !Number.isInteger(toSeq) || toSeq < 0)
       throw new Error("to_seq 非法");
-    if (typeof text !== "string" || text.trim() === "")
+    if (text.trim() === "" && !Array.isArray(record["images"]))
       throw new Error("text 必填");
 
     const rt = await agentRuntime();
@@ -1581,7 +1766,7 @@ ipcMain.handle(
 
     const receipt = await rt.agents.followup({
       agent_id,
-      content: [{ type: "text", text }],
+      content: await buildUserContent({ text, skills: record["skills"], images: record["images"], attachments: record["attachments"], skillsService: rt.skills, attachmentStore: attachmentWriter(rt.services.home) }),
     });
     pushToRenderer("lcode:session.changed", { session_id: sessionId });
     return {
@@ -1589,6 +1774,79 @@ ipcMain.handle(
       agent_id,
       rewind: { ...rewound, restored: restoredPaths, removed: removedPaths, unrestored: unrestoredPaths },
     };
+  },
+);
+
+/**
+ * 重试最后一轮：只在“这一轮没有调用过工具”时允许。
+ *
+ * 没有工具调用 = 没有文件副作用，可以直接把日志截回本轮之前再用原提问重发，
+ * 不必回退文件。这能清掉模型刚才那次错误/拒绝的回答，而不是让它在下一轮继续参考。
+ */
+ipcMain.handle(
+  "lcode:session.retryTurn",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const record = (input ?? {}) as Record<string, unknown>;
+    const sessionId = record["session_id"];
+    if (typeof sessionId !== "string" || sessionId === "")
+      throw new Error("session_id 必填");
+
+    const rt = await agentRuntime();
+    const session = rt.sessions.sessionServiceFor(sessionId);
+    const events = session.events();
+
+    let end = -1;
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      if (events[index]?.type === "turn/end") {
+        end = index;
+        break;
+      }
+    }
+    if (end < 0) throw new Error("没有可重试的已完成回合");
+    let start = -1;
+    for (let index = end - 1; index >= 0; index -= 1) {
+      if (events[index]?.type === "turn/start") {
+        start = index;
+        break;
+      }
+    }
+    if (start < 0) throw new Error("找不到这一轮的起点");
+    const turnEvents = events.slice(start, end + 1);
+    if (turnEvents.some((event) => event.type === "tool/call")) {
+      throw new Error("这一轮执行过工具，不能直接重试；请用编辑重发");
+    }
+    const user = turnEvents.find((event) => event.type === "user/message");
+    if (user === undefined) throw new Error("这一轮没有用户消息");
+    if (turnEvents.filter((event) => event.type === "user/message").length > 1) {
+      throw new Error("这一轮有中途插话，暂不支持直接重试");
+    }
+    const content = user.data.content;
+
+    const rewound = await rt.sessions.rewind({ session_id: sessionId, to_seq: user.seq });
+    await rt.checkpoints.discardFrom(sessionId, user.seq);
+    rt.sessions.sessionServiceFor(sessionId).append({
+      type: "session/rewound",
+      data: { toSeq: user.seq, discarded: rewound.discarded, restoredPaths: [], removedPaths: [], unrestoredPaths: [] },
+    });
+
+    // rewind 换了 store：旧订阅绑定旧 store，必须重新订阅（与编辑重发同一处理）
+    sessionWatch.get(sessionId)?.();
+    sessionWatch.delete(sessionId);
+    turnFailureWatch.get(sessionId)?.();
+    turnFailureWatch.delete(sessionId);
+    reportedTurnErrors.delete(sessionId);
+
+    const { agent_id } = await rt.agents.resume({ session_id: sessionId });
+    await rt.agents.clearQueued({ agent_id });
+    await ensureSessionWatch(sessionId);
+    watchTurnFailure(sessionId);
+
+    const blocks: readonly ContentBlock[] = typeof content === "string"
+      ? [{ type: "text", text: content }]
+      : content;
+    const receipt = await rt.agents.followup({ agent_id, content: blocks });
+    pushToRenderer("lcode:session.changed", { session_id: sessionId });
+    return { ...receipt, agent_id, retry: { discarded: rewound.discarded } };
   },
 );
 
@@ -1916,12 +2174,14 @@ function startTrashPruner(): void {
   const sweep = (): void => {
     if (quitting) return;
     void agentRuntime()
-      .then((rt) => rt.sessions.prune({ trash: true, cache: false }))
-      .then((result) => {
+      .then(async (rt) => {
+        const result = await rt.sessions.prune({ trash: true, cache: false });
         if (result.trash.removed > 0) {
           console.log(
             `[lcode] 回收站清理：移除 ${result.trash.removed} 项，释放 ${result.trash.freedBytes} 字节`,
           );
+          // 过期回收站条目可能独占某些附件；删完再按剩余引用清理一次
+          setTimeout(() => gcSessionAttachments(rt.services.home), 0);
         }
       })
       .catch((error: unknown) => {

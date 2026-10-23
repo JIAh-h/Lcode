@@ -142,9 +142,10 @@ describe('sessions.create / list / meta', () => {
     expect(b.session_id).toBeTruthy()
   })
 
-  it('cwd 非绝对路径 → EC-INVALID_PARAMS', async () => {
+  it('cwd 非绝对路径 → EC-INVALID_PARAMS；空 cwd 是合法的“无工作区”', async () => {
     await expect(api.create({ cwd: 'relative/dir' })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
-    await expect(api.create({ cwd: '' })).rejects.toMatchObject({ code: 'EC-INVALID_PARAMS' })
+    const created = await api.create({ cwd: '' })
+    expect((await api.meta({ session_id: created.session_id })).header.workspace).toBeNull()
   })
 })
 
@@ -502,6 +503,77 @@ describe('索引侧跟得上（派生层，不阻塞会话）', () => {
       closeAllIndexDbs()
       api = new LocalSessionsApi({ home })
     }
+  })
+
+  it('附件随会话导出为自包含 zip，导入后引用仍可解析', async () => {
+    const { putAttachment, readAttachment } = await import('./attachments.ts')
+    const { unzipSync } = await import('fflate')
+    const base64 = Buffer.from('fake-png-bytes').toString('base64')
+    const stored = putAttachment({ home, mediaType: 'image/png', data: base64 })
+    const { session_id } = await api.create({ cwd: CWD, title: '带图会话' })
+    await api.append({
+      session_id,
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image-ref', mediaType: 'image/png', hash: stored.hash, bytes: stored.bytes }] },
+    })
+    await api.flush({ session_id })
+
+    const exported = await api.export({ session_id, format: 'bundle' })
+    expect(exported.path.endsWith('.zip')).toBe(true)
+    const files = unzipSync(readFileSync(exported.path))
+    expect(Object.keys(files)).toEqual(expect.arrayContaining(['session.jsonl', 'manifest.json', `attachments/${stored.hash}.png`]))
+
+    const imported = await api.import({ path: exported.path })
+    const file = findSessionFile(home, imported.session_id)!
+    const events = loadLog(file).events
+    const user = events.find((event) => event.type === 'user/message')
+    expect(user).toMatchObject({ data: { content: expect.arrayContaining([expect.objectContaining({ type: 'image-ref', hash: stored.hash })]) } })
+    expect(readAttachment({ home, hash: stored.hash, mediaType: 'image/png' })).toBe(base64)
+  })
+
+  it('不传 cwd 创建的是“最近任务”会话，不隐式绑定进程目录', async () => {
+    const { session_id } = await api.create({ title: '最近任务' })
+    const meta = await api.meta({ session_id })
+    expect(meta.header.workspace).toBeNull()
+    const list = await api.list()
+    expect(list.items.find((item) => item.session_id === session_id)?.workspace).toBeNull()
+  })
+
+  it('导入重排 seq 时同步平移轮次标记与压缩撤销引用', async () => {
+    const { session_id } = await api.create({ cwd: CWD, title: '引用重排' })
+    await api.append({ session_id, type: 'turn/start', data: { turn: 1 } })
+    await api.append({ session_id, type: 'user/message', data: { role: 'user', content: '第一问' } })
+    await api.append({ session_id, type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '第一答' }] } } })
+    await api.append({ session_id, type: 'turn/end', data: { turn: 1, reason: 'completed' } })
+    await api.append({ session_id, type: 'compaction/start', data: { compactionId: 'k1', trigger: 'manual' } })
+    await api.append({ session_id, type: 'compaction/summary', data: { compactionId: 'k1', summary: 'S', sourceEventSeqs: [1, 2], originalChars: 20, summaryChars: 1 } })
+    const summary = await api.append({ session_id, type: 'user/message', data: { role: 'user', content: '[Conversation summary]\nS' }, surface_op: { op: 'replace', start: 0, end: 2 } })
+    await api.append({ session_id, type: 'compaction/end', data: { compactionId: 'k1', outcome: 'completed' } })
+    await api.append({
+      session_id,
+      type: 'compaction/undo',
+      data: { compactionId: 'k1', summarySeq: summary.seq, restoredSeqs: [1, 2] },
+      surface_op: { op: 'restore', start: 0, eventSeqs: [1, 2] },
+    })
+    await api.append({ session_id, type: 'context/turn-marker', data: { targetSeq: 1, pinned: true } })
+    await api.flush({ session_id })
+    const exported = await api.export({ session_id, format: 'bundle' })
+    const imported = await api.import({ path: exported.path })
+    await api.resume({ session_id: imported.session_id })
+    const openedEvents = api.sessionServiceFor(imported.session_id).events()
+    const marker = openedEvents.find((event) => event.type === 'context/turn-marker')
+    expect(marker).toBeDefined()
+    if (marker?.type !== 'context/turn-marker') throw new Error('缺少轮次标记')
+    expect(openedEvents.find((event) => event.seq === marker.data.targetSeq)).toMatchObject({
+      type: 'user/message',
+      data: { content: '第一问' },
+    })
+    const undo = openedEvents.find((event) => event.type === 'compaction/undo')
+    expect(undo?.surfaceOp).toMatchObject({ op: 'restore' })
+    if (undo === undefined || undo.surfaceOp === 'append' || undo.surfaceOp === undefined || undo.surfaceOp.op !== 'restore') throw new Error('缺少撤销事件')
+    const restored = undo.surfaceOp.eventSeqs.map((seq) => openedEvents.find((event) => event.seq === seq))
+    expect(restored[0]).toMatchObject({ type: 'user/message', data: { content: '第一问' } })
+    expect(restored[1]).toMatchObject({ type: 'assistant/message' })
   })
 
   it('reindex 能从日志恢复出索引（会话仍在 list 里）', async () => {

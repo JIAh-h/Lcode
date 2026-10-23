@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, join } from 'node:path'
+import { strToU8, unzipSync, zipSync } from 'fflate'
 import type { EpochHeader, ModelMessage, SessionEvent, SessionService, StreamChunk, ToolResultMessage } from '@lcode/session'
 import { InMemorySessionStore, deriveMessages } from '@lcode/session'
 import type { EventFrame, JsonlSessionPersistence, LoadedLog } from '@lcode/session-persistence-jsonl'
@@ -34,6 +36,7 @@ import {
 import type { EventInput } from '@lcode/session'
 import type { JsonValue } from '@lcode/util'
 import { createPersistedSession } from './persisted-session.ts'
+import { attachmentPath, attachmentRefsOf, putAttachment } from './attachments.ts'
 import {
   ERROR_CODES,
   LcodeErrorImpl,
@@ -407,15 +410,57 @@ function historyBody(sessionId: string, event: SessionEvent): HistoryBodyResult 
 }
 
 /** 事件帧 → 追加输入（回放已有日志用；`seq` 由 store 重新分配，必须与位置一致） */
-function toEventInput(frame: EventFrame): EventInput {
+function toEventInput(frame: EventFrame, seqMap?: ReadonlyMap<number, number>): EventInput {
+  const map = (seq: number): number => seqMap?.get(seq) ?? seq
+  const op = frame.surfaceOp
   return {
     type: frame.type,
-    data: frame.data as JsonValue,
+    data: remapEventData(frame.type, frame.data, map) as JsonValue,
     time: frame.time,
-    ...(frame.surfaceOp === undefined ? {} : { surfaceOp: frame.surfaceOp }),
-    ...(frame.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: frame.sourceEventSeqs }),
+    ...(op === undefined
+      ? {}
+      : {
+          surfaceOp: op !== 'append' && op.op === 'restore'
+            ? { op: 'restore', start: op.start, eventSeqs: op.eventSeqs.map(map) }
+            : op,
+        }),
+    ...(frame.sourceEventSeqs === undefined ? {} : { sourceEventSeqs: frame.sourceEventSeqs.map(map) }),
+    ...(frame.compactionId === undefined ? {} : { compactionId: frame.compactionId }),
+    ...(frame.shadowedSeqs === undefined ? {} : { shadowedSeqs: frame.shadowedSeqs.map(map) }),
     ...(frame.ignorable === true ? { ignorable: true } : {}),
   } as unknown as EventInput
+}
+
+/**
+ * 导入会从 seq 1 起重排（0 留给 `session/imported`），所有**按 seq 引用其它事件**
+ * 的载荷必须一起平移；否则撤销压缩和轮次标记会在导入后指向不存在的序号。
+ */
+function remapEventData(type: string, data: unknown, map: (seq: number) => number): unknown {
+  if (typeof data !== 'object' || data === null) return data
+  const value = data as Record<string, unknown>
+  if (type === 'context/turn-marker' && typeof value['targetSeq'] === 'number') {
+    return { ...value, targetSeq: map(value['targetSeq']) }
+  }
+  if (type === 'compaction/summary' && Array.isArray(value['sourceEventSeqs'])) {
+    return { ...value, sourceEventSeqs: (value['sourceEventSeqs'] as number[]).map(map) }
+  }
+  if (type === 'compaction/undo') {
+    return {
+      ...value,
+      ...(typeof value['summarySeq'] === 'number' ? { summarySeq: map(value['summarySeq']) } : {}),
+      ...(Array.isArray(value['restoredSeqs']) ? { restoredSeqs: (value['restoredSeqs'] as number[]).map(map) } : {}),
+    }
+  }
+  if (type === 'session/rewound' && typeof value['toSeq'] === 'number') {
+    return { ...value, toSeq: map(value['toSeq']) }
+  }
+  if (type === 'checkpoint/created' && typeof value['endSeq'] === 'number') {
+    return { ...value, endSeq: map(value['endSeq']) }
+  }
+  if (type === 'spill/created' && typeof value['sourceEventSeq'] === 'number') {
+    return { ...value, sourceEventSeq: map(value['sourceEventSeq']) }
+  }
+  return data
 }
 
 /**
@@ -520,9 +565,10 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
   }
 
   async create(input: CreateSessionInput): Promise<CreateSessionResult> {
-    const cwd = this.requireCwd(input.cwd)
+    // 不传工作区是合法状态（桌面会把它归入「最近任务」），不要回落进程 cwd
+    const cwd = input.cwd === undefined || input.cwd.trim() === '' ? null : this.requireCwd(input.cwd)
     const sessionId = newSessionId()
-    await this.persistence.open(sessionId, { cwd })
+    await this.persistence.open(sessionId, cwd === null ? {} : { cwd })
     this.sessions.set(sessionId, { store: new InMemorySessionStore(sessionId), cwd })
     // 落一次空投影：否则 `list` 看不到这个还没有任何事件的会话
     await this.persistence.flush(sessionId)
@@ -686,7 +732,7 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
     this.sessions.set(childId, { store, cwd })
 
     if (prefix.length > 0) {
-      const seeded = store.appendMany(prefix.map(toEventInput))
+      const seeded = store.appendMany(prefix.map((frame) => toEventInput(frame)))
       await this.persistence.append(asSessionId(childId), seeded as readonly SessionEvent[])
     }
     // 生命周期分界线（doc 11 §7）：种子注入完立刻标记，重放时才知道"种子到此为止"
@@ -766,7 +812,7 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
 
     this.sessions.delete(sessionId)
     const store = new InMemorySessionStore(id)
-    if (frames.length > 0) store.appendMany(frames.map(toEventInput))
+    if (frames.length > 0) store.appendMany(frames.map((frame) => toEventInput(frame)))
     this.sessions.set(sessionId, { store, cwd: loaded.header.cwd })
 
     await this.persistence.open(id, loaded.header.cwd === null ? {} : { cwd: loaded.header.cwd })
@@ -915,6 +961,13 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
       return { path: target, bytes: bytes.length, sha256: sha256Hex(bytes) }
     }
 
+    if (input.format === 'bundle') {
+      const bundle = createSessionBundle({ home: this.home, sessionId, file, now: this.now() })
+      const target = join(dir, `${sessionId}-${stamp}.zip`)
+      writeFileAtomicSync(target, bundle)
+      return { path: target, bytes: bundle.length, sha256: sha256Hex(bundle) }
+    }
+
     const loaded = loadLog(file)
     const messages = deriveMessages(loaded.events.map(frameToEvent))
     const text = renderMarkdown(
@@ -930,14 +983,44 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
     if (typeof input.path !== 'string' || input.path.trim() === '') throw invalidParams('导入路径不能为空')
     const source = input.path
     if (!existsSync(source) || !statSync(source).isFile()) throw invalidParams(`导入文件不存在或不是普通文件：${source}`)
+    let archive: SessionArchive | undefined
     let loaded: LoadedLog
-    try {
-      loaded = loadLog(source)
-    } catch (cause) {
-      throw invalidParams(`导入文件不是受支持的 JSONL 会话：${cause instanceof Error ? cause.message : String(cause)}`)
+    let sourceBytes: Buffer
+    if (source.toLowerCase().endsWith('.zip')) {
+      try {
+        archive = readSessionArchive(source)
+      } catch (cause) {
+        throw invalidParams(`导入包不可用：${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+      sourceBytes = archive.logBytes
+      const temp = mkdtempSync(join(tmpdir(), 'lcode-import-'))
+      try {
+        const logPath = join(temp, 'session.jsonl')
+        writeFileSync(logPath, sourceBytes)
+        loaded = loadLog(logPath)
+      } catch (cause) {
+        throw invalidParams(`导入包里的会话日志不可用：${cause instanceof Error ? cause.message : String(cause)}`)
+      } finally {
+        rmSync(temp, { recursive: true, force: true })
+      }
+      // 附件先落盘；即使后续索引失败，它们也只是可被 GC 的无引用内容
+      for (const attachment of archive.attachments) {
+        const stored = putAttachment({
+          home: this.home,
+          mediaType: attachment.mediaType,
+          data: Buffer.from(attachment.bytes).toString('base64'),
+        })
+        if (stored.hash !== attachment.hash) throw invalidParams(`附件哈希校验失败：${attachment.hash}`)
+      }
+    } else {
+      try {
+        loaded = loadLog(source)
+      } catch (cause) {
+        throw invalidParams(`导入文件不是受支持的 JSONL 会话：${cause instanceof Error ? cause.message : String(cause)}`)
+      }
+      sourceBytes = readFileSync(source)
     }
 
-    const sourceBytes = readFileSync(source)
     const sessionId = newSessionId()
     await this.persistence.open(asSessionId(sessionId), { ...(loaded.header.cwd === null ? {} : { cwd: loaded.header.cwd }) })
     const store = new InMemorySessionStore(asSessionId(sessionId))
@@ -956,7 +1039,8 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
           },
         },
       })
-      const imported = store.appendMany(loaded.events.map(toEventInput))
+      const seqMap = new Map(loaded.events.map((event, index) => [event.seq, index + 1]))
+      const imported = store.appendMany(loaded.events.map((event) => toEventInput(event, seqMap)))
       await this.persistence.append(asSessionId(sessionId), [provenance, ...imported] as readonly SessionEvent[])
       await this.persistence.flush(asSessionId(sessionId))
       await this.index.drain()
@@ -1049,6 +1133,9 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
         if (format === 'jsonl') {
           bytes = readFileSync(file)
           name = `${sessionId}.jsonl`
+        } else if (format === 'bundle') {
+          bytes = Buffer.from(createSessionBundle({ home: this.home, sessionId, file, now: this.now() }))
+          name = `${sessionId}.zip`
         } else {
           const loaded = loadLog(file)
           const text = renderMarkdown(
@@ -1430,7 +1517,7 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
     const existing = this.sessions.get(sessionId)
     if (existing !== undefined) return existing
     const store = new InMemorySessionStore(asSessionId(sessionId))
-    if (loaded.events.length > 0) store.appendMany(loaded.events.map(toEventInput))
+    if (loaded.events.length > 0) store.appendMany(loaded.events.map((frame) => toEventInput(frame)))
     const session: OpenSession = { store, cwd: loaded.header.cwd }
     this.sessions.set(sessionId, session)
     return session
@@ -1546,4 +1633,123 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
       }),
     )
   }
+}
+
+interface SessionArchive {
+  readonly logBytes: Buffer
+  readonly attachments: readonly { readonly hash: string; readonly mediaType: string; readonly bytes: Uint8Array }[]
+}
+
+const MAX_BUNDLE_BYTES = 512 * 1024 * 1024
+const EXT_MEDIA: Readonly<Record<string, string>> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+}
+
+/**
+ * 自包含会话包：JSONL + 被引用的附件 + manifest。
+ *
+ * 附件缺失不阻断导出：会话历史本身更重要，清单里如实标 `missing`，
+ * 导入方看到的是"这几张图丢了"，而不是整份记录都导不出来。
+ */
+function createSessionBundle(input: {
+  readonly home: string
+  readonly sessionId: string
+  readonly file: string
+  readonly now: number
+}): Uint8Array {
+  const logBytes = readFileSync(input.file)
+  const loaded = loadLog(input.file)
+  const events = loaded.events.map(frameToEvent)
+  const files: Record<string, Uint8Array> = { 'session.jsonl': logBytes }
+  const attachments: { hash: string; mediaType: string; bytes: number; file: string; sha256: string }[] = []
+  const missing: string[] = []
+  for (const ref of attachmentRefsOf(events)) {
+    const path = attachmentPath({ home: input.home, hash: ref.hash, mediaType: ref.mediaType })
+    if (path === undefined || !existsSync(path)) {
+      missing.push(ref.hash)
+      continue
+    }
+    const bytes = readFileSync(path)
+    const name = basename(path)
+    files[`attachments/${name}`] = bytes
+    attachments.push({ hash: ref.hash, mediaType: ref.mediaType, bytes: bytes.length, file: `attachments/${name}`, sha256: ref.hash })
+  }
+  const manifest = {
+    format: 'lcode-session-bundle',
+    version: 1,
+    exported_at: input.now,
+    session: {
+      session_id: input.sessionId,
+      file: 'session.jsonl',
+      bytes: logBytes.length,
+      sha256: sha256Hex(logBytes),
+    },
+    attachments,
+    missing,
+  }
+  files['manifest.json'] = strToU8(`${JSON.stringify(manifest, null, 2)}\n`)
+  return zipSync(files, { level: 6 })
+}
+
+function readSessionArchive(path: string): SessionArchive {
+  const compressed = readFileSync(path)
+  if (compressed.length > MAX_BUNDLE_BYTES) throw new Error('导入包超过 512MB 上限')
+  const files = unzipSync(compressed)
+  let total = 0
+  for (const [name, bytes] of Object.entries(files)) {
+    if (name.startsWith('/') || name.includes('\\') || name.split('/').includes('..')) {
+      throw new Error(`导入包包含不安全路径：${name}`)
+    }
+    total += bytes.length
+    if (total > MAX_BUNDLE_BYTES * 2) throw new Error('导入包解压后超过大小上限')
+  }
+  const logName = files['session.jsonl'] !== undefined
+    ? 'session.jsonl'
+    : Object.keys(files).filter((name) => name.endsWith('.jsonl') && !name.includes('/'))[0]
+  if (logName === undefined) throw new Error('导入包里没有 session.jsonl')
+  const logBytes = Buffer.from(files[logName]!)
+
+  const attachments: { hash: string; mediaType: string; bytes: Uint8Array }[] = []
+  const manifestBytes = files['manifest.json']
+  let manifestAttachments: { hash?: unknown; mediaType?: unknown; file?: unknown }[] = []
+  if (manifestBytes !== undefined) {
+    try {
+      const manifest = JSON.parse(Buffer.from(manifestBytes).toString('utf8')) as { format?: unknown; attachments?: unknown; session?: { sha256?: unknown } }
+      if (manifest.format !== 'lcode-session-bundle') throw new Error('manifest.format 不是 lcode-session-bundle')
+      if (typeof manifest.session?.sha256 === 'string' && manifest.session.sha256 !== sha256Hex(logBytes)) {
+        throw new Error('会话日志哈希与 manifest 不一致')
+      }
+      if (Array.isArray(manifest.attachments)) manifestAttachments = manifest.attachments as typeof manifestAttachments
+    } catch (cause) {
+      if (cause instanceof Error && cause.message.includes('lcode-session-bundle')) throw cause
+      throw new Error(`manifest.json 无效：${cause instanceof Error ? cause.message : String(cause)}`)
+    }
+  }
+  const listed = new Set<string>()
+  for (const entry of manifestAttachments) {
+    const file = entry.file
+    const hash = entry.hash
+    const mediaType = entry.mediaType
+    if (typeof file !== 'string' || typeof hash !== 'string' || typeof mediaType !== 'string') continue
+    const bytes = files[file]
+    if (bytes === undefined) throw new Error(`manifest 引用的附件不存在：${file}`)
+    if (sha256Hex(bytes) !== hash) throw new Error(`附件哈希不一致：${file}`)
+    listed.add(file)
+    attachments.push({ hash, mediaType, bytes })
+  }
+  for (const [name, bytes] of Object.entries(files)) {
+    if (!name.startsWith('attachments/') || listed.has(name)) continue
+    const match = /^attachments\/([a-f0-9]{64})\.([a-z0-9]+)$/.exec(name)
+    if (match === null) continue
+    const hash = match[1]!
+    const mediaType = EXT_MEDIA[match[2]!]
+    if (mediaType === undefined) continue
+    if (sha256Hex(bytes) !== hash) throw new Error(`附件哈希与文件名不一致：${name}`)
+    attachments.push({ hash, mediaType, bytes })
+  }
+  return { logBytes, attachments }
 }

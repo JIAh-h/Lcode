@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { t } from '../i18n/index.ts'
-import type { SessionContextUsage } from '../store/sessionBridge.ts'
+import { sessionBridge, type SessionContextUsage } from '../store/sessionBridge.ts'
+import { toast } from './toast.ts'
 
 /**
  * 手动压缩的准入线：窗口占用必须超过 20%，否则视为上下文较短。
@@ -24,33 +25,44 @@ export function compactBlockedReason(compacting: boolean, running: boolean, tooS
 
 /**
  * 输入框下方的状态行（Qoder 同位置）：左侧是「工作区 · 本地/worktree · 分支」，
- * 右侧是上下文用量。点用量打开明细，并可手动压缩。
+ * 右侧是上下文用量。点用量打开明细，可预览压缩、撤销上次压缩。
  *
  * 总量优先采用供应商返回的 usage；之后新增内容按本地估算补齐。窗口未配置时
  * 只显示 token 数，不拿一个假窗口算百分比。
  */
 export function ContextBar({
+  sessionId,
   workspace,
   branch,
   mode,
   usage,
-  compacting,
   running,
-  onCompact,
+  openSignal = 0,
+  onChanged,
+  onCompactRequest,
   onOpenSettings,
 }: {
+  readonly sessionId: string
   readonly workspace: string | null
   readonly branch: string | null
   readonly mode: 'local' | 'worktree'
   readonly usage: SessionContextUsage | null
-  readonly compacting: boolean
   /** 回合执行中：表面正在被写入，压缩切点不安全 */
   readonly running: boolean
-  readonly onCompact: () => void
+  /** 递增时打开明细面板（供 /context 使用） */
+  readonly openSignal?: number
+  readonly onChanged: () => void
+  /** 打开压缩预览框（由父级渲染，输入区预警也能触发同一个入口） */
+  readonly onCompactRequest: () => void
   readonly onOpenSettings: () => void
 }) {
   const [open, setOpen] = useState(false)
+  const [undoing, setUndoing] = useState(false)
   const rootRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (openSignal > 0) setOpen(true)
+  }, [openSignal])
 
   useEffect(() => {
     if (!open) return
@@ -77,14 +89,43 @@ export function ContextBar({
   const surface = usage?.measurement.surfaceTokens ?? 0
   const system = usage?.measurement.systemTokens ?? 0
   const tools = usage?.measurement.toolSchemaTokens ?? 0
+  const imageTokens = usage?.measurement.imageTokens ?? 0
+  const summaryTokens = usage?.measurement.summaryTokens ?? 0
+  const contextTokens = usage?.provenance.contextTokens ?? 0
   const usageSource = usage?.usageSource ?? 'estimate'
-  // 实测总量与估算构成按同一比例校准，保证三行相加等于「已用」
+  // 实测总量与估算构成按同一比例校准，保证各行相加等于「已用」
   const ratio = used > 0 && surface + system + tools > 0 ? used / (surface + system + tools) : 1
-  const shownSystem = Math.round(system * ratio)
   const shownTools = Math.round(tools * ratio)
-  const shownSurface = Math.max(0, used - shownSystem - shownTools)
+  const shownContext = Math.round(contextTokens * ratio)
+  const shownImages = Math.round(imageTokens * ratio)
+  const shownSummary = Math.round(summaryTokens * ratio)
+  const shownSystem = Math.max(0, Math.round(system * ratio) - shownContext)
+  const shownSurface = Math.max(0, used - shownSystem - shownTools - shownContext - shownImages - shownSummary)
   const tooShort = isContextTooShort(percent)
-  const blocked = compactBlockedReason(compacting, running, tooShort)
+  const blocked = compactBlockedReason(false, running, tooShort)
+  const sources = usage?.provenance.sources ?? []
+  const skills = usage?.provenance.skills ?? []
+  const images = usage?.provenance.images ?? 0
+  const compaction = usage?.compaction ?? null
+
+  const undo = (): void => {
+    if (compaction === null || undoing) return
+    const api = sessionBridge()
+    if (api === undefined) return
+    setUndoing(true)
+    void api
+      .compactUndo({ session_id: sessionId, compaction_id: compaction.compactionId })
+      .then((result) => {
+        if (result.status === 'undone') {
+          toast(t('已撤销上次压缩，原文已恢复'))
+          onChanged()
+        } else {
+          toast(t('这次压缩已无法撤销（摘要已被后续操作覆盖）'))
+        }
+      })
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('撤销失败')))
+      .finally(() => setUndoing(false))
+  }
 
   return (
     <div className="cinmeta" ref={rootRef}>
@@ -147,17 +188,39 @@ export function ContextBar({
                 </div>
                 <div className="cmpop-rows">
                   <div className="cmrow"><span>{t('对话')}</span><b>{formatTokens(shownSurface)}</b></div>
+                  {shownImages > 0 ? <div className="cmrow"><span>{t('图片')}</span><b>{formatTokens(shownImages)}</b></div> : null}
+                  {shownSummary > 0 ? <div className="cmrow"><span>{t('压缩摘要')}</span><b>{formatTokens(shownSummary)}</b></div> : null}
                   <div className="cmrow"><span>{t('系统提示')}</span><b>{formatTokens(shownSystem)}</b></div>
+                  {shownContext > 0 ? <div className="cmrow"><span>{t('运行时上下文')}</span><b>{formatTokens(shownContext)}</b></div> : null}
                   <div className="cmrow"><span>{t('工具描述')}</span><b>{formatTokens(shownTools)}</b></div>
                 </div>
+                {(sources.length > 0 || skills.length > 0 || images > 0 || usage?.provenance.summary === true) ? (
+                  <div className="cmprov">
+                    <div className="cmprov-title">{t('本轮来源')}</div>
+                    <div className="cmprov-chips">
+                      {skills.map((skill) => <span className="cmprov-chip skill" key={`skill-${skill.id}`}>⚡ {skill.name}</span>)}
+                      {images > 0 ? <span className="cmprov-chip">{t('{n} 张图片', { n: images })}</span> : null}
+                      {usage?.provenance.summary === true ? <span className="cmprov-chip">{t('包含压缩摘要')}</span> : null}
+                      {sources.map((source) => <span className="cmprov-chip" key={source}>{source}</span>)}
+                    </div>
+                  </div>
+                ) : null}
+                {compaction !== null ? (
+                  <div className="cmpop-last">
+                    <span>{t('上次压缩：{before} → {after} 字符', { before: compaction.originalChars, after: compaction.summaryChars })}</span>
+                    <button className="btn mini" disabled={undoing || running} onClick={undo}>
+                      {undoing ? t('正在撤销…') : t('撤销压缩')}
+                    </button>
+                  </div>
+                ) : null}
               </>
             )}
             <div className="cmpop-note">
               {usageSourceNote(usageSource)} {t('压缩会摘要较早历史并消耗一次模型调用，原始记录仍保留。')}
             </div>
             <div className="cmcompact-wrap">
-              <button className="btn primary cmcompact" disabled={compacting || blocked !== null} onClick={onCompact}>
-                {compacting ? t('正在压缩…') : t('压缩上下文')}
+              <button className="btn primary cmcompact" disabled={blocked !== null} onClick={onCompactRequest}>
+                {t('压缩上下文')}
               </button>
               {blocked !== null ? (
                 <span className="cmpop-tip" role="tooltip">

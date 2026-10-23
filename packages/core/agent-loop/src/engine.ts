@@ -6,13 +6,16 @@ import type {
   UserInput,
 } from "@lcode/agent";
 import type { Context } from "@lcode/context";
+import type {} from "./attachments.ts";
 import type {} from "@lcode/system-prompt";
 import type { LlmAdapter, PreparedCall } from "@lcode/llm";
 import type { ModelSelection } from "@lcode/agent-default-model";
 import type { SessionService } from "@lcode/session";
+import { deriveRequestItems } from "@lcode/session";
 import type {
   AssistantMessage,
   ContentBlock,
+  ModelMessage,
   SessionEvent,
   TokenUsage,
   TurnEndReason,
@@ -518,6 +521,8 @@ export class TurnEngine {
               selection: turnSelection,
               continuation: item.continuation === true,
               injectedVars,
+              // 技能指令只在本轮生效：本轮之前的 skill 块不再进入后续请求
+              activeFromSeq: turnStart.seq,
               signal,
             });
             break;
@@ -670,6 +675,8 @@ export class TurnEngine {
     selection: ModelSelection;
     continuation: boolean;
     injectedVars: Record<string, string>;
+    /** 本轮 turn/start 的 seq；低于它的 skill 块视为历史技能，不再发送 */
+    activeFromSeq: number;
     signal: AbortSignal;
   }): Promise<StreamOutcome> {
     const adapter = this.requireAdapter(input.selection);
@@ -682,7 +689,9 @@ export class TurnEngine {
     const system = input.continuation
       ? `${assembled.system}\n\n上一个执行回合已被用户暂停。请基于当前对话继续未完成的任务，不要重复已经完成的工作。`
       : assembled.system;
-    const messages = input.session.deriveMessages();
+    // 屏蔽的轮次整轮丢弃；历史技能块剥离；附件引用在发出前解析成真实内容
+    const items = deriveRequestItems(input.session.events(), { activeFromSeq: input.activeFromSeq });
+    const messages = await this.hydrateAttachments(items.map((item) => item.message));
 
     const prepared = await adapter.prepareCall(toCallSelection(input.selection), {
       signal: input.signal,
@@ -950,6 +959,30 @@ export class TurnEngine {
       status,
     });
   }
+
+  /**
+   * 附件引用只在请求边界解析；日志里永远是引用，导出和回放不搬运 base64。
+   * 文件丢失时降级成一条可解释的文本，而不是让整个会话无法继续。
+   */
+  private async hydrateAttachments(messages: readonly ModelMessage[]): Promise<ModelMessage[]> {
+    if (!this.deps.ctx.has("attachments")) {
+      return messages.map((message) => replaceImageRefs(message, () => undefined));
+    }
+    const resolver = this.deps.ctx.get("attachments");
+    return Promise.all(
+      messages.map(async (message) => {
+        if (typeof message.content === "string" || !message.content.some((block) => block.type === "image-ref")) {
+          return message;
+        }
+        const resolved = new Map<string, string | undefined>();
+        for (const block of message.content) {
+          if (block.type !== "image-ref") continue;
+          resolved.set(block.hash, await resolver.resolveImage({ hash: block.hash, mediaType: block.mediaType }));
+        }
+        return replaceImageRefs(message, (ref) => resolved.get(ref.hash));
+      }),
+    );
+  }
 }
 
 function nextTurnNumber(events: readonly SessionEvent[]): number {
@@ -963,6 +996,22 @@ function nextTurnNumber(events: readonly SessionEvent[]): number {
 /** UserInput → user/message 的 content（两种形态同构落盘） */
 function toMessageContent(input: UserInput): string | readonly ContentBlock[] {
   return input.kind === "text" ? input.text : input.content;
+}
+
+function replaceImageRefs(
+  message: ModelMessage,
+  resolve: (ref: Extract<ContentBlock, { type: "image-ref" }>) => string | undefined,
+): ModelMessage {
+  if (typeof message.content === "string") return message;
+  if (!message.content.some((block) => block.type === "image-ref")) return message;
+  const content = message.content.map((block): ContentBlock => {
+    if (block.type !== "image-ref") return block;
+    const data = resolve(block);
+    return data === undefined
+      ? { type: "text", text: `[图片附件缺失：${block.hash.slice(0, 12)}]` }
+      : { type: "image", mediaType: block.mediaType, data };
+  });
+  return { ...message, content } as ModelMessage;
 }
 
 function toCallSelection(selection: ModelSelection): ModelSelection {

@@ -21,4 +21,34 @@ describe('Markdown', () => {
     expect(html).not.toContain('<script>')
     expect(html).toContain('&lt;script&gt;')
   })
+
+  it('GFM 表格渲染成 table，含对齐与转义竖线', () => {
+    const source = [
+      '| 状态 | 表现 | 说明 |',
+      '| --- | :---: | ---: |',
+      '| 正常 | `a \\| b` | **加粗** |',
+      '| 缺列 | |',
+    ].join('\n')
+    const blocks = parseMarkdown(source)
+    expect(blocks[0]?.kind).toBe('table')
+    if (blocks[0]?.kind !== 'table') throw new Error('not a table')
+    expect(blocks[0].header).toEqual(['状态', '表现', '说明'])
+    expect(blocks[0].align).toEqual([null, 'center', 'right'])
+    expect(blocks[0].rows[0]).toEqual(['正常', '`a | b`', '**加粗**'])
+    expect(blocks[0].rows[1]).toEqual(['缺列', '', ''])
+
+    const html = renderToStaticMarkup(<Markdown text={source} />)
+    expect(html).toContain('<table>')
+    expect(html).toContain('<th>状态</th>')
+    expect(html).toContain('text-align:center')
+    expect(html).toContain('text-align:right')
+    expect(html).toContain('<code>a | b</code>')
+    expect(html).toContain('<strong>加粗</strong>')
+  })
+
+  it('分隔线与单行 `---` 不会被误判成表格', () => {
+    expect(parseMarkdown('---')[0]?.kind).toBe('hr')
+    const blocks = parseMarkdown('正文一段\n---')
+    expect(blocks.map((block) => block.kind)).toEqual(['paragraph', 'hr'])
+  })
 })

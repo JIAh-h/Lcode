@@ -1,6 +1,6 @@
 import type { Context } from '@lcode/context'
-import type { SessionEvent, SessionService, VisibleSurfaceItem } from '@lcode/session'
-import { deriveVisibleSurfaceItems } from '@lcode/session'
+import type { ContentBlock, ModelMessage, SessionEvent, SessionService, VisibleSurfaceItem } from '@lcode/session'
+import { deriveRequestItems } from '@lcode/session'
 import type { ToolSchema } from '@lcode/tools'
 import type { Disposer } from '@lcode/util'
 
@@ -10,6 +10,10 @@ export interface TokenMeasurement {
   readonly surfaceTokens: number
   readonly systemTokens: number
   readonly toolSchemaTokens: number
+  /** 对话里图片的固定预算部分（已含在 surfaceTokens 内） */
+  readonly imageTokens: number
+  /** 当前表面上的压缩摘要估算（已含在 surfaceTokens 内） */
+  readonly summaryTokens: number
   readonly total: number
   /** provider 已返回的真实用量，只用于校准和审计，绝不再重复相加到 total。 */
   readonly observedInputTokens: number
@@ -38,8 +42,8 @@ export function registerContextBudget(input: { readonly ctx: Context }): Dispose
 
 export function measure(input: { readonly session: SessionService; readonly system: string; readonly tools: readonly ToolSchema[] }): TokenMeasurement {
   const events = input.session.events()
-  const items = deriveVisibleSurfaceItems(events)
-  const surface = items.map((item) => JSON.stringify(item.message)).join('\n')
+  // 屏蔽的轮次不进入请求，也不应该计入"下一次请求"的预算
+  const items = deriveRequestItems(events)
   const schemas = JSON.stringify(input.tools)
   let observedInputTokens = 0
   let observedOutputTokens = 0
@@ -51,12 +55,16 @@ export function measure(input: { readonly session: SessionService; readonly syst
   const provider = providerBaseline(events, items)
   const systemTokens = estimateTokens(input.system)
   const toolSchemaTokens = estimateTokens(schemas)
-  const surfaceTokens = estimateTokens(surface)
+  const surfaceTokens = items.reduce((sum, item) => sum + messageTokens(item.message), 0)
+  const imageTokens = items.reduce((sum, item) => sum + messageImageTokens(item.message), 0)
+  const summaryTokens = items.reduce((sum, item) => sum + messageSummaryTokens(item.message), 0)
   return Object.freeze({
     revision: input.session.length,
     surfaceTokens,
     systemTokens,
     toolSchemaTokens,
+    imageTokens,
+    summaryTokens,
     total: surfaceTokens + systemTokens + toolSchemaTokens,
     observedInputTokens,
     observedOutputTokens,
@@ -87,13 +95,53 @@ function providerBaseline(
   if (baseline === undefined) return undefined
   for (let index = baselineIndex + 1; index < events.length; index += 1) {
     const type = events[index]?.type
-    if (type === 'compaction/start' || type === 'compaction/end' || type === 'session/rewound') return undefined
+    if (type === 'compaction/start' || type === 'compaction/end' || type === 'compaction/undo' || type === 'session/rewound') return undefined
   }
   const itemIndex = items.findIndex((item) => item.sourceSeq === baseline.seq)
   if (itemIndex < 0) return undefined
   let delta = 0
-  for (const item of items.slice(itemIndex + 1)) delta += estimateTokens(JSON.stringify(item.message))
+  for (const item of items.slice(itemIndex + 1)) delta += messageTokens(item.message)
   return { total: baseline.input + baseline.output + delta, delta }
+}
+
+/**
+ * 图片按固定预算计（base64 字符数不代表 token）；技能指令和文本按字符估算。
+ * 供应商返回 usage 后，实测值会覆盖这些估算。
+ */
+const IMAGE_TOKENS = 1_200
+
+function messageTokens(message: ModelMessage): number {
+  if (typeof message.content === 'string') return estimateTokens(message.content)
+  return message.content.reduce((sum, block) => sum + blockTokens(block), 0)
+}
+
+function blockTokens(block: ContentBlock): number {
+  if (block.type === 'text') return estimateTokens(block.text)
+  if (block.type === 'image' || block.type === 'image-ref') return IMAGE_TOKENS
+  // 附件正文随消息进入请求；文件夹只有目录结构，实际内容仍由工具按需读取
+  if (block.type === 'file-ref') return estimateTokens(block.content) + 24
+  // 技能只在本轮请求里生效；历史轮次的技能块会被请求层剥掉，不占上下文
+  if (block.type === 'skill') return 0
+  if (block.type === 'tool_use') return estimateTokens(`${block.name}\n${JSON.stringify(block.input)}`)
+  if (typeof block.content === 'string') return estimateTokens(block.content)
+  return block.content.reduce((sum, nested) => sum + blockTokens(nested), 0)
+}
+
+function messageImageTokens(message: ModelMessage): number {
+  if (typeof message.content === 'string') return 0
+  return message.content.reduce((sum, block) => {
+    if (block.type === 'image' || block.type === 'image-ref') return sum + IMAGE_TOKENS
+    if (block.type === 'tool_result' && typeof block.content !== 'string') {
+      return sum + block.content.reduce((nested, item) => nested + (item.type === 'image' || item.type === 'image-ref' ? IMAGE_TOKENS : 0), 0)
+    }
+    return sum
+  }, 0)
+}
+
+function messageSummaryTokens(message: ModelMessage): number {
+  if (typeof message.content === 'string') return message.content.startsWith('[Conversation summary]') ? estimateTokens(message.content) : 0
+  const text = message.content.map((block) => (block.type === 'text' ? block.text : '')).join('')
+  return text.startsWith('[Conversation summary]') ? estimateTokens(text) : 0
 }
 
 /**

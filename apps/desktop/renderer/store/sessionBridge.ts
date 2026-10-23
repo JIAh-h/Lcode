@@ -74,7 +74,7 @@ export interface SessionBridge {
   restore(input: { readonly session_id: string }): Promise<unknown>
   rename(input: { readonly session_id: string; readonly title: string }): Promise<{ readonly session_id: string; readonly title: string }>
   purge(input: { readonly session_id: string; readonly force?: boolean }): Promise<unknown>
-  export(input: { readonly session_id: string; readonly format: 'jsonl' | 'md' }): Promise<{
+  export(input: { readonly session_id: string; readonly format: 'jsonl' | 'md' | 'bundle' }): Promise<{
     readonly path: string
     readonly bytes: number
     readonly sha256: string
@@ -92,7 +92,13 @@ export interface SessionBridge {
   fileCheckpoints(input: { readonly session_id: string }): Promise<readonly FileCheckpointMeta[]>
   restoreCheckpoint(input: { readonly session_id: string; readonly checkpoint_id: string }): Promise<{ readonly restoredPaths: readonly string[]; readonly removedPaths: readonly string[] }>
   /** 编辑后重发：回退该提问之后的日志与文件改动，再重新发送 */
-  rewindSend(input: { readonly session_id: string; readonly to_seq: number; readonly text: string }): Promise<{
+  rewindSend(input: {
+    readonly session_id: string
+    readonly to_seq: number
+    readonly text: string
+    readonly skills?: readonly string[]
+    readonly images?: readonly { readonly mediaType: string; readonly data: string }[]
+  }): Promise<{
     readonly accepted: true
     readonly rewind: {
       readonly discarded: number
@@ -101,10 +107,21 @@ export interface SessionBridge {
       readonly unrestored: readonly string[]
     }
   }>
+  /** 重试最后一轮：只允许没有工具副作用的回合，清掉失败回答后原样重发 */
+  retryTurn(input: { readonly session_id: string }): Promise<{
+    readonly accepted: true
+    readonly retry: { readonly discarded: number }
+  }>
   /** 输入框状态栏：上下文占用估算（2 字符/token） */
   contextUsage(sessionId: string): Promise<SessionContextUsage>
   /** 手动压缩较早历史；摘要由当前默认模型生成 */
   compact(sessionId: string): Promise<CompactResult>
+  /** 压缩预览：生成摘要并展示范围，不修改日志 */
+  compactPreview(input: { readonly session_id: string; readonly keep_recent_turns?: number }): Promise<CompactionPreview>
+  compactApply(input: { readonly session_id: string; readonly preview_id: string }): Promise<CompactResult>
+  compactUndo(input: { readonly session_id: string; readonly compaction_id: string }): Promise<{ readonly status: 'undone' | 'not-found' | 'not-visible' | 'not-completed' }>
+  /** 固定/屏蔽某一轮 */
+  marker(input: { readonly session_id: string; readonly target_seq: number; readonly pinned?: boolean; readonly muted?: boolean }): Promise<{ readonly target_seq: number; readonly pinned: boolean; readonly muted: boolean }>
   onEvent(handler: (payload: unknown) => void): () => void
   onChunks(handler: (payload: unknown) => void): () => void
   onTurnFailed(handler: (payload: unknown) => void): () => void
@@ -112,7 +129,12 @@ export interface SessionBridge {
 }
 
 export interface AgentBridge {
-  send(input: { readonly session_id: string; readonly text: string }): Promise<{ readonly accepted: true; readonly queue_id: string }>
+  send(input: {
+    readonly session_id: string
+    readonly text: string
+    readonly skills?: readonly string[]
+    readonly images?: readonly { readonly mediaType: string; readonly data: string }[]
+  }): Promise<{ readonly accepted: true; readonly queue_id: string }>
   steer(input: { readonly session_id: string; readonly text: string }): Promise<{ readonly accepted: true; readonly mode: 'steered' | 'queued' }>
   queue: {
     list(input: { readonly session_id: string }): Promise<{ readonly items: readonly QueuedMessage[] }>
@@ -135,16 +157,51 @@ export interface SessionContextUsage {
     readonly surfaceTokens: number
     readonly systemTokens: number
     readonly toolSchemaTokens: number
+    readonly imageTokens: number
+    readonly summaryTokens: number
     readonly total: number
     readonly observedInputTokens: number
     readonly observedOutputTokens: number
     readonly providerTotal?: number | undefined
     readonly providerDeltaTokens?: number | undefined
   }
+  readonly provenance: {
+    readonly sources: readonly string[]
+    readonly contextTokens: number
+    readonly skills: readonly { readonly id: string; readonly name: string }[]
+    readonly images: number
+    readonly summary: boolean
+  }
+  readonly compaction: {
+    readonly compactionId: string
+    readonly originalChars: number
+    readonly summaryChars: number
+    readonly shadowedSeqs: readonly number[]
+    readonly canUndo: boolean
+  } | null
+}
+
+export interface CompactionPreview {
+  readonly previewId: string
+  readonly summary: string
+  readonly plan: {
+    readonly start: 0
+    readonly end: number
+    readonly prefixChars: number
+    readonly keptItems: number
+    readonly compactedItems: number
+    readonly totalItems: number
+    readonly keptTurns: number
+    readonly totalTurns: number
+    readonly pinnedTurns: number
+  }
+  readonly originalChars: number
+  readonly summaryChars: number
+  readonly revision: number
 }
 
 export interface CompactResult {
-  readonly status: 'compacted' | 'not-beneficial' | 'invalid-range' | 'tool-boundary' | 'active-transaction'
+  readonly status: 'compacted' | 'not-beneficial' | 'invalid-range' | 'tool-boundary' | 'active-transaction' | 'pinned-turn'
   readonly originalChars: number
   readonly summaryChars: number
   readonly compactionId?: string | undefined
@@ -196,6 +253,14 @@ export interface PlanBridge {
 export interface WorkspaceTrustBridge {
   list(): Promise<readonly { readonly path: string; readonly trustedAt: number }[]>
   set(input: { readonly workspace: string; readonly trusted: boolean; readonly session_id?: string }): Promise<{ readonly workspace: string; readonly trusted: boolean }>
+}
+
+export interface AttachmentBridge {
+  read(input: { readonly hash: string; readonly media_type: string }): Promise<{ readonly media_type: string; readonly data: string }>
+}
+
+export function attachmentBridge(): AttachmentBridge | undefined {
+  return (globalThis as unknown as { lcode?: { attachments?: AttachmentBridge } }).lcode?.attachments
 }
 
 export function sessionBridge(): SessionBridge | undefined {

@@ -31,6 +31,31 @@ describe('模型摘要器', () => {
     expect(chooseCompactionRange(single)).toBeUndefined()
   })
 
+  it('按“保留最近 N 轮”选范围；固定轮次之前才可压', () => {
+    const session = new InMemorySessionStore(asSessionId('turns'))
+    for (let turn = 1; turn <= 4; turn += 1) {
+      session.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: `第 ${turn} 问：${'细节'.repeat(1_200)}` }] } })
+      session.append({ type: 'assistant/message', data: { turn, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: `第 ${turn} 答` }] } } })
+    }
+    const plan = chooseCompactionRange(session, { keepRecentTurns: 2 })
+    expect(plan).toMatchObject({ keptTurns: 2, totalTurns: 4 })
+    expect(plan!.keptItems).toBeGreaterThanOrEqual(2)
+
+    const pinnedMiddle = new InMemorySessionStore(asSessionId('pinned-middle'))
+    for (let turn = 1; turn <= 3; turn += 1) {
+      const user = pinnedMiddle.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: `第 ${turn} 问：${'细节'.repeat(1_200)}` }] } })
+      pinnedMiddle.append({ type: 'assistant/message', data: { turn, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: `第 ${turn} 答` }] } } })
+      if (turn === 2) pinnedMiddle.append({ type: 'context/turn-marker', data: { targetSeq: user.seq, pinned: true } })
+    }
+    const guarded = chooseCompactionRange(pinnedMiddle, { keepRecentChars: 1 })
+    expect(guarded?.pinnedTurns).toBe(1)
+    // 切点最多落在第 2 问之前；固定轮本身不会被吞进摘要
+    expect(guarded!.end).toBeLessThanOrEqual(2)
+
+    pinnedMiddle.append({ type: 'context/turn-marker', data: { targetSeq: 0, pinned: true } })
+    expect(chooseCompactionRange(pinnedMiddle, { keepRecentChars: 1 })).toBeUndefined()
+  })
+
   it('摘要请求带 system 指令、不带工具，且只包含被压缩的前缀', async () => {
     const calls: { request: { body: unknown } }[] = []
     const adapter: LlmAdapter = {

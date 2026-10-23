@@ -19,18 +19,19 @@
   "dependencies": {
     "@lcode/approval": "workspace:*",
     "@lcode/lcode-desktop": "workspace:*",
+    "@lcode/model-api": "workspace:*",
     "@lcode/session": "workspace:*",
     "@lcode/session-persistence-sqlite": "workspace:*",
     "better-sqlite3": "^11.10.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^6.28.0",
-    "@lcode/model-api": "workspace:*"
+    "react-router-dom": "^6.28.0"
   },
   "devDependencies": {
     "concurrently": "^9.1.0",
     "electron": "^33.2.0",
-    "wait-on": "^8.0.1",
-    "esbuild": "^0.25.12"
+    "esbuild": "^0.25.12",
+    "rcedit": "^5.0.2",
+    "wait-on": "^8.0.1"
   }
 }

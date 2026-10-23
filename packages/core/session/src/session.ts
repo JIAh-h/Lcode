@@ -184,6 +184,14 @@ function assertSurfaceOpInRange(event: SessionEvent, surfaceBefore: number): voi
   if (op === undefined || op === 'append') return
   // replace 以替换前的当前可见表面为坐标；摘要本身会被插入 start，而不是先追加到末尾。
   const surfaceLength = surfaceBefore
+  if (op.op === 'restore') {
+    if (op.start < 0 || op.start >= surfaceLength || op.eventSeqs.length === 0) {
+      throw new RangeError(
+        `surface restore 区间越界：start=${op.start} 恢复项=${op.eventSeqs.length} surface 长度=${surfaceLength}（不变量 I4 违规）`,
+      )
+    }
+    return
+  }
   const { start, end } = op
   if (start < 0 || end > surfaceLength || start >= end) {
     throw new RangeError(
@@ -195,6 +203,7 @@ function assertSurfaceOpInRange(event: SessionEvent, surfaceBefore: number): voi
 function nextSurfaceCount(event: SessionEvent, surfaceBefore: number): number {
   const op = event.surfaceOp
   if (op !== undefined && op !== 'append') {
+    if (op.op === 'restore') return surfaceBefore - 1 + op.eventSeqs.length
     return surfaceBefore - (op.end - op.start) + (isSurfaceEventType(event.type) ? 1 : 0)
   }
   return surfaceBefore + (isSurfaceEventType(event.type) ? 1 : 0)

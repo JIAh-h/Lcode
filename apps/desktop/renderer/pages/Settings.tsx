@@ -196,31 +196,40 @@ function AppearanceSection() {
 
 /* ───────── 分区：键盘快捷键 ───────── */
 
+const IS_MAC = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
+const combo = (key: string, shift = false): string =>
+  IS_MAC ? `⌘${shift ? '⇧' : ''}${key}` : `Ctrl+${shift ? 'Shift+' : ''}${key}`
+
 const KEY_ROWS: [string, string][] = [
-  ['新对话', '⌃ N'],
-  ['打开设置', '⌃ ,'],
-  ['显示/隐藏面板', '⌃ B'],
-  ['进入回放', '⌃ R'],
+  ['新对话', combo('N')],
+  ['打开文件夹', combo('O')],
+  ['关闭会话', combo('W')],
+  ['显示/隐藏侧边栏', combo('B')],
+  ['进入回放', combo('R')],
+  ['打开设置', combo(',')],
+  ['显示键盘快捷键', combo('/')],
+  ['放大', combo('=')],
+  ['缩小', combo('-')],
+  ['实际大小', combo('0')],
+  ['切换全屏', 'F11'],
   ['发送消息', 'Enter'],
   ['换行', 'Shift + Enter'],
+  ['斜杠命令', '/'],
 ]
 
 function KeysSection() {
   return (
     <>
       <h2>{t('键盘快捷键')}</h2>
-      <div className="sub">{t('演示版暂不支持改键，点击「修改」会给出提示。')}</div>
+      <div className="sub">{t('以下为当前生效的快捷键；复制、粘贴等编辑操作沿用系统默认。')}</div>
       <div className="sect">
         <div className="sh2">{t('全局')}</div>
-        {KEY_ROWS.map(([desc, combo]) => (
+        {KEY_ROWS.map(([desc, shortcut]) => (
           <div className="krow" key={desc}>
             <span className="kdesc">{t(desc)}</span>
             <span className="kcombo">
-              <span className="kbd">{combo}</span>
+              <span className="kbd">{shortcut}</span>
             </span>
-            <button className="kedit" onClick={() => toast(t('演示版：暂不支持自定义快捷键'))}>
-              {t('修改')}
-            </button>
           </div>
         ))}
       </div>
@@ -1309,6 +1318,156 @@ function TrustSection() {
   )
 }
 
+/* ───────── 分区：技能 ───────── */
+
+interface SkillRow {
+  readonly id: string
+  readonly name: string
+  readonly description: string
+  readonly source: 'builtin' | 'user' | 'workspace'
+}
+
+function SkillsSection() {
+  const [skills, setSkills] = useState<readonly SkillRow[]>([])
+  const [query, setQuery] = useState('')
+  const [busy, setBusy] = useState<string | undefined>()
+  const [removing, setRemoving] = useState<SkillRow | null>(null)
+
+  const refresh = (): void => {
+    void window.lcode.skills
+      .list()
+      .then((value) => setSkills(Array.isArray(value) ? value as SkillRow[] : []))
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('读取技能失败')))
+  }
+  useEffect(refresh, [])
+
+  const importSkill = async (kind: 'md' | 'zip'): Promise<void> => {
+    const path = kind === 'md'
+      ? await window.lcode.chooseSkillMarkdown(t('选择 SKILL.md'))
+      : await window.lcode.chooseSkillArchive(t('选择技能 zip'))
+    if (!path) return
+    setBusy(kind)
+    try {
+      const result = await window.lcode.skills.import({ path }) as { imported?: { name?: string } }
+      refresh()
+      toast(t('已导入技能：{name}', { name: result.imported?.name ?? t('未命名技能') }))
+    } catch (error) {
+      toast(error instanceof Error ? error.message : t('技能导入失败'))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const remove = async (): Promise<void> => {
+    if (removing === null) return
+    setBusy(`remove:${removing.id}`)
+    try {
+      await window.lcode.skills.remove({ id: removing.id })
+      setRemoving(null)
+      refresh()
+      toast(t('已删除技能：{name}', { name: removing.name }))
+    } catch (error) {
+      toast(error instanceof Error ? error.message : t('技能删除失败'))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+
+  const filtered = skills.filter((skill) => {
+    const needle = query.trim().toLowerCase()
+    return needle === '' || skill.name.toLowerCase().includes(needle) || skill.description.toLowerCase().includes(needle)
+  })
+
+  return (
+    <>
+      <h2>{t('技能')}</h2>
+      <div className="sub">{t('技能是本地只读的 SKILL.md 指令。可以在提问时从输入区「＋ → 技能」选择，指令作为上下文发送，不会执行代码。')}</div>
+      <div className="sect">
+        <div className="sh2">
+          {t('已安装技能')}
+          <span className="sh2-actions">
+            <button className="mini" disabled={busy !== undefined} onClick={() => void importSkill('md')}>
+              ＋ {busy === 'md' ? t('正在导入…') : t('导入 SKILL.md')}
+            </button>
+            <button className="mini" disabled={busy !== undefined} onClick={() => void importSkill('zip')}>
+              ＋ {busy === 'zip' ? t('正在导入…') : t('导入 zip')}
+            </button>
+          </span>
+        </div>
+        {skills.length > 0 ? (
+          <div className="srow">
+            <div className="sl">{t('搜索技能')}</div>
+            <div className="sr">
+              <TextInput placeholder={t('按名称或描述筛选…')} value={query} onChange={setQuery} />
+            </div>
+          </div>
+        ) : null}
+        {filtered.length > 0 ? (
+          <div className="modelList ext-list">
+            {filtered.map((skill) => (
+              <div className="mrow ext-row" key={`${skill.source}:${skill.id}`}>
+                <span className="mic">✦</span>
+                <div className="ext-main">
+                  <div className="mnm">
+                    {skill.name}
+                    <span className="ext-tag">
+                      {skill.source === 'user' ? t('用户') : skill.source === 'workspace' ? t('工作区') : t('内置')}
+                    </span>
+                  </div>
+                  <div className="msrc ext-desc" title={skill.description}>{skill.description}</div>
+                </div>
+                {skill.source === 'user' ? (
+                  <span className="macts">
+                    <button
+                      type="button"
+                      title={t('删除技能')}
+                      aria-label={t('删除技能')}
+                      disabled={busy !== undefined}
+                      onClick={() => setRemoving(skill)}
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ) : (
+                  <span className="ext-readonly">{t('只读')}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="ext-empty">
+            <div className="ext-empty-icon" aria-hidden="true">✦</div>
+            <div className="ext-empty-title">{skills.length === 0 ? t('还没有技能') : t('没有匹配的技能')}</div>
+            {skills.length === 0 ? (
+              <>
+                <div className="ext-empty-note">{t('导入 SKILL.md 或含技能目录的 zip，就会出现在这里和输入区「＋」中。')}</div>
+                <div className="ext-empty-actions">
+                  <button className="btn" disabled={busy !== undefined} onClick={() => void importSkill('md')}>{t('导入 SKILL.md')}</button>
+                  <button className="btn" disabled={busy !== undefined} onClick={() => void importSkill('zip')}>{t('导入 zip')}</button>
+                </div>
+              </>
+            ) : null}
+          </div>
+        )}
+      </div>
+      <div className="warnrow" style={{ marginTop: 16 }}>
+        <span className="wt">{t('安全')}</span>
+        <span>{t('导入只复制文件到用户技能目录，不会执行技能里的脚本；zip 会校验路径、文件数与解压大小。工作区技能来自当前项目，只读展示。')}</span>
+      </div>
+      {removing !== null ? (
+        <ConfirmDialog
+          title={t('删除技能')}
+          message={t('会从用户技能目录删除「{name}」及其附加文件，无法恢复。', { name: removing.name })}
+          confirmLabel={t('删除')}
+          danger
+          onCancel={() => setRemoving(null)}
+          onConfirm={() => void remove()}
+        />
+      ) : null}
+    </>
+  )
+}
+
 /* ───────── 分区：插件 ───────── */
 
 interface PluginEntry {
@@ -1325,6 +1484,7 @@ interface PluginEntry {
 function PluginSection() {
   const [plugins, setPlugins] = useState<readonly PluginEntry[]>([])
   const [busy, setBusy] = useState<string | undefined>()
+  const [uninstalling, setUninstalling] = useState<PluginEntry | null>(null)
   const refresh = (): void => {
     void window.lcode.plugins.list().then((value) => setPlugins(Array.isArray(value) ? value as PluginEntry[] : [])).catch((error: unknown) => {
       toast(error instanceof Error ? error.message : t('读取插件失败'))
@@ -1345,14 +1505,28 @@ function PluginSection() {
       setBusy(undefined)
     }
   }
-  const operate = async (action: 'activate' | 'deactivate' | 'uninstall', plugin: PluginEntry): Promise<void> => {
+  const operate = async (action: 'activate' | 'deactivate', plugin: PluginEntry): Promise<void> => {
     const key = `${action}:${plugin.id}@${plugin.version}`
-    if (action === 'uninstall' && !window.confirm(t('卸载后会删除本地快照，是否继续？'))) return
     setBusy(key)
     try {
       await window.lcode.plugins[action]({ id: plugin.id, version: plugin.version })
       refresh()
-      toast(t(action === 'activate' ? '插件已启动' : action === 'deactivate' ? '插件已停用' : '插件已卸载'))
+      toast(t(action === 'activate' ? '插件已启动' : '插件已停用'))
+    } catch (error) {
+      toast(error instanceof Error ? error.message : t('插件操作失败'))
+    } finally {
+      setBusy(undefined)
+    }
+  }
+  const uninstall = async (): Promise<void> => {
+    if (uninstalling === null) return
+    const plugin = uninstalling
+    setBusy(`uninstall:${plugin.id}@${plugin.version}`)
+    try {
+      await window.lcode.plugins.uninstall({ id: plugin.id, version: plugin.version })
+      setUninstalling(null)
+      refresh()
+      toast(t('插件已卸载'))
     } catch (error) {
       toast(error instanceof Error ? error.message : t('插件操作失败'))
     } finally {
@@ -1366,37 +1540,70 @@ function PluginSection() {
       <div className="sect">
         <div className="sh2">
           {t('已安装插件')}
-          <button className="mini" disabled={busy !== undefined} onClick={() => void install()}>
-            ＋ {busy === 'install' ? t('正在安装…') : t('从文件夹安装')}
-          </button>
+          <span className="sh2-actions">
+            <button className="mini" disabled={busy !== undefined} onClick={() => void install()}>
+              ＋ {busy === 'install' ? t('正在安装…') : t('从文件夹安装')}
+            </button>
+          </span>
         </div>
-        {plugins.map((plugin) => {
-          const key = `${plugin.id}@${plugin.version}`
-          const tools = plugin.contributes.tools ?? []
-          const prompts = plugin.contributes.promptSections ?? []
-          return (
-            <div className="plugin-row" key={key}>
-              <div className="plugin-main">
-                <div className="plugin-title"><code>{plugin.id}</code><span>v{plugin.version}</span>{plugin.active ? <b>{t('运行中')}</b> : <em>{t('未启动')}</em>}</div>
-                <div className="src">{t('工具')}：{tools.length === 0 ? t('无') : tools.join('、')} · {t('提示段')}：{prompts.length === 0 ? t('无') : prompts.join('、')}</div>
-              </div>
-              <div className="plugin-actions">
-                {plugin.active ? (
-                  <button title={t('停用插件')} disabled={busy !== undefined} onClick={() => void operate('deactivate', plugin)}>{t('停用')}</button>
-                ) : (
-                  <button title={t('启动插件')} disabled={busy !== undefined} onClick={() => void operate('activate', plugin)}>{t('启动')}</button>
-                )}
-                <button title={t('卸载插件')} disabled={busy !== undefined} onClick={() => void operate('uninstall', plugin)}>{t('卸载')}</button>
-              </div>
+        {plugins.length > 0 ? (
+          <div className="modelList ext-list">
+            {plugins.map((plugin) => {
+              const key = `${plugin.id}@${plugin.version}`
+              const tools = plugin.contributes.tools ?? []
+              const prompts = plugin.contributes.promptSections ?? []
+              return (
+                <div className="mrow ext-row" key={key}>
+                  <span className="mic">⬡</span>
+                  <div className="ext-main">
+                    <div className="mnm">
+                      <code className="mono">{plugin.id}</code>
+                      <span className="ext-version">v{plugin.version}</span>
+                      <span className={'ext-tag' + (plugin.active ? ' on' : '')}>
+                        {plugin.active ? t('运行中') : t('未启动')}
+                      </span>
+                    </div>
+                    <div className="msrc ext-desc">
+                      {t('工具')}：{tools.length === 0 ? t('无') : tools.join('、')} · {t('提示段')}：{prompts.length === 0 ? t('无') : prompts.join('、')}
+                    </div>
+                  </div>
+                  <span className="macts">
+                    {plugin.active ? (
+                      <button type="button" title={t('停用插件')} aria-label={t('停用插件')} disabled={busy !== undefined} onClick={() => void operate('deactivate', plugin)}>⏸</button>
+                    ) : (
+                      <button type="button" title={t('启动插件')} aria-label={t('启动插件')} disabled={busy !== undefined} onClick={() => void operate('activate', plugin)}>▶</button>
+                    )}
+                    <button type="button" title={t('卸载插件')} aria-label={t('卸载插件')} disabled={busy !== undefined} onClick={() => setUninstalling(plugin)}>✕</button>
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        ) : (
+          <div className="ext-empty">
+            <div className="ext-empty-icon" aria-hidden="true">⬡</div>
+            <div className="ext-empty-title">{t('还没有安装插件')}</div>
+            <div className="ext-empty-note">{t('插件在独立受控进程中运行，只有声明的工具和提示段会注册。')}</div>
+            <div className="ext-empty-actions">
+              <button className="btn" disabled={busy !== undefined} onClick={() => void install()}>{t('从文件夹安装')}</button>
             </div>
-          )
-        })}
-        {plugins.length === 0 ? <div className="pickhint">{t('还没有安装插件')}</div> : null}
+          </div>
+        )}
       </div>
-      <div className="warnrow">
+      <div className="warnrow" style={{ marginTop: 16 }}>
         <span className="wt">{t('安全')}</span>
         <span>{t('安装只复制和校验插件快照，不会执行代码；首次启动也必须通过当前系统沙箱。')}</span>
       </div>
+      {uninstalling !== null ? (
+        <ConfirmDialog
+          title={t('卸载插件')}
+          message={t('卸载后会删除本地快照，是否继续？')}
+          confirmLabel={t('卸载')}
+          danger
+          onCancel={() => setUninstalling(null)}
+          onConfirm={() => void uninstall()}
+        />
+      ) : null}
     </>
   )
 }
@@ -1764,6 +1971,7 @@ const SECTIONS: { g?: string; id?: string; label?: string }[] = [
   { g: '模型' },
   { id: 'providers', label: '模型' },
   { g: '扩展' },
+  { id: 'skills', label: '技能' },
   { id: 'plugins', label: '插件' },
   { g: '权限' },
   { id: 'perm', label: '权限预设' },
@@ -1786,6 +1994,8 @@ function SectionBody({ id }: { id: string }) {
       return <AccountSection />
     case 'providers':
       return <ModelSection />
+    case 'skills':
+      return <SkillsSection />
     case 'plugins':
       return <PluginSection />
     case 'perm':

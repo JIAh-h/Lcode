@@ -251,7 +251,7 @@ describe('装配：默认模型', () => {
 
   it('**重启后仍在**（默认模型是用户设置，不能只活在内存里）', async () => {
     const first = await feature()
-    await first.feature.saveCustom({ ...CUSTOM, api_key: 'sk-secret' })
+    await first.feature.saveCustom({ ...CUSTOM, label: '主力模型', model: 'gpt-4o', api_key: 'sk-secret' })
     await first.feature.api.setDefault({ selection: { provider: 'custom-gw', model: 'gpt-4o' } })
     first.feature.dispose()
 
@@ -301,6 +301,20 @@ describe('装配：模型 id 贯通（显示名 ≠ 服务端模型名）', () =
     // 而且这个 provider 真的有适配器（否则会是 EL-NO_ADAPTER）
     expect(f.ctx.get('llm').get('custom-gw')).toBeDefined()
     f.dispose()
+  })
+
+  it('启动时把过期的默认模型 id 对齐到供应商配置', async () => {
+    const seed = await feature()
+    await seed.feature.saveCustom({ ...CUSTOM, label: '主力模型', model: 'deepseek-v4.1-flash-1017' })
+    await seed.feature.api.setDefault({ selection: { provider: 'custom-gw', model: 'deepseek-v4.1-flash' } })
+    seed.feature.dispose()
+
+    const restarted = await feature()
+    expect(await restarted.feature.api.getDefault()).toMatchObject({
+      provider: 'custom-gw',
+      model: 'deepseek-v4.1-flash-1017',
+    })
+    restarted.feature.dispose()
   })
 
   it('**启动时修好"有供应商但没有默认"的历史状态**（老配置自动对齐）', async () => {

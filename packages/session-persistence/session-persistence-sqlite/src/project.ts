@@ -298,8 +298,14 @@ const SURFACE_TYPES = new Set(['user/message', 'assistant/message', 'tool/result
 
 function replaceRange(event: EventFrame): { start: number; end: number } | null {
   const op = event.surfaceOp
-  if (op === undefined || op === 'append') return null
+  if (op === undefined || op === 'append' || op.op !== 'replace') return null
   return { start: op.start, end: op.end }
+}
+
+function restoreSeqs(event: EventFrame): { start: number; eventSeqs: readonly number[] } | null {
+  const op = event.surfaceOp
+  if (op === undefined || op === 'append' || op.op !== 'restore') return null
+  return { start: op.start, eventSeqs: op.eventSeqs }
 }
 
 /**
@@ -348,6 +354,24 @@ function projectSurface(events: readonly EventFrame[]): SurfaceNode[] {
         const node = nodes[i]!
         node.active = false
         node.replacedBy = event.seq
+      }
+    }
+    const restore = restoreSeqs(event)
+    if (restore !== null) {
+      const { start, eventSeqs } = restore
+      if (start < 0 || start >= nodes.length || eventSeqs.length === 0) {
+        throw new RangeError(
+          `surface restore 区间越界：start=${start} surface 长度=${nodes.length}（不变量 I4 违规）`,
+        )
+      }
+      const summary = nodes[start]!
+      summary.active = false
+      summary.replacedBy = event.seq
+      const wanted = new Set(eventSeqs)
+      for (const node of nodes) {
+        if (!wanted.has(node.seq)) continue
+        node.active = true
+        node.replacedBy = null
       }
     }
   }

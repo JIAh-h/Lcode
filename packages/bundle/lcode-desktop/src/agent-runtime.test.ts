@@ -534,6 +534,24 @@ describe('A. 装配的接线正确性', () => {
     expect(rt.ctx.get('contextSources').inspect(session_id)).toMatchObject({ sessionId: session_id })
   })
 
+  it('未选择工作区的会话不注入仓库上下文，也不借用默认工作区', async () => {
+    const workspace = join(home, 'workspace-unscoped')
+    mkdirSync(workspace, { recursive: true })
+    writeFileSync(join(workspace, 'AGENTS.md'), 'SHOULD NOT LEAK INTO RECENT TASKS', 'utf8')
+    const rt = await makeRuntime([textScript], enforcedSandbox, undefined, workspace)
+    const { session_id } = await rt.sessions.create({})
+    const { agent_id } = await rt.agents.create({ session_id })
+    await sendAndWait(rt, agent_id, 'Check @AGENTS.md')
+    await rt.sessions.flush({ session_id })
+
+    const events = loadLog(join(home, (await rt.sessions.meta({ session_id })).header.log_path)).events
+    const context = events.find((event) => event.type === 'request/context')
+    expect(context).toMatchObject({ data: { sources: ['time:iso-8601'] } })
+    const header = events.find((event) => event.type === 'request/header')
+    expect(JSON.stringify(header)).not.toContain('SHOULD NOT LEAK INTO RECENT TASKS')
+    expect(rt.sessions.workspaceOf(session_id)).toBeUndefined()
+  })
+
   it('`request/header` 记下完整模型输入配置（可重放审计点）', async () => {
     const rt = await makeRuntime([textScript])
     const sessionId = await runTurn(rt)

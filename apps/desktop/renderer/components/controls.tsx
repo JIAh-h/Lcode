@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { KeyboardEventHandler, Ref } from 'react'
+import type { ClipboardEventHandler, KeyboardEventHandler, Ref } from 'react'
 import { t } from '../i18n/index.ts'
 import { PopMenu } from './PopMenu.tsx'
 
@@ -196,6 +196,7 @@ export function TextArea({
   rows,
   variant = 'field',
   onKeyDown,
+  onPaste,
 }: {
   value?: string | undefined
   onChange?: ((v: string) => void) | undefined
@@ -204,6 +205,7 @@ export function TextArea({
   rows?: number | undefined
   variant?: 'field' | 'bare'
   onKeyDown?: KeyboardEventHandler<HTMLTextAreaElement> | undefined
+  onPaste?: ClipboardEventHandler<HTMLTextAreaElement> | undefined
 }) {
   return (
     <textarea
@@ -213,6 +215,7 @@ export function TextArea({
       placeholder={placeholder}
       rows={rows}
       onKeyDown={onKeyDown}
+      onPaste={onPaste}
       onChange={onChange ? (e) => onChange(e.target.value) : undefined}
     />
   )

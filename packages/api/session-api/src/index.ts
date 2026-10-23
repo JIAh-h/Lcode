@@ -75,6 +75,8 @@ export { createLocalFileCheckpointService, LocalFileCheckpointService } from './
 export type { FileCheckpoint, FileCheckpointRestoreInput, FileCheckpointRestoreResult, FileCheckpointService, FileCheckpointSkipped, LocalFileCheckpointOptions } from './file-checkpoints.ts'
 
 export { CACHE_LIMIT_BYTES, TRASH_RETENTION_MS, dirBytes } from './storage.ts'
+export type { StoredAttachment } from './attachments.ts'
+export { attachmentPath, attachmentRefsOf, attachmentsRoot, gcAttachments, putAttachment, readAttachment } from './attachments.ts'
 export type { PruneCacheResult, PruneTrashResult, StorageUsage } from './storage.ts'
 
 export { createPersistedSession } from './persisted-session.ts'

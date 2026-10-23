@@ -118,6 +118,7 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
           id: item.id,
           name: typeof item.name === 'string' ? item.name : item.id,
           ...(limits.contextWindow === undefined ? {} : { contextWindow: limits.contextWindow }),
+          ...(limits.vision === undefined ? {} : { vision: limits.vision }),
         }
       })
     // 有原生目录时用它补上窗口：`/models` 常常只给 id
@@ -126,9 +127,14 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
       const catalog = await this.loadNativeCatalog(native, jsonHeaders, signal)
       if (catalog !== undefined) {
         for (const model of models) {
-          if (model.contextWindow !== undefined) continue
           const hit = catalog.get(model.id)
-          if (hit?.contextWindow !== undefined) (model as { contextWindow?: number }).contextWindow = hit.contextWindow
+          if (hit === undefined) continue
+          if (model.contextWindow === undefined && hit.contextWindow !== undefined) {
+            (model as { contextWindow?: number }).contextWindow = hit.contextWindow
+          }
+          if (model.vision === undefined && hit.vision !== undefined) {
+            (model as { vision?: boolean }).vision = hit.vision
+          }
         }
       }
     }
@@ -151,7 +157,7 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
     if (native !== undefined) {
       const catalog = await this.loadNativeCatalog(native, jsonHeaders, opts.signal)
       const hit = catalog?.get(sel.model)
-      if (hit !== undefined && (hit.contextWindow !== undefined || hit.maxOutputTokens !== undefined)) return hit
+      if (hit !== undefined && (hit.contextWindow !== undefined || hit.maxOutputTokens !== undefined || hit.vision !== undefined)) return hit
     }
     const res = await this.request(`${baseUrl}/models/${encodeURIComponent(sel.model)}`, {
       method: 'GET',
@@ -193,8 +199,9 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
           if (typeof id !== 'string' || id === '') continue
           const info = isRecord(item['model_info']) ? item['model_info'] : undefined
           if (info === undefined) continue
-          const limits = extractModelLimits(info)
-          if (limits.contextWindow === undefined && limits.maxOutputTokens === undefined) continue
+          // 窗口在 model_info；图片能力在外层 inference_metadata/capabilities
+          const limits = { ...extractModelLimits(info), ...extractModelLimits(item) }
+          if (limits.contextWindow === undefined && limits.maxOutputTokens === undefined && limits.vision === undefined) continue
           models.set(id, limits)
         }
         const total = output !== undefined && typeof output['total'] === 'number' ? output['total'] : list.length
@@ -635,9 +642,52 @@ function toOpenAiMessages(internal: InternalBody): unknown[] {
       isBlock(b, 'tool_use'),
     )
     const texts = blocks.filter((b): b is { type: 'text'; text: string } => isBlock(b, 'text'))
+    const skills = blocks.filter((b): b is { type: 'skill'; id: string; name: string; instructions: string } =>
+      isBlock(b, 'skill'),
+    )
+    const files = blocks.filter((b): b is {
+      type: 'file-ref'
+      kind: 'file' | 'folder'
+      path: string
+      name: string
+      content: string
+      truncated?: boolean
+    } => isBlock(b, 'file-ref'))
+    const images = blocks.filter((b): b is { type: 'image'; mediaType: string; data: string } =>
+      isBlock(b, 'image'),
+    )
+    const skillText = skills
+      .map((skill) => `[Skill: ${String(skill.name || skill.id)}]\n${String(skill.instructions ?? '')}`)
+      .join('\n\n')
+    const fileText = files
+      .map((file) => {
+        const label = file.kind === 'folder' ? 'Attachment folder' : 'Attachment'
+        const truncated = file.truncated === true
+        const cut = truncated ? '\n[content truncated; use the path above to read the rest]' : ''
+        // 附件正文已随消息内联；不加这句，模型常会"核实"文档里的交叉引用，
+        // 为一个"这里面讲了什么"再 grep/读一串工作区文档，白烧 token 还稀释缓存命中。
+        const note = truncated
+          ? ''
+          : file.kind === 'folder'
+            ? '（只有目录结构；需要哪个文件再看哪个，不要整目录扫读。）'
+            : '（正文已完整附在下方，直接据此回答；除非用户要求核对，不要再读取该文件或为它检索其它文档。）'
+        return `[${label}: ${String(file.path)}]${note}\n${String(file.content ?? '')}${cut}`
+      })
+      .join('\n\n')
+    const text = [skillText, ...texts.map((t) => String(t.text ?? '')), fileText]
+      .filter((part) => part !== '')
+      .join('\n\n')
     out.push({
       role: message.role,
-      content: texts.map((t) => t.text).join(''),
+      content: images.length === 0
+        ? text
+        : [
+            ...(text === '' ? [] : [{ type: 'text', text }]),
+            ...images.map((image) => ({
+              type: 'image_url',
+              image_url: { url: `data:${String(image.mediaType)};base64,${String(image.data)}` },
+            })),
+          ],
       ...(toolUses.length === 0
         ? {}
         : {
@@ -886,10 +936,51 @@ function extractModelLimits(value: unknown): ModelLimits {
     value['max_completion_tokens'],
     envs?.['max_output_tokens'],
   )
+  const vision = extractVision(value)
   return {
     ...(contextWindow === undefined ? {} : { contextWindow }),
     ...(maxOutputTokens === undefined ? {} : { maxOutputTokens }),
+    ...(vision === undefined ? {} : { vision }),
   }
+}
+
+/**
+ * 供应商声明的图片输入能力。
+ *
+ * 已见形态：
+ * - 官方 DeepSeek：`input_modalities: ['text','image']`
+ * - 百炼原生目录：`inference_metadata.request_modality: ['Text','Image']`、`capabilities: ['VU']`
+ * - OpenRouter：`architecture.input_modalities`
+ * 没有字段时返回 undefined——未知不等于不支持，调用方可以回落到按模型名判断。
+ */
+function extractVision(value: Record<string, unknown>): boolean | undefined {
+  const architecture = isRecord(value['architecture']) ? value['architecture'] : undefined
+  const inference = isRecord(value['inference_metadata']) ? value['inference_metadata'] : undefined
+  const lists = [
+    value['input_modalities'],
+    architecture?.['input_modalities'],
+    inference?.['request_modality'],
+    value['request_modality'],
+  ]
+  let sawList = false
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue
+    const names = list.filter((item): item is string => typeof item === 'string').map((item) => item.toLowerCase())
+    if (names.length === 0) continue
+    sawList = true
+    if (names.includes('image') || names.includes('vision')) return true
+  }
+  if (sawList) return false
+  for (const flag of [value['vision'], value['supports_vision'], value['supportsVision']]) {
+    if (flag === true) return true
+    if (flag === false) return false
+  }
+  const capabilities = value['capabilities']
+  if (Array.isArray(capabilities)) {
+    const names = capabilities.filter((item): item is string => typeof item === 'string').map((item) => item.toUpperCase())
+    if (names.includes('VU') || names.includes('VISION') || names.includes('IMAGE')) return true
+  }
+  return undefined
 }
 
 function firstPositive(...values: unknown[]): number | undefined {

@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import type { SessionEvent } from '@lcode/session'
-import { ComposerBar, withAttachments, type Attachment } from '../components/ComposerBar.tsx'
+import { ComposerBar, type ComposerSendInput } from '../components/ComposerBar.tsx'
 import { ContextBar } from '../components/ContextBar.tsx'
+import { CompactionDialog } from '../components/CompactionDialog.tsx'
 import { SessionStream } from '../components/SessionStream.tsx'
 import { SessionActionsMenu } from '../components/SessionActionsMenu.tsx'
 import { TaskPanel } from '../components/TaskPanel.tsx'
@@ -170,7 +171,9 @@ export function WorkspacePage() {
   const [usage, setUsage] = useState<SessionContextUsage | null>(null)
   const [gitInfo, setGitInfo] = useState<WorkspaceGitInfo | null>(null)
   const [usageEpoch, setUsageEpoch] = useState(0)
-  const [compacting, setCompacting] = useState(false)
+  const [compactOpen, setCompactOpen] = useState(false)
+  const [contextOpenSignal, setContextOpenSignal] = useState(0)
+  const [retrySignal, setRetrySignal] = useState(0)
 
   useEffect(() => {
     if (sessionId === undefined) return
@@ -185,8 +188,10 @@ export function WorkspacePage() {
       const event = item['event'] as SessionEvent
       if (!ready) buffered.push(event)
       else setEvents((prev) => (prev.some((current) => current.seq === event.seq) ? prev : [...prev, event]))
-      // 轮结束 / 压缩事务结束都会改变表面或 system 占用：刷新状态栏
-      if (event.type === 'turn/end' || event.type === 'compaction/end') setUsageEpoch((n) => n + 1)
+      // 轮结束 / 压缩事务 / 屏蔽标记都会改变下一次请求的表面：刷新状态栏
+      if (event.type === 'turn/end' || event.type === 'compaction/end' || event.type === 'compaction/undo' || event.type === 'context/turn-marker') {
+        setUsageEpoch((n) => n + 1)
+      }
     })
     void api
       .open(sessionId)
@@ -290,29 +295,6 @@ export function WorkspacePage() {
     }
   }, [meta?.workspace, reloadEpoch])
 
-  const compactContext = (): void => {
-    if (sessionId === undefined || compacting) return
-    const api = sessionBridge()
-    if (api === undefined) return
-    setCompacting(true)
-    void api
-      .compact(sessionId)
-      .then((result) => {
-        setUsageEpoch((n) => n + 1)
-        if (result.status === 'compacted') {
-          toast(t('已压缩上下文：{before} → {after} 字符', { before: result.originalChars, after: result.summaryChars }))
-        } else if (result.status === 'not-beneficial') {
-          toast(t('这段历史已经很短，没有可省的'))
-        } else {
-          toast(t('当前没有可安全压缩的范围'))
-        }
-      })
-      .catch((err: unknown) => {
-        toast(err instanceof Error ? err.message : t('压缩上下文失败'))
-      })
-      .finally(() => setCompacting(false))
-  }
-
   const refreshQueue = (): void => {
     if (sessionId === undefined) return
     const api = agentBridge()
@@ -325,9 +307,9 @@ export function WorkspacePage() {
   // 队列不是持久事件；只在轮边界刷新，避免每个流式 chunk 都触发 IPC。
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, agentRunning, events.filter((event) => event.type === 'turn/start' || event.type === 'turn/end').map((event) => event.seq).join(',')])
-  const send = (attachments: readonly Attachment[] = []) => {
+  const send = ({ attachments, skills, images }: ComposerSendInput) => {
     const value = text.trim()
-    if (value === '' || sessionId === undefined) return
+    if ((value === '' && images.length === 0 && attachments.length === 0) || sessionId === undefined) return
     if (meta?.deleted_at !== null && meta?.deleted_at !== undefined) {
       toast(t('该会话已归档，无法发送'))
       return
@@ -339,7 +321,13 @@ export function WorkspacePage() {
     }
     setText('')
     void api
-      .send({ session_id: sessionId, text: withAttachments(value, attachments) })
+      .send({
+        session_id: sessionId,
+        text: value,
+        ...(attachments.length === 0 ? {} : { attachments }),
+        ...(skills.length === 0 ? {} : { skills }),
+        ...(images.length === 0 ? {} : { images }),
+      })
       .then(() => {
         refreshQueue()
         notifySessionChanged()
@@ -367,9 +355,7 @@ export function WorkspacePage() {
       void api.resume(sessionId).then(() => notifySessionChanged()).catch((err: unknown) => {
         toast(err instanceof Error ? err.message : t('继续失败'))
       })
-      return
     }
-    send()
   }
 
   const planAction = (): void => {
@@ -488,6 +474,7 @@ export function WorkspacePage() {
               <SessionStream
                 sessionId={sessionId}
                 onRewound={() => setReloadEpoch((n) => n + 1)}
+                retrySignal={retrySignal}
               />
             </div>
           </div>
@@ -515,15 +502,45 @@ export function WorkspacePage() {
                 onEditQueued={editQueued}
                 onRemoveQueued={removeQueued}
                 onClearQueued={clearQueued}
+                usedTokens={usage?.usedTokens ?? 0}
+                contextWindowTokens={usage?.contextWindowTokens ?? null}
+                onCompact={sessionId === undefined ? undefined : () => setCompactOpen(true)}
+                onSlashCommand={(name, _args) => {
+                  if (sessionId === undefined) return false
+                  if (name === 'compact') {
+                    setCompactOpen(true)
+                    return true
+                  }
+                  if (name === 'context') {
+                    setContextOpenSignal((n) => n + 1)
+                    return true
+                  }
+                  if (name === 'retry') {
+                    setRetrySignal((n) => n + 1)
+                    return true
+                  }
+                  if (name === 'export') {
+                    const api = sessionBridge()
+                    if (api === undefined) return false
+                    void api
+                      .export({ session_id: sessionId, format: 'bundle' })
+                      .then((result) => toast(t('已导出到 {path}（SHA-256 {hash}）', { path: result.path, hash: result.sha256.slice(0, 12) })))
+                      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('导出会话失败')))
+                    return true
+                  }
+                  return false
+                }}
                 footer={
                   <ContextBar
+                    sessionId={sessionId ?? ''}
                     workspace={meta?.workspace ?? null}
                     branch={gitInfo?.branch ?? null}
                     mode={gitInfo?.mode ?? 'local'}
                     usage={usage}
-                    compacting={compacting}
                     running={agentRunning}
-                    onCompact={compactContext}
+                    openSignal={contextOpenSignal}
+                    onChanged={() => setUsageEpoch((n) => n + 1)}
+                    onCompactRequest={() => setCompactOpen(true)}
                     onOpenSettings={() => navigate('/settings', { state: { sec: 'providers' } })}
                   />
                 }
@@ -532,6 +549,13 @@ export function WorkspacePage() {
           </div>
         </div>
         {panelOpen && <RightPanel tab={tab} setTab={setTab} changes={changes} workspace={meta?.workspace ?? null} sessionId={sessionId} />}
+        {compactOpen && sessionId !== undefined ? (
+          <CompactionDialog
+            sessionId={sessionId}
+            onClose={() => setCompactOpen(false)}
+            onChanged={() => setUsageEpoch((n) => n + 1)}
+          />
+        ) : null}
       </div>
       {shouldConfirmTrust ? (
         <div className="overlay" role="dialog" aria-modal="true" aria-labelledby="workspace-trust-title">

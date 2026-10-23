@@ -19,6 +19,8 @@ export interface ModelInfo {
   readonly id: string
   readonly name?: string
   readonly contextWindow?: number
+  /** 供应商是否声明支持图片输入；缺省 = 未知，不擅自当成不支持 */
+  readonly vision?: boolean
 }
 
 /** 一次调用前的完整准备结果（prepareCall 的输出） */
@@ -60,6 +62,8 @@ export interface PrepareOpts {
 export interface ModelLimits {
   readonly contextWindow?: number
   readonly maxOutputTokens?: number
+  /** 供应商声明的图片输入能力；undefined 表示元数据没给，不代表不支持 */
+  readonly vision?: boolean
 }
 
 /**

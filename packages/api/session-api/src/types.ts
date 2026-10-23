@@ -60,8 +60,11 @@ export interface SessionMeta extends SessionHeader {
 }
 
 export interface CreateSessionInput {
-  /** 工作区根（必填，doc 21 §2.1） */
-  readonly cwd: string
+  /**
+   * 工作区根。省略或空串表示“未选择工作区”的会话（桌面「最近任务」）：
+   * 日志 header 的 cwd 落 null，不隐式绑定到进程当前目录。
+   */
+  readonly cwd?: string | undefined
   readonly preset?: string | undefined
   readonly title?: string | undefined
   readonly modelSelection?: ModelSelection | undefined
@@ -193,7 +196,11 @@ export interface FlushResult {
   readonly flushed: true
 }
 
-export type ExportFormat = 'jsonl' | 'md'
+/**
+ * `bundle` 是带附件的自包含 zip：`session.jsonl` + `attachments/` + `manifest.json`。
+ * 纯文本会话仍可用 `jsonl`（原始日志字节级副本）。
+ */
+export type ExportFormat = 'jsonl' | 'md' | 'bundle'
 
 export interface ExportInput {
   readonly session_id: string

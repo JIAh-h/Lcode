@@ -85,6 +85,52 @@ describe('P7-02 local compaction', () => {
     expect(createLocalCompactionSummary().compact({ session: split, summary: '拆散', start: 3, end: 4 }).status).toBe('tool-boundary')
   })
 
+  it('图片 base64 不计入压缩原始字符数', () => {
+    const store = new InMemorySessionStore(asSessionId('image-compaction'))
+    store.append({
+      type: 'user/message',
+      data: { role: 'user', content: [
+        { type: 'text', text: '看图。' },
+        { type: 'image', mediaType: 'image/jpeg', data: 'A'.repeat(100_000) },
+      ] },
+    })
+    store.append({
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '看到了。' }] } },
+    })
+    store.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '保留。' }] } })
+    const result = createLocalCompactionSummary().compact({ session: store, summary: '看图摘要。', start: 0, end: 2 })
+    expect(result.status).toBe('compacted')
+    expect(result.originalChars).toBeLessThan(1_000)
+  })
+
+  it('撤销压缩恢复原文；摘要被后续压缩覆盖后拒绝撤销', () => {
+    const store = session()
+    const compact = createLocalCompactionSummary()
+    const first = compact.compact({ session: store, summary: 'Earlier summary.', start: 0, end: 2 })
+    expect(first.status).toBe('compacted')
+    const undone = compact.undo({ session: store, compactionId: first.compactionId! })
+    expect(undone.status).toBe('undone')
+    expect(store.deriveMessages().map((message) => JSON.stringify(message))).toEqual([
+      expect.stringContaining('First long message'),
+      expect.stringContaining('Second long answer'),
+      expect.stringContaining('Keep this newest request'),
+    ])
+
+    const second = compact.compact({ session: store, summary: 'Earlier summary again.', start: 0, end: 2 })
+    const third = compact.compact({ session: store, summary: 'Everything so far.', start: 0, end: 1 })
+    expect(second.status).toBe('compacted')
+    expect(third.status).toBe('compacted')
+    expect(compact.undo({ session: store, compactionId: second.compactionId! }).status).toBe('not-visible')
+  })
+
+  it('固定轮次不能被压进摘要', () => {
+    const store = session()
+    store.append({ type: 'context/turn-marker', data: { targetSeq: 0, pinned: true } })
+    const result = createLocalCompactionSummary().compact({ session: store, summary: 'x'.repeat(1_000), start: 0, end: 2 })
+    expect(result.status).toBe('pinned-turn')
+  })
+
   it('无收益、未闭合事务均 fail-closed', () => {
     const noBenefit = session()
     expect(createLocalCompactionSummary().compact({ session: noBenefit, summary: 'x'.repeat(1_000), start: 0, end: 2 }).status).toBe('not-beneficial')

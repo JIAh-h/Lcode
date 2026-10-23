@@ -43,4 +43,45 @@ describe('context-budget', () => {
     expect(estimateTokens('你好世界')).toBe(4)
     expect(estimateTokens('abcd')).toBe(2)
   })
+
+  it('历史技能块不占后续上下文', () => {
+    const session = new InMemorySessionStore(asSessionId('budget-skill'))
+    session.append({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'skill', id: 'review', name: 'Review', instructions: '很长的技能说明'.repeat(1_000) }] },
+    })
+    expect(measure({ session, system: '', tools: [] }).surfaceTokens).toBe(0)
+  })
+
+  it('图片按固定预算计，不把 base64 字符数当 token', () => {
+    const session = new InMemorySessionStore(asSessionId('budget-image'))
+    session.append({
+      type: 'user/message',
+      data: {
+        role: 'user',
+        content: [
+          { type: 'skill', id: 'review', name: 'Review', instructions: '检查改动。' },
+          { type: 'image', mediaType: 'image/jpeg', data: 'A'.repeat(100_000) },
+        ],
+      },
+    })
+    const snapshot = measure({ session, system: '', tools: [] })
+    expect(snapshot.surfaceTokens).toBe(1_200)
+    expect(snapshot.imageTokens).toBe(1_200)
+  })
+
+  it('附件引用同样按图片预算计；被屏蔽的轮次不计入下次请求', () => {
+    const session = new InMemorySessionStore(asSessionId('budget-mute'))
+    session.append({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'image-ref', mediaType: 'image/png', hash: 'a'.repeat(64) }] },
+    })
+    session.append({ type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '看到了' }] } } })
+    session.append({ type: 'user/message', data: { role: 'user', content: '保留的问题' } })
+    expect(measure({ session, system: '', tools: [] }).imageTokens).toBe(1_200)
+    session.append({ type: 'context/turn-marker', data: { targetSeq: 0, muted: true } })
+    const snapshot = measure({ session, system: '', tools: [] })
+    expect(snapshot.imageTokens).toBe(0)
+    expect(snapshot.surfaceTokens).toBe(estimateTokens('保留的问题'))
+  })
 })

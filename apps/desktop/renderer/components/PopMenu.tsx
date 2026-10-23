@@ -31,6 +31,8 @@ export interface PopMenuItem {
   readonly separator?: boolean
   /** 次级样式：更小字号与次要颜色，和普通选项区分 */
   readonly compact?: boolean
+  /** 多选样式（角色为 menuitemcheckbox）；默认是单选/动作 */
+  readonly checkbox?: boolean
 }
 
 const MENU_WIDTH = 260
@@ -43,6 +45,7 @@ export function PopMenu({
   title,
   items,
   onSelect,
+  onOpen,
   header,
   footer,
   up = false,
@@ -50,12 +53,17 @@ export function PopMenu({
   align = 'left',
   width = MENU_WIDTH,
   dense = false,
+  flyout,
+  openSignal,
 }: {
   trigger: ReactNode
   buttonClass?: string
   title?: string
   items: readonly PopMenuItem[]
-  onSelect: (id: string) => void
+  /** 返回 'keep-open' 时保持菜单展开（多选场景） */
+  onSelect: (id: string) => void | 'keep-open'
+  /** 菜单即将展开（用于刷新动态条目） */
+  onOpen?: (() => void) | undefined
   /** 菜单顶部分组标题 */
   header?: string
   /** 菜单底部说明 */
@@ -70,11 +78,27 @@ export function PopMenu({
   width?: number
   /** 紧凑档：更小的内边距、隐藏勾选留白（纯动作菜单用） */
   dense?: boolean
+  /**
+   * 悬停某一项时在其右侧展开二级浮层（如「技能」）。
+   * 浮层是菜单 DOM 的后代，所以移入浮层不会被当成“点击外部”，也不需要额外的定位协调。
+   */
+  flyout?: {
+    readonly itemId: string
+    readonly width?: number
+    readonly render: (close: () => void) => ReactNode
+  } | undefined
+  /** 递增时打开菜单并直接展开 flyout（供 /skills 使用） */
+  openSignal?: number | undefined
 }) {
   const triggerRef = useRef<HTMLSpanElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
   const [pos, setPos] = useState<{ left: number; top: number } | null>(null)
+  const [flyoutOpen, setFlyoutOpen] = useState(false)
   const open = pos !== null
+  const closeAll = (): void => {
+    setPos(null)
+    setFlyoutOpen(false)
+  }
 
   const place = useCallback(() => {
     const el = triggerRef.current
@@ -89,15 +113,15 @@ export function PopMenu({
   /* 打开时定位；滚动/缩放会让固定坐标失效，直接关闭（可预期优先） */
   useEffect(() => {
     if (!open) return
-    const close = () => setPos(null)
+    const close = () => closeAll()
     const onDown = (e: MouseEvent) => {
       const node = e.target as Node
       if (triggerRef.current?.contains(node)) return
       if (menuRef.current?.contains(node)) return
-      setPos(null)
+      closeAll()
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setPos(null)
+      if (e.key === 'Escape') closeAll()
     }
     document.addEventListener('mousedown', onDown)
     document.addEventListener('keydown', onKey)
@@ -111,6 +135,14 @@ export function PopMenu({
     }
   }, [open])
 
+  // /skills 这类命令需要直接打开菜单并展开二级浮层
+  useEffect(() => {
+    if (openSignal === undefined || openSignal === 0) return
+    onOpen?.()
+    place()
+    setFlyoutOpen(true)
+  }, [openSignal])
+
   return (
     <span className={'pickwrap' + (block ? ' block' : '')} ref={triggerRef}>
       <button
@@ -118,7 +150,14 @@ export function PopMenu({
         title={title ? t(title) : undefined}
         aria-haspopup="menu"
         aria-expanded={open}
-        onClick={() => (open ? setPos(null) : place())}
+        onClick={() => {
+          if (open) {
+            closeAll()
+            return
+          }
+          onOpen?.()
+          place()
+        }}
       >
         {trigger}
       </button>
@@ -136,21 +175,30 @@ export function PopMenu({
               }}
             >
               {header ? <div className="picklab">{t(header)}</div> : null}
-              {items.map((item) => (
-                <Fragment key={item.id}>
-                  {item.separator === true ? <div className="pmsep" role="separator" /> : null}
+              {items.map((item) => {
+                const isFlyoutItem = flyout?.itemId === item.id
+                const content = (
                   <a
-                    role="menuitemradio"
+                    role={item.checkbox === true ? 'menuitemcheckbox' : 'menuitemradio'}
                     aria-checked={item.checked === true}
+                    aria-haspopup={isFlyoutItem ? 'menu' : undefined}
+                    aria-expanded={isFlyoutItem ? flyoutOpen : undefined}
                     className={
                       (item.checked ? 'on' : '') +
                       (item.disabled ? ' disabled' : '') +
                       (item.compact ? ' compact' : '')
                     }
+                    onMouseEnter={() => {
+                      if (isFlyoutItem) setFlyoutOpen(true)
+                      else setFlyoutOpen(false)
+                    }}
                     onClick={() => {
                       if (item.disabled) return
-                      setPos(null)
-                      onSelect(item.id)
+                      if (isFlyoutItem) {
+                        setFlyoutOpen((value) => !value)
+                        return
+                      }
+                      if (onSelect(item.id) !== 'keep-open') closeAll()
                     }}
                   >
                     <span className="pmk">{item.icon ?? (item.checked ? '✓' : '')}</span>
@@ -158,9 +206,32 @@ export function PopMenu({
                       {t(item.label)}
                       {item.hint ? <em>{t(item.hint)}</em> : null}
                     </span>
+                    {isFlyoutItem ? <span className="pm-chev" aria-hidden="true">›</span> : null}
                   </a>
-                </Fragment>
-              ))}
+                )
+                return (
+                  <Fragment key={item.id}>
+                    {item.separator === true ? <div className="pmsep" role="separator" /> : null}
+                    {isFlyoutItem ? (
+                      <div
+                        className="pm-flyout-wrap"
+                        onMouseLeave={() => setFlyoutOpen(false)}
+                      >
+                        {content}
+                        {flyoutOpen ? (
+                          <div
+                            className="pm-flyout"
+                            role="menu"
+                            style={{ width: flyout.width ?? 230 }}
+                          >
+                            {flyout.render(closeAll)}
+                          </div>
+                        ) : null}
+                      </div>
+                    ) : content}
+                  </Fragment>
+                )
+              })}
               {footer ? <div className="pickhint">{t(footer)}</div> : null}
             </div>,
             document.body,

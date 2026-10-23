@@ -20,11 +20,14 @@ interface SidebarState {
 export function SessionActionsMenu({
   session,
   buttonClass = 'sga',
+  pinLabel = '工作区内置顶',
   onRenamed,
   onRemoved,
 }: {
   session: { readonly session_id: string; readonly title: string }
   buttonClass?: string
+  /** 「置顶」文案；最近任务没有工作区，用普通的「置顶」 */
+  pinLabel?: string
   /** 重命名成功（标题已落库） */
   onRenamed?: ((title: string) => void) | undefined
   /** 归档/永久归档成功（当前页面应离开该会话） */
@@ -129,7 +132,7 @@ export function SessionActionsMenu({
         items={[
           { id: 'rename', label: '重命名' },
           { id: 'export', label: '导出记录' },
-          { id: 'pin', label: pinned ? '取消置顶' : '工作区内置顶' },
+          { id: 'pin', label: pinned ? '取消置顶' : pinLabel },
           { id: 'archive', label: '归档' },
           { id: 'purge', label: '永久归档' },
         ]}

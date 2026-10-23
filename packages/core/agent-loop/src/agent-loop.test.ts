@@ -1086,3 +1086,54 @@ describe("批次③ · 无密钥跑通一次循环", () => {
     });
   });
 });
+
+describe("技能上下文生命周期", () => {
+  it("技能只在本轮请求里生效，后续轮次会剥掉旧 skill 块", async () => {
+    const h = await makeHarness([textScript("第一轮"), textScript("第二轮")]);
+    const captures: CapturedRequest[] = [];
+    h.ctx.get("llm").register(captureDecorator(h.adapter, captures, h.session));
+    const handle = await h.loop.create({
+      sessionId: asSessionId("s1"),
+      id: asAgentId("a1"),
+    });
+
+    await handle.followup({
+      kind: "content",
+      content: [
+        { type: "text", text: "用技能看一下" },
+        { type: "skill", id: "review", name: "Review", instructions: "只看改动。" },
+      ],
+    });
+    await handle.followup({ kind: "text", text: "继续" });
+
+    expect(captures).toHaveLength(2);
+    expect(JSON.stringify(captures[0]!.messages)).toContain('"type":"skill"');
+    expect(JSON.stringify(captures[1]!.messages)).not.toContain('"type":"skill"');
+    expect(JSON.stringify(captures[1]!.messages)).toContain("用技能看一下");
+  });
+
+  it("屏蔽的轮次不进入请求；附件引用在请求边界解析成图片内容", async () => {
+    const h = await makeHarness([textScript("第一答"), textScript("第二答")]);
+    const captures: CapturedRequest[] = [];
+    h.ctx.set("attachments", {
+      resolveImage: ({ hash }) => (hash === "b".repeat(64) ? "BASE64DATA" : undefined),
+    });
+    h.ctx.get("llm").register(captureDecorator(h.adapter, captures, h.session));
+    const handle = await h.loop.create({ sessionId: asSessionId("s1"), id: asAgentId("a1") });
+    await handle.followup({ kind: "text", text: "这是会被屏蔽的第一问" });
+    const firstUser = h.session.events().find((event) => event.type === "user/message");
+    expect(firstUser).toBeDefined();
+    h.session.append({ type: "context/turn-marker", data: { targetSeq: firstUser!.seq, muted: true } });
+    await handle.followup({
+      kind: "content",
+      content: [
+        { type: "text", text: "第二问带图" },
+        { type: "image-ref", mediaType: "image/png", hash: "b".repeat(64), bytes: 9 },
+      ],
+    });
+
+    expect(JSON.stringify(captures[1]!.messages)).not.toContain("这是会被屏蔽的第一问");
+    expect(JSON.stringify(captures[1]!.messages)).toContain('"type":"image"');
+    expect(JSON.stringify(captures[1]!.messages)).toContain("BASE64DATA");
+  });
+});

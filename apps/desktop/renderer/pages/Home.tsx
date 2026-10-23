@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { DragEvent } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { ComposerBar, withAttachments, type Attachment } from '../components/ComposerBar.tsx'
+import { ComposerBar, type ComposerSendInput } from '../components/ComposerBar.tsx'
 import { toast } from '../components/toast.ts'
 import { t } from '../i18n/index.ts'
 import { notifySessionChanged, sessionBridge } from '../store/sessionBridge.ts'
@@ -102,9 +102,9 @@ export function HomePage() {
    * 之前这里是 `navigate('/sessions/demo-1')`——一个写死的会话 id，
    * 于是无论说什么都进同一个空壳（工作台里显示的还是一张与输入无关的假总结卡）。
    */
-  const submit = async (attachments: readonly Attachment[] = []) => {
+  const submit = async ({ attachments, skills, images }: ComposerSendInput) => {
     const value = text.trim()
-    if (value.length === 0) return
+    if (value.length === 0 && images.length === 0 && attachments.length === 0) return
     const api = (
       globalThis as unknown as {
         lcode?: {
@@ -119,11 +119,24 @@ export function HomePage() {
     }
     try {
       // 标题取首行前若干字（列表里要能认出这是哪次对话）；真正的命名/重命名是后续的事
-      const title = value.split('\n')[0]!.slice(0, 40)
-      const cwd = proj?.path ?? ''
-      const created = await api.session.create({ cwd, title })
+      const title =
+        (value.split('\n')[0] ?? '').slice(0, 40) ||
+        (attachments.length > 0
+          ? (attachments[0]?.path.split(/[\\/]/).filter(Boolean).pop() ?? t('附件'))
+          : t('图片'))
+      // 没选项目就不带 cwd：会话会进入侧栏「最近任务」，不隐式绑定当前目录
+      const created = await api.session.create({
+        ...(proj === null ? {} : { cwd: proj.path }),
+        title,
+      })
       // 首句**在这里就发出去**：用户已经表达完了意图，没必要进去再发一次
-      await api.agent.send({ session_id: created.session_id, text: withAttachments(value, attachments) })
+      await api.agent.send({
+        session_id: created.session_id,
+        text: value,
+        ...(attachments.length === 0 ? {} : { attachments }),
+        ...(skills.length === 0 ? {} : { skills }),
+        ...(images.length === 0 ? {} : { images }),
+      })
       notifySessionChanged()
       navigate(`/sessions/${created.session_id}`)
     } catch (err) {
@@ -267,7 +280,7 @@ export function HomePage() {
             value={text}
             onChange={setText}
             onSend={submit}
-            placeholder={proj ? t('描述一个任务，或直接问个问题…') : t('描述一个任务，或先在上方选择项目…')}
+            placeholder={proj ? t('描述一个任务，或直接问个问题…') : t('描述一个任务；不选择项目时会放进「最近任务」…')}
           />
         </div>
       </div>

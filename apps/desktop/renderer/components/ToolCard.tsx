@@ -206,7 +206,6 @@ export function ToolCard({ sessionId, call, result, resultSeq, initiallyExpanded
   const [body, setBody] = useState<HistoryBodyResult | null>(null)
   const [bodyLoading, setBodyLoading] = useState(false)
   const [bodyError, setBodyError] = useState<string | null>(null)
-  const data = resultData(result)
   const pending = result === undefined
   const failed = result?.message.isError === true
 
@@ -264,7 +263,6 @@ export function ToolCard({ sessionId, call, result, resultSeq, initiallyExpanded
           {body !== null && <pre className="toolcard-pre toolcard-feedback mono">{JSON.stringify(body.data, null, 2)}</pre>}
         </div>
       )}
-      {data?.['truncated'] === true && <div className="toolcard-truncated">{t('结果已截断，展开后可按需读取')}</div>}
     </article>
   )
 }

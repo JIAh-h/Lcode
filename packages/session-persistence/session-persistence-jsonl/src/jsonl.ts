@@ -1,4 +1,4 @@
-import type { StreamChunk } from '@lcode/session'
+import type { StreamChunk, SurfaceOp } from '@lcode/session'
 import type { JsonValue } from '@lcode/util'
 import { assertLosslessJson, serializeLossless } from '@lcode/util'
 
@@ -28,7 +28,7 @@ export interface EventFrame {
   readonly seq: number
   readonly time: number
   readonly data: unknown
-  readonly surfaceOp?: 'append' | { readonly op: 'replace'; readonly start: number; readonly end: number }
+  readonly surfaceOp?: SurfaceOp
   readonly sourceEventSeqs?: readonly number[]
   readonly compactionId?: string
   readonly shadowedSeqs?: readonly number[]

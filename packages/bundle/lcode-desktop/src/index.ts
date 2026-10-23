@@ -11,6 +11,12 @@
 
 export { createAgentRuntime } from './agent-runtime.ts'
 export type { AgentRuntime, AgentRuntimeOptions } from './agent-runtime.ts'
+export { buildUserContent } from './user-content.ts'
+export type { ImageAttachmentWriter, SkillSource, UserContentInput } from './user-content.ts'
+export { attachmentRefsOf, gcAttachments, putAttachment, readAttachment } from '@lcode/session-api'
+export { gcSessionAttachments } from './attachment-gc.ts'
+export { importSkill, removeUserSkill, seedBuiltinSkills } from './skill-import.ts'
+export type { ImportedSkill } from './skill-import.ts'
 
 export { createDesktopModelFeature, createServices, ensureNativePackageRoot } from './model-feature.ts'
 export type {

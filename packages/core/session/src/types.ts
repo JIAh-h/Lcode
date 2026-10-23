@@ -88,6 +88,34 @@ export interface Impact {
 
 export type ContentBlock =
   | { readonly type: 'text'; readonly text: string }
+  /** 旧格式：图片 base64 直接内联在日志里（导入的历史仍可能长这样）。 */
+  | { readonly type: 'image'; readonly mediaType: string; readonly data: string }
+  /**
+   * 新格式：图片以内容寻址文件保存，日志只留引用。
+   *
+   * 请求构建时由宿主把 `image-ref` 解析成 `image`；渲染层通过附件接口按需取缩略图。
+   * 这样长会话的 JSONL、导出和回放不再被 base64 撑大。
+   */
+  | { readonly type: 'image-ref'; readonly mediaType: string; readonly hash: string; readonly bytes?: number | undefined; readonly name?: string | undefined }
+  /**
+   * 文件/文件夹附件：正文内容在宿主侧读取并随消息进入请求，界面只显示名称。
+   *
+   * 内容在 `buildUserContent` 里按上限截断（二进制只留说明），所以日志不会被
+   * 任意大文件撑爆；用户仍可用路径让模型继续用 read/grep 读取完整内容。
+   */
+  | {
+      readonly type: 'file-ref'
+      readonly kind: 'file' | 'folder'
+      readonly path: string
+      readonly name: string
+      readonly content: string
+      readonly bytes?: number | undefined
+      readonly truncated?: boolean | undefined
+      readonly binary?: boolean | undefined
+      readonly entries?: number | undefined
+    }
+  /** 用户显式选择的技能：instructions 进入模型上下文，界面只显示 name。 */
+  | { readonly type: 'skill'; readonly id: string; readonly name: string; readonly instructions: string }
   | { readonly type: 'tool_use'; readonly id: string; readonly name: string; readonly input: JsonValue }
   | {
       readonly type: 'tool_result'
@@ -354,6 +382,24 @@ export interface SessionEventMap {
     readonly summaryChars: number
   }
   'compaction/end': { readonly compactionId: string; readonly outcome: 'completed' | 'abandoned' }
+  /**
+   * 撤销一次仍在当前表面上的压缩。原始事实从未删除，撤销只是用 `surfaceOp.restore`
+   * 把摘要换回被它遮蔽的消息；后续仍可再次压缩。
+   */
+  'compaction/undo': {
+    readonly compactionId: string
+    readonly summarySeq: number
+    readonly restoredSeqs: readonly number[]
+  }
+  /**
+   * 用户对某一轮上下文的显式标记（last-write-wins）：
+   * `pinned` 阻止压缩吞掉这一轮；`muted` 让这一轮不再进入模型请求（日志和界面仍保留）。
+   */
+  'context/turn-marker': {
+    readonly targetSeq: number
+    readonly muted?: boolean | undefined
+    readonly pinned?: boolean | undefined
+  }
   /** 大型工具结果已外置；原始 tool/result 仍保留在日志中。 */
   'spill/created': {
     readonly locator: string
@@ -384,7 +430,14 @@ export interface SessionEventMap {
 export type SessionEventType = keyof SessionEventMap
 
 /** 表面操作（D5：压缩的唯一原语；不做删除） */
-export type SurfaceOp = 'append' | { readonly op: 'replace'; readonly start: number; readonly end: number }
+export type SurfaceOp =
+  | 'append'
+  | { readonly op: 'replace'; readonly start: number; readonly end: number }
+  /**
+   * 压缩撤销：把当前表面的第 `start` 项（摘要）换回 `eventSeqs` 对应的原始消息。
+   * 与 replace 一样用**当前表面索引**定位，写入时校验，派生时纯函数重建。
+   */
+  | { readonly op: 'restore'; readonly start: number; readonly eventSeqs: readonly number[] }
 
 /**
  * 事件信封（06 §2.1）。

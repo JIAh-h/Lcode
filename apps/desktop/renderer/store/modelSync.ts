@@ -37,6 +37,7 @@ interface ModelBridgeLike {
   }>
   getDefault(): Promise<{ readonly provider: string; readonly model: string } | null>
   setDefault(input: { readonly provider: string; readonly model: string }): Promise<unknown>
+  limits(input: { readonly provider: string; readonly model: string }): Promise<unknown>
 }
 
 function bridge(): ModelBridgeLike | undefined {
@@ -78,6 +79,46 @@ export function syncModelsFromMain(options: { readonly force?: boolean } = {}): 
     }
   })()
   return inflight
+}
+
+/**
+ * 模型是否能读图片的**兜底**判断。
+ *
+ * 权威来源是供应商元数据（`resolveModelVision`）；但部分网关什么模态字段都不给，
+ * 此时按模型 id 的家族命名判断；embedding / rerank / 生成类模型明确排除。
+ * 未知不当作不支持，避免把本来能读图的模型误挡在粘贴之外。
+ */
+export function modelSupportsImages(model: string): boolean {
+  const id = model.trim().toLowerCase()
+  if (id === '') return false
+  if (/embedding|rerank|video-generation|image-generation/.test(id)) return false
+  return /(^|[/_.-])(vl|vision|omni)([/\d_.-]|$)|deepseek.*(flash|vl|vision)|gpt-4o|gpt-4\.1|gpt-5|claude-(3|4)|gemini|glm-4v|pixtral|llava|internvl|step-1v|yi-vision|grok-(2|3|4)/.test(id)
+}
+
+const visionCache = new Map<string, boolean>()
+
+/**
+ * 问供应商这个模型是否声明了图片输入。
+ *
+ * 官方 DeepSeek 的 `/models` 给 `input_modalities`，百炼原生目录给
+ * `inference_metadata.request_modality`；没有字段时返回 undefined，
+ * 调用方再回落到模型名判断——不把“未知”当成“不支持”。
+ */
+export async function resolveModelVision(provider: string, model: string): Promise<boolean | undefined> {
+  if (provider === '' || model === '') return undefined
+  const key = `${provider}:${model}`
+  const cached = visionCache.get(key)
+  if (cached !== undefined) return cached
+  const bridge = (globalThis as unknown as { lcode?: { model?: ModelBridgeLike } }).lcode?.model
+  if (bridge === undefined || typeof bridge.limits !== 'function') return undefined
+  try {
+    const limits = await bridge.limits({ provider, model }) as { readonly vision?: unknown } | undefined
+    if (typeof limits?.vision !== 'boolean') return undefined
+    visionCache.set(key, limits.vision)
+    return limits.vision
+  } catch {
+    return undefined
+  }
 }
 
 /**

@@ -1,5 +1,5 @@
 import { Fragment, useMemo, useState } from 'react'
-import type { ReactNode } from 'react'
+import type { CSSProperties, ReactNode } from 'react'
 import { t } from '../i18n/index.ts'
 
 /**
@@ -7,7 +7,7 @@ import { t } from '../i18n/index.ts'
  *
  * 模型输出是不可信内容，所以这里**不使用 dangerouslySetInnerHTML**：
  * 解析成块/行内片段后交给 React 渲染，文本天然转义，链接只放行 http(s) 并走系统浏览器。
- * 支持：围栏代码块、标题、列表、引用、分隔线、段落；行内代码、粗体、斜体、链接。
+ * 支持：围栏代码块、标题、列表、引用、分隔线、GFM 表格、段落；行内代码、粗体、斜体、链接。
  */
 
 export type MdBlock =
@@ -16,7 +16,37 @@ export type MdBlock =
   | { kind: 'paragraph'; text: string }
   | { kind: 'list'; ordered: boolean; items: string[] }
   | { kind: 'quote'; text: string }
+  | { kind: 'table'; header: string[]; rows: string[][]; align: ('left' | 'center' | 'right' | null)[] }
   | { kind: 'hr' }
+
+/** 行内 `\|` 是字面竖线；用占位符切开单元格后再还原。 */
+function splitRow(line: string): string[] {
+  let text = line.trim()
+  if (text.startsWith('|')) text = text.slice(1)
+  if (text.endsWith('|') && !text.endsWith('\\|')) text = text.slice(0, -1)
+  if (text === '') return []
+  return text
+    .replace(/\\\|/g, '\u0000')
+    .split('|')
+    .map((cell) => cell.trim().replace(/\u0000/g, '|'))
+}
+
+function isDelimiterRow(line: string): boolean {
+  if (!line.includes('|')) return false
+  const cells = splitRow(line)
+  return cells.length > 0 && cells.every((cell) => /^:?-+:?$/.test(cell))
+}
+
+function alignmentOf(cells: string[]): ('left' | 'center' | 'right' | null)[] {
+  return cells.map((cell) => {
+    const left = cell.startsWith(':')
+    const right = cell.endsWith(':')
+    if (left && right) return 'center'
+    if (right) return 'right'
+    if (left) return 'left'
+    return null
+  })
+}
 
 export function parseMarkdown(source: string): MdBlock[] {
   const lines = source.replace(/\r\n/g, '\n').split('\n')
@@ -92,6 +122,33 @@ export function parseMarkdown(source: string): MdBlock[] {
         i += 1
       }
       blocks.push({ kind: 'list', ordered: isOrdered, items })
+      continue
+    }
+
+    /* GFM 表格：当前行含 | 且下一行是 `---` 分隔行 */
+    const nextLine = lines[i + 1] ?? ''
+    if (line.includes('|') && splitRow(line).length > 0 && isDelimiterRow(nextLine)) {
+      flushParagraph()
+      const header = splitRow(line)
+      const align = alignmentOf(splitRow(nextLine))
+      i += 2
+      const rows: string[][] = []
+      while (i < lines.length) {
+        const row = lines[i] ?? ''
+        const trimmed = row.trim()
+        if (trimmed === '' || !row.includes('|')) break
+        // 围栏/标题/引用明显不是表格行，停掉避免把后续内容吞进表格
+        if (/^```/.test(trimmed) || /^#{1,6}\s/.test(trimmed) || /^\s*>/.test(row)) break
+        const cells = splitRow(row)
+        // 单元格里有未转义的 | 会多出列：并回最后一列，不丢内容
+        if (header.length > 0 && cells.length > header.length) {
+          cells.splice(header.length - 1, cells.length - header.length, cells.slice(header.length - 1).join(' | '))
+        }
+        while (cells.length < header.length) cells.push('')
+        rows.push(cells)
+        i += 1
+      }
+      blocks.push({ kind: 'table', header, rows, align })
       continue
     }
 
@@ -193,6 +250,34 @@ export function Markdown({ text }: { text: string }) {
         if (block.kind === 'list') {
           const items = block.items.map((item, itemIndex) => <li key={itemIndex}>{renderInline(item)}</li>)
           return block.ordered ? <ol key={index}>{items}</ol> : <ul key={index}>{items}</ul>
+        }
+        if (block.kind === 'table') {
+          const alignStyle = (cellIndex: number): CSSProperties | undefined => {
+            const align = block.align[cellIndex] ?? null
+            return align === null ? undefined : { textAlign: align }
+          }
+          return (
+            <div className="md-tblwrap" key={index}>
+              <table>
+                <thead>
+                  <tr>
+                    {block.header.map((cell, cellIndex) => (
+                      <th key={cellIndex} style={alignStyle(cellIndex)}>{renderInline(cell)}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {block.rows.map((row, rowIndex) => (
+                    <tr key={rowIndex}>
+                      {row.map((cell, cellIndex) => (
+                        <td key={cellIndex} style={alignStyle(cellIndex)}>{renderInline(cell)}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )
         }
         if (block.kind === 'quote') {
           return <blockquote key={index}>{renderInline(block.text)}</blockquote>

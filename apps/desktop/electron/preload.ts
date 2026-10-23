@@ -17,6 +17,10 @@ const api = {
   chooseFolder: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-folder', title),
   /** 系统文件选择框（附件）；取消返回 null */
   chooseFile: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-file', title),
+  /** 选择单个 SKILL.md */
+  chooseSkillMarkdown: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-skill-markdown', title),
+  /** 选择技能 zip */
+  chooseSkillArchive: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-skill-archive', title),
   /** 导入会话：只选 JSONL，单选（P8-01） */
   chooseSessionFile: (title?: string): Promise<string | null> => ipcRenderer.invoke('dialog:choose-session-file', title),
   /** 请求关闭窗口（走主进程的关闭确认；window.close() 会绕过确认） */
@@ -40,6 +44,9 @@ const api = {
   setSidebar: (input: unknown): Promise<unknown> => ipcRenderer.invoke('app:set-sidebar', input),
   /** 拖拽文件 → 本地绝对路径（Electron 32+ 移除了 File.path，用 webUtils 解析） */
   pathForFile: (file: File): string => webUtils.getPathForFile(file),
+  /** 拖入路径的文件类型（文件/文件夹）；拿不到返回 null */
+  pathKind: (path: string): Promise<{ kind: 'file' | 'folder' | null }> =>
+    ipcRenderer.invoke('lcode:path.kind', { path }),
 
   // ─── 模型配置（21 §2.7 `model.*`；批次④）───
   //
@@ -63,6 +70,18 @@ const api = {
     getDefault: (): Promise<unknown> => ipcRenderer.invoke('lcode:model.getDefault'),
     /** 某个凭据引用有没有值（**只回布尔**，值不进渲染进程） */
     hasCredential: (ref: string): Promise<boolean> => ipcRenderer.invoke('lcode:model.hasCredential', ref),
+  },
+
+  /** 内容寻址附件：图片缩略图按需读取，避免把 base64 一次性全塞进渲染层 */
+  attachments: {
+    read: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:attachments.read', input),
+  },
+
+  /** 本地技能目录与管理（用户 ~/.lcode/skills 可写，工作区 .lcode/skills 只读） */
+  skills: {
+    list: (): Promise<unknown> => ipcRenderer.invoke('lcode:skills.list'),
+    import: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:skills.import', input),
+    remove: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:skills.remove', input),
   },
 
   // ─── 对话（T5.3；21 §2.2/§2.13）───
@@ -92,10 +111,18 @@ const api = {
     restoreCheckpoint: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.checkpoint.restore', input),
     /** 编辑后重发：回退文件与日志到该提问之前，再把它重新发出去 */
     rewindSend: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.rewindSend', input),
+    /** 重试最后一轮（仅限没有执行过工具的回合），清掉失败回答后原样重发 */
+    retryTurn: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.retryTurn', input),
     /** 输入框状态栏：当前会话的上下文占用估算 */
     contextUsage: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:session.contextUsage', sessionId),
     /** 手动压缩较早历史（当前默认模型生成摘要） */
     compact: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:session.compact', sessionId),
+    /** 压缩预览：生成摘要但不改日志 */
+    compactPreview: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.compactPreview', input),
+    compactApply: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.compactApply', input),
+    compactUndo: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.compactUndo', input),
+    /** 固定/屏蔽某一轮 */
+    marker: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.marker', input),
     /** 订阅结构/表面事件（即时） */
     onEvent: (handler: (payload: unknown) => void): (() => void) => {
       const listener = (_e: unknown, payload: unknown): void => handler(payload)

@@ -1,5 +1,5 @@
 import { build, context } from 'esbuild'
-import { copyFile, mkdir, stat } from 'node:fs/promises'
+import { copyFile, cp, mkdir, rm, stat } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -144,9 +144,35 @@ async function copyPluginUtilityRunner() {
   console.log(`  dist\\utility-runner.mjs     ${(await stat(dest)).size} B`)
 }
 
+/**
+ * 内置技能随应用分发：主进程会从这里读取并保证 `~/.lcode/skills` 至少有一份。
+ * 放到 `dist/` 而不是仓库根，portable 打包复制 dist 时自动带上。
+ */
+async function copyBuiltinSkills() {
+  const src = join(desktopRoot, 'resources', 'skills')
+  const dest = join(desktopRoot, 'dist', 'skills')
+  await rm(dest, { recursive: true, force: true })
+  await cp(src, dest, { recursive: true })
+  console.log('  dist\\skills\\        内置技能')
+}
+
+/**
+ * 应用图标放到 `dist/`：BrowserWindow 的 `icon` 按 `__dirname`（即 dist）解析，
+ * portable 打包复制 dist 时一并带走，开发与打包两种形态都找得到。
+ */
+async function copyAppIcon() {
+  const src = join(desktopRoot, 'resources', 'app_icon.ico')
+  const dest = join(desktopRoot, 'dist', 'app_icon.ico')
+  await mkdir(join(desktopRoot, 'dist'), { recursive: true })
+  await copyFile(src, dest)
+  console.log(`  dist\\app_icon.ico     ${(await stat(dest)).size} B`)
+}
+
 if (watch) {
   await copyZstdWasm()
   await copyPluginUtilityRunner()
+  await copyBuiltinSkills()
+  await copyAppIcon()
   const contexts = await Promise.all(
     TARGETS.map((t) => context({ ...SHARED, ...t.extra, entryPoints: [t.entry], outfile: t.out })),
   )
@@ -158,4 +184,6 @@ if (watch) {
   )
   await copyZstdWasm()
   await copyPluginUtilityRunner()
+  await copyBuiltinSkills()
+  await copyAppIcon()
 }

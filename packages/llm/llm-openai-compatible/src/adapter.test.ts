@@ -137,6 +137,82 @@ describe('① 协议翻译：内部形状 → OpenAI 请求体', () => {
     ])
   })
 
+  it('技能指令变成文本、图片变成 image_url，两者都不泄漏 base64 到文本里', async () => {
+    let sent: { messages: { role: string; content?: unknown }[] } | undefined
+    const adapter = makeAdapter({
+      fetch: (async (_url: string, init?: RequestInit) => {
+        sent = JSON.parse(String(init?.body)) as { messages: { role: string; content?: unknown }[] }
+        return sse([{ choices: [{ delta: { content: 'ok' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }])
+      }) as typeof globalThis.fetch,
+    })
+    const call = await adapter.prepareCall(
+      { provider: 'custom', model: 'qwen3-vl-plus' },
+      { signal: new AbortController().signal },
+    )
+    await collect(adapter.stream({
+      ...call,
+      request: {
+        ...call.request,
+        body: {
+          system: '',
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'skill', id: 'review', name: 'Review', instructions: '检查改动。' },
+              { type: 'text', text: '看图' },
+              { type: 'image', mediaType: 'image/jpeg', data: 'AAAA' },
+            ],
+          }],
+          tools: [],
+        },
+      },
+    }, new AbortController().signal))
+
+    expect(sent?.messages[0]?.content).toEqual([
+      { type: 'text', text: '[Skill: Review]\n检查改动。\n\n看图' },
+      { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,AAAA' } },
+    ])
+  })
+
+  it('file-ref 附件以「正文内联 + 无需重复读取」的文本进请求；截断时提示可续读', async () => {
+    let sent: { messages: { role: string; content?: unknown }[] } | undefined
+    const adapter = makeAdapter({
+      fetch: (async (_url: string, init?: RequestInit) => {
+        sent = JSON.parse(String(init?.body)) as { messages: { role: string; content?: unknown }[] }
+        return sse([{ choices: [{ delta: {}, finish_reason: 'stop' }] }])
+      }) as typeof globalThis.fetch,
+    })
+    const call = await adapter.prepareCall(
+      { provider: 'custom', model: 'm' },
+      { signal: new AbortController().signal },
+    )
+    await collect(adapter.stream({
+      ...call,
+      request: {
+        ...call.request,
+        body: {
+          system: '',
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: '这里面讲了什么？' },
+              { type: 'file-ref', kind: 'file', path: 'D:/repo/docs/a.md', name: 'a.md', content: '# 正文' },
+              { type: 'file-ref', kind: 'folder', path: 'D:/repo/docs', name: 'docs', content: '- src/', entries: 1, truncated: true },
+            ],
+          }],
+          tools: [],
+        },
+      },
+    }, new AbortController().signal))
+
+    const raw = sent?.messages[0]?.content
+    const text = typeof raw === 'string' ? raw : Array.isArray(raw) ? ((raw as { type: string; text: string }[]).find((b) => b.type === 'text')?.text ?? '') : ''
+    expect(text).toContain('[Attachment: D:/repo/docs/a.md]（正文已完整附在下方')
+    expect(text).toContain('# 正文')
+    expect(text).toContain('[Attachment folder: D:/repo/docs]\n- src/')
+    expect(text).toContain('[content truncated; use the path above to read the rest]')
+  })
+
   it('body 形状意外时退化成空请求，而不是炸在深处', async () => {
     let sent: unknown
     const adapter = makeAdapter({
@@ -672,6 +748,21 @@ describe('① 模型清单与重试策略', () => {
     expect(models[0]).toMatchObject({ id: 'deepseek-flash', contextWindow: 1_048_576 })
   })
 
+  it('listModels 读取 input_modalities 的图片能力（官方 DeepSeek 形态）', async () => {
+    const adapter = makeAdapter({
+      fetch: (async () =>
+        new Response(JSON.stringify({
+          data: [
+            { id: 'deepseek-flash', input_modalities: ['text', 'image'] },
+            { id: 'deepseek-chat', input_modalities: ['text'] },
+          ],
+        }), { status: 200 })) as typeof globalThis.fetch,
+    })
+    const models = await adapter.listModels(new AbortController().signal)
+    expect(models.find((m) => m.id === 'deepseek-flash')?.vision).toBe(true)
+    expect(models.find((m) => m.id === 'deepseek-chat')?.vision).toBe(false)
+  })
+
   it('describeModel 读取 /models/{id} 的百炼额外字段', async () => {
     let requested = ''
     const adapter = makeAdapter({
@@ -775,6 +866,34 @@ describe('① DashScope 原生目录（model_info.context_window）', () => {
     await expect(
       adapter.describeModel({ provider: 'custom', model: 'deepseek-v4.1-flash-1017' }, { signal: new AbortController().signal }),
     ).resolves.toEqual({ contextWindow: 1_000_000, maxOutputTokens: 393_216 })
+  })
+
+  it('原生目录的 inference_metadata.request_modality 带出图片能力', async () => {
+    const adapter = makeAdapter({
+      baseUrl: 'https://ds-catalog-vision.example.com/compatible-mode/v1',
+      fetch: (async (url: string) => {
+        const u = String(url)
+        if (u.includes('/api/v1/models')) {
+          return new Response(JSON.stringify({
+            output: {
+              total: 1,
+              page_no: 1,
+              page_size: 100,
+              models: [{
+                model: 'deepseek-v4.1-flash-1017',
+                capabilities: ['TG', 'Reasoning', 'VU'],
+                inference_metadata: { request_modality: ['Text', 'Image'], response_modality: ['Text'] },
+                model_info: { context_window: 1_000_000 },
+              }],
+            },
+          }), { status: 200 })
+        }
+        return new Response('{}', { status: 404 })
+      }) as typeof globalThis.fetch,
+    })
+    await expect(
+      adapter.describeModel({ provider: 'custom', model: 'deepseek-v4.1-flash-1017' }, { signal: new AbortController().signal }),
+    ).resolves.toMatchObject({ contextWindow: 1_000_000, vision: true })
   })
 
   it('listModels 用原生目录补齐 /models 缺失的窗口', async () => {

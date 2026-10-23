@@ -92,6 +92,13 @@ export function ReplayPage() {
     }
     return result
   }, [events])
+  /** 10 万事件会话的快照可能有数万条消息；默认只渲染末尾一页，避免一次写几 MB DOM */
+  const [showAllMessages, setShowAllMessages] = useState(false)
+  useEffect(() => setShowAllMessages(false), [selected, sessionId])
+  const messagePreview = useMemo(
+    () => (snapshot === null ? [] : snapshot.messages.slice(-20)),
+    [snapshot],
+  )
   const hiddenSteps = Math.max(0, steps.length - stepLimit)
   const visibleSteps = hiddenSteps === 0 ? steps : steps.slice(hiddenSteps)
   const current = steps.find((step) => `${step.turn}:${step.step}` === selected) ?? steps[steps.length - 1]
@@ -210,10 +217,19 @@ export function ReplayPage() {
             <pre className="mono">{snapshot === null || snapshot.decisions.length === 0 ? t('该步骤没有权限决策记录') : JSON.stringify(snapshot.decisions, null, 2)}</pre>
           </section>
           <section className="snap">
-            <h4>{t('模型可见消息')}</h4>
+            <h4>{snapshot === null ? t('模型可见消息') : t('模型可见消息（{n} 条）', { n: snapshot.messages.length })}</h4>
             <pre className="mono">
-              {snapshot === null || snapshot.messages.length === 0 ? t('该步骤没有可见消息') : JSON.stringify(snapshot.messages, null, 2)}
+              {snapshot === null || snapshot.messages.length === 0
+                ? t('该步骤没有可见消息')
+                : JSON.stringify(showAllMessages ? snapshot.messages : messagePreview, null, 2)}
             </pre>
+            {snapshot !== null && snapshot.messages.length > messagePreview.length ? (
+              <button className="btn mini" onClick={() => setShowAllMessages((value) => !value)}>
+                {showAllMessages
+                  ? t('收起完整快照')
+                  : t('展开全部 {n} 条', { n: snapshot.messages.length })}
+              </button>
+            ) : null}
           </section>
         </div>
       </div>

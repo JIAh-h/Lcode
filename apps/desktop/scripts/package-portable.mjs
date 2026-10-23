@@ -3,6 +3,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import rcedit from 'rcedit'
 
 /**
  * 生成 Windows portable staging 包（MVP 发布闭环）。
@@ -38,6 +39,26 @@ await mkdir(appRoot, { recursive: true })
 // Electron runtime（含 locales、resources.pak、V8 snapshot 等运行必需文件）。
 await cp(electronDist, outRoot, { recursive: true, dereference: true })
 await rename(join(outRoot, 'electron.exe'), join(outRoot, 'Lcode.exe'))
+
+/*
+ * rcedit 改写 exe 资源：不处理的话 Lcode.exe 沿用 Electron 默认图标与版本信息
+ * （资源管理器、任务栏固定、快捷方式读的都是 exe 内嵌资源，BrowserWindow 的
+ * `icon` 管不到这里）。失败就让打包失败——半成品图标比没有更糟。
+ */
+const appIcon = join(desktopRoot, 'resources', 'app_icon.ico')
+await requireFile(appIcon, '缺少应用图标')
+await rcedit(join(outRoot, 'Lcode.exe'), {
+  icon: appIcon,
+  'file-version': '0.1.0',
+  'product-version': '0.1.0',
+  'version-string': {
+    FileDescription: 'Lcode',
+    ProductName: 'Lcode',
+    CompanyName: 'Lcode',
+    OriginalFilename: 'Lcode.exe',
+    InternalName: 'Lcode',
+  },
+})
 
 await cp(sourceDist, join(appRoot, 'dist'), { recursive: true, dereference: true })
 await mkdir(join(appRoot, 'native'), { recursive: true })

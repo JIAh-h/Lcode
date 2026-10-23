@@ -57,6 +57,21 @@ export function deriveSurfaceItems(log: readonly SessionEvent[]): SurfaceItem[] 
         items[i] = { ...items[i]!, hidden: true }
       }
     }
+    if (isRestore(event.surfaceOp)) {
+      const { start, eventSeqs } = event.surfaceOp
+      if (start < 0 || start >= items.length) {
+        throw new RangeError(
+          `surface restore 区间越界：start=${start} surface 长度=${items.length}（不变量 I4 违规）`,
+        )
+      }
+      // 审计视图保留"摘要曾在第 start 位"的位置，只把被撤销的原文重新标为可见
+      items[start] = { ...items[start]!, hidden: true }
+      const wanted = new Set(eventSeqs)
+      for (let index = 0; index < items.length; index += 1) {
+        const item = items[index]
+        if (item !== undefined && wanted.has(item.sourceSeq)) items[index] = { ...item, hidden: false }
+      }
+    }
     // 其它日志事件（chunk / tool/call / turn 边界等）不产生表面项
   }
   return items
@@ -69,6 +84,8 @@ export function deriveSurfaceItems(log: readonly SessionEvent[]): SurfaceItem[] 
  */
 export function deriveVisibleSurfaceItems(log: readonly SessionEvent[]): readonly VisibleSurfaceItem[] {
   const items: VisibleSurfaceItem[] = []
+  const bySeq = new Map<number, SessionEvent>()
+  for (const event of log) if (isSurfaceEvent(event)) bySeq.set(event.seq, event)
   for (const event of log) {
     const replacement = isReplace(event.surfaceOp) ? event.surfaceOp : undefined
     if (replacement !== undefined) {
@@ -82,7 +99,27 @@ export function deriveVisibleSurfaceItems(log: readonly SessionEvent[]): readonl
         ? [{ message: eventToMessage(event), sourceSeq: event.seq }]
         : []
       items.splice(start, end - start, ...item)
-    } else if (isSurfaceEvent(event)) {
+      continue
+    }
+    const restore = isRestore(event.surfaceOp) ? event.surfaceOp : undefined
+    if (restore !== undefined) {
+      const { start } = restore
+      if (start < 0 || start >= items.length) {
+        throw new RangeError(
+          `surface restore 区间越界：start=${start} 当前表面长度=${items.length}（不变量 I4 违规）`,
+        )
+      }
+      const restored = restore.eventSeqs.map((seq) => {
+        const original = bySeq.get(seq)
+        if (original === undefined) {
+          throw new RangeError(`surface restore 引用了不存在的表面事件：${seq}`)
+        }
+        return { message: eventToMessage(original), sourceSeq: seq }
+      })
+      items.splice(start, 1, ...restored)
+      continue
+    }
+    if (isSurfaceEvent(event)) {
       items.push({ message: eventToMessage(event), sourceSeq: event.seq })
     }
   }
@@ -106,6 +143,10 @@ function isSurfaceEvent(event: SessionEvent): boolean {
 
 function isReplace(op: SurfaceOp | undefined): op is { op: 'replace'; start: number; end: number } {
   return op !== undefined && op !== 'append' && op.op === 'replace'
+}
+
+function isRestore(op: SurfaceOp | undefined): op is { op: 'restore'; start: number; eventSeqs: readonly number[] } {
+  return op !== undefined && op !== 'append' && op.op === 'restore'
 }
 
 function eventToMessage(event: SessionEvent): ModelMessage {
