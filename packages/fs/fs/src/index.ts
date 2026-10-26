@@ -18,4 +18,4 @@ export type {
   FsWriteOpts,
   FsWriteResult,
 } from './fs.ts'
-export { isInsideWorkspace, normalizePath } from './fs.ts'
+export { canonicalPath, isInsideWorkspace, normalizePath } from './fs.ts'

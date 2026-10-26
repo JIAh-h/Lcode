@@ -70,7 +70,8 @@ describe('WindowsSandboxProvider', () => {
     await expect(bridge.probe()).resolves.toEqual({ appContainer: true, workspaceAcl: true, networkPolicy: true, jobObject: true })
     await expect(bridge.wrap(['cmd.exe', '/c', 'echo ok'], policy)).resolves.toEqual({
       enforced: true,
-      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--', 'cmd.exe', '/c', 'echo ok'],
+      mechanism: 'AppContainer + Job Object',
+      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'workspace-write', '--', 'cmd.exe', '/c', 'echo ok'],
     })
   })
 
@@ -86,7 +87,8 @@ describe('WindowsSandboxProvider', () => {
     await bridge.probe()
     await expect(bridge.wrap(['cmd.exe', '/c', 'echo ok'], { ...policy, allowNetwork: true })).resolves.toEqual({
       enforced: true,
-      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'allow', '--', 'cmd.exe', '/c', 'echo ok'],
+      mechanism: 'AppContainer + Job Object',
+      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'allow', '--mode', 'workspace-write', '--', 'cmd.exe', '/c', 'echo ok'],
     })
   })
 
@@ -102,7 +104,8 @@ describe('WindowsSandboxProvider', () => {
     await bridge.probe()
     await expect(bridge.wrapPty?.(['cmd.exe'], policy)).resolves.toEqual({
       enforced: true,
-      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--', 'cmd.exe'],
+      mechanism: 'AppContainer + Job Object',
+      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'workspace-write', '--', 'cmd.exe'],
     })
   })
 
@@ -183,3 +186,39 @@ function probeSubprocess(...outputs: string[]): SandboxHelperSubprocess {
     },
   }
 }
+
+describe('预设档位贯通', () => {
+  it('read-only 档把 --mode 原样交给 helper', async () => {
+    const bridge = createWindowsSandboxBridge({
+      subprocess: probeSubprocess(
+        '{"appContainer":true,"workspaceAcl":true,"networkPolicy":true,"jobObject":true}',
+        '{"appContainer":true,"workspaceAcl":true,"networkPolicy":true,"jobObject":true}',
+      ),
+      helperPaths: ['C:/lcode/lcode-sandbox-win32.exe'],
+      workspaceRoot: 'C:/repo/lcode',
+    })
+    await bridge.probe()
+    await expect(bridge.wrap(['cmd.exe', '/c', 'dir'], { ...policy, mode: 'read-only' })).resolves.toEqual({
+      enforced: true,
+      mechanism: 'AppContainer + Job Object',
+      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'read-only', '--', 'cmd.exe', '/c', 'dir'],
+    })
+  })
+
+  it('full-access 档只要求 Job Object 可用，不再要求 AppContainer/ACL', async () => {
+    const requested: Array<Readonly<Record<string, unknown>>> = []
+    const sandbox = createWindowsSandbox({
+      platform: 'win32',
+      bridge: {
+        probe: async () => ({ appContainer: true, workspaceAcl: false, networkPolicy: true, jobObject: true }),
+        wrap: async (argv, input) => {
+          requested.push({ mode: input.mode })
+          return { enforced: true, wrappedArgv: ['helper', '--run', '--', ...argv] }
+        },
+      },
+    })
+    await sandbox.status()
+    await expect(sandbox.wrap(['cmd.exe'], { mode: 'danger-full-access', workspaceRoot: 'C:/repo/lcode' })).resolves.toMatchObject({ enforced: true })
+    expect(requested[0]).toEqual({ mode: 'danger-full-access' })
+  })
+})

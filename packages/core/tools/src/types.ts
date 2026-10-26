@@ -69,6 +69,12 @@ export interface ToolActionIntent {
   readonly paths?: readonly { readonly path: string; readonly mode: 'read' | 'write' }[] | undefined
   readonly argv?: readonly string[] | undefined
   readonly domains?: readonly string[] | undefined
+  /** web 工具请求的完整 URL；域名之外的路径/查询同样会离开本机。 */
+  readonly url?: string | undefined
+  /** 这条命令需要访问网络：策略层会弹审批，批准后按 `networkScope` 放开。 */
+  readonly network?: boolean | undefined
+  /** 联网授权的生命周期；默认 `call`（仅本次调用），终端是 `terminal`（关闭前有效）。 */
+  readonly networkScope?: 'call' | 'terminal' | undefined
   /** 环境变量**名**（只给名字不给值，I7） */
   readonly env?: readonly string[] | undefined
 }
@@ -105,6 +111,83 @@ export interface ToolGuard {
 export interface GuardCtx {
   readonly reason?: string
   readonly scope?: unknown
+}
+
+/**
+ * 执行 scope 上携带的沙箱策略。
+ *
+ * 由权限钩子在 `tools/pre-execute` 阶段按**当前预设**写入，工具执行器据此向
+ * OS 沙箱申请同一档位。之前工具各自硬编码 `workspace-write`，导致「只读」仍能
+ * 通过 shell 写文件、「完全访问」仍被工作区 ACL 限制。
+ */
+export interface ExecutionSandboxPolicy {
+  readonly mode: 'read-only' | 'workspace-write' | 'danger-full-access'
+  readonly workspaceRoot: string
+  readonly allowNetwork?: boolean | undefined
+}
+
+/** 从工具执行 scope 读取沙箱策略；没有（直接调用/测试）时返回 undefined。 */
+export function sandboxPolicyOf(scope: unknown): ExecutionSandboxPolicy | undefined {
+  if (typeof scope !== 'object' || scope === null) return undefined
+  const value = (scope as { sandboxPolicy?: unknown }).sandboxPolicy
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const mode = record.mode
+  const workspaceRoot = record.workspaceRoot
+  if (
+    (mode !== 'read-only' && mode !== 'workspace-write' && mode !== 'danger-full-access') ||
+    typeof workspaceRoot !== 'string' ||
+    workspaceRoot === ''
+  ) {
+    return undefined
+  }
+  return {
+    mode,
+    workspaceRoot,
+    ...(typeof record.allowNetwork === 'boolean' ? { allowNetwork: record.allowNetwork } : {}),
+  }
+}
+
+/** 把沙箱策略合入 scope（权限钩子用）。 */
+export function withSandboxPolicy(scope: unknown, policy: ExecutionSandboxPolicy): Record<string, unknown> {
+  const base = typeof scope === 'object' && scope !== null ? { ...(scope as Record<string, unknown>) } : {}
+  return { ...base, sandboxPolicy: policy }
+}
+
+/**
+ * 执行 scope 上的 web 域名边界。
+ *
+ * 策略 hook 放行后写入；`web_fetch` 执行时据此校验初始 URL 与每次重定向。
+ * 这不替代审批，而是补上“审批之后 URL 还能跳去别处”的能力旁路。
+ */
+export interface WebNetworkPolicy {
+  /** 本次调用已获批准的精确主机名（不含 `*`） */
+  readonly approvedHosts: readonly string[]
+  /** 当前工作区已记住的主机名 */
+  readonly allowlistedHosts: readonly string[]
+}
+
+/** 从执行 scope 读取 web 域名边界；没有（直接调用/测试）时返回 undefined。 */
+export function webNetworkPolicyOf(scope: unknown): WebNetworkPolicy | undefined {
+  if (typeof scope !== 'object' || scope === null) return undefined
+  const value = (scope as { webNetworkPolicy?: unknown }).webNetworkPolicy
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const approvedHosts = stringArray(record.approvedHosts)
+  const allowlistedHosts = stringArray(record.allowlistedHosts)
+  if (approvedHosts === undefined || allowlistedHosts === undefined) return undefined
+  return { approvedHosts, allowlistedHosts }
+}
+
+/** 把 web 域名边界合入 scope（权限钩子用）。 */
+export function withWebNetworkPolicy(scope: unknown, policy: WebNetworkPolicy): Record<string, unknown> {
+  const base = typeof scope === 'object' && scope !== null ? { ...(scope as Record<string, unknown>) } : {}
+  return { ...base, webNetworkPolicy: policy }
+}
+
+function stringArray(value: unknown): readonly string[] | undefined {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) return undefined
+  return value as readonly string[]
 }
 
 /** 事件声明（合并进 @lcode/context） */

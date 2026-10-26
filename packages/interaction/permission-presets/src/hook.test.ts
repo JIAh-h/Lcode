@@ -31,21 +31,49 @@ interface Harness {
   executed: string[]
   setPreset(p: Parameters<InMemoryPermissionPresets['set']>[0]): Promise<void>
   grants: Array<{ sessionId: string; callId: string; paths: readonly string[] }>
+  scopes: unknown[]
+  events: Array<{ type: string; data: unknown }>
+  session: SessionService
+  auditEntries: Array<{
+    sessionId: string
+    workspace: string
+    tool: string
+    domain: string
+    decision: 'allowed' | 'denied'
+    url?: string
+    detail?: string
+  }>
+  askCount: number
 }
 
 function harness(opts: {
   answer?: ApprovalResult | undefined
   hasChannel?: boolean
-  preset?: '只读' | '标准' | '自动' | '完全访问' | '无人值守'
+  preset?: '只读' | '工作区内修改' | '完全访问'
   workspaceRoot?: string
   sandbox?: SandboxService
   withMutationAuthority?: boolean
+  webAllowlist?: {
+    listFor(workspace: string): readonly string[]
+    add(workspace: string, domains: readonly string[]): void
+    removeWorkspace?(workspace: string): void
+  }
+  networkAudit?: { append(entry: Harness['auditEntries'][number]): void }
+  maxWebSearchesPerTurn?: number
 }): Harness {
+  let askCount = 0
   const ctx = createContext()
   const tools = new InMemoryToolRegistry(ctx)
-  const presets = new InMemoryPermissionPresets(opts.preset ?? '标准')
+  const presets = new InMemoryPermissionPresets(opts.preset ?? '工作区内修改')
   const executed: string[] = []
   const grants: Array<{ sessionId: string; callId: string; paths: readonly string[] }> = []
+  const scopes: unknown[] = []
+  const events: Array<{ type: string; data: unknown }> = []
+  const auditEntries: Harness['auditEntries'] = []
+  const session = {
+    append: (event: { type: string; data: unknown }) => { events.push(event) },
+    events: () => events.map((event, index) => ({ ...event, seq: index, time: 0 })),
+  } as unknown as SessionService
 
   // 一个"会写文件"的假工具：describeAction 如实申报 write
   tools.register({
@@ -71,9 +99,51 @@ function harness(opts: {
       return { ok: true }
     },
   })
+  // 一个 web 工具：申报域名，用于白名单记忆
+  tools.register({
+    name: 'web',
+    description: '访问网页',
+    inputSchema: { type: 'object', properties: {} },
+    describeAction: () => ({ summary: '访问网页', domains: ['example.com'], url: 'https://example.com/page?q=1' }),
+    execute: (_call, opts) => {
+      executed.push('web')
+      scopes.push(opts.scope)
+      return { ok: true }
+    },
+  })
+  // 一个申报 argv 的工具（shell 族）：只读档的沙箱硬约束靠它验收
+  tools.register({
+    name: 'web_search',
+    description: '搜索网页',
+    inputSchema: { type: 'object', properties: {} },
+    describeAction: () => ({ summary: '搜索网页', domains: ['api.tavily.com'] }),
+    execute: () => {
+      executed.push('web_search')
+      return { ok: true }
+    },
+  })
+  // 一个申报 argv 的工具（shell 族）：只读档的沙箱硬约束靠它验收
+  tools.register({
+    name: 'shell',
+    description: '运行命令',
+    inputSchema: { type: 'object', properties: { command: { type: 'string' }, network: { type: 'boolean' } }, required: ['command'] },
+    describeAction: (parsed) => {
+      const p = parsed as { command: string; network?: boolean }
+      return {
+        summary: `运行 ${p.command}`,
+        argv: ['echo', p.command],
+        ...(p.network === true ? { network: true } : {}),
+      }
+    },
+    execute: (_call, opts) => {
+      executed.push('shell')
+      scopes.push(opts.scope)
+      return { ok: true }
+    },
+  })
 
   const channel: ApprovalChannel | undefined =
-    opts.hasChannel === false ? undefined : { ask: async () => opts.answer ?? 'allowed-once' }
+    opts.hasChannel === false ? undefined : { ask: async () => { askCount += 1; return opts.answer ?? 'allowed-once' } }
   const approval =
     channel === undefined ? undefined : createApprovalService({ channel })
 
@@ -83,10 +153,13 @@ function harness(opts: {
     presets,
     ...(opts.sandbox === undefined ? {} : { sandbox: opts.sandbox }),
     workspaceOf: () => opts.workspaceRoot ?? ROOT,
-    getSession: () => undefined,
+    getSession: () => session,
     ...(opts.withMutationAuthority === true
       ? { mutationAuthority: { grant: (grant) => { grants.push(grant) }, consume: () => undefined } }
       : {}),
+    ...(opts.webAllowlist === undefined ? {} : { webAllowlist: opts.webAllowlist }),
+    ...(opts.networkAudit === undefined ? {} : { networkAudit: opts.networkAudit }),
+    ...(opts.maxWebSearchesPerTurn === undefined ? {} : { maxWebSearchesPerTurn: opts.maxWebSearchesPerTurn }),
   })
 
   return {
@@ -95,6 +168,11 @@ function harness(opts: {
     presets,
     executed,
     grants,
+    scopes,
+    events,
+    session,
+    auditEntries,
+    get askCount() { return askCount },
     setPreset: (p) => presets.set(p),
   }
 }
@@ -106,6 +184,7 @@ function degradedSandbox(reason = 'Windows 原生隔离尚未接入'): SandboxSe
     knownEscapeSurfaces: ['文件系统（无约束）', '进程（无约束）'],
     degraded: true,
     reason,
+    providerAvailable: false,
     capabilities: {
       platform: 'win32',
       mechanism: 'none',
@@ -123,6 +202,29 @@ function degradedSandbox(reason = 'Windows 原生隔离尚未接入'): SandboxSe
   }
 }
 
+function availableSandbox(): SandboxService {
+  return {
+    status: async () => ({
+      available: true,
+      mechanism: 'AppContainer + Job Object',
+      knownEscapeSurfaces: [],
+      degraded: false,
+      providerAvailable: true,
+      capabilities: {
+        platform: 'win32',
+        mechanism: 'AppContainer + Job Object',
+        boundaries: {
+          filesystem: { state: 'enforced', plannedMechanism: 'AppContainer', message: '已约束' },
+          network: { state: 'enforced', plannedMechanism: 'AppContainer', message: '已约束' },
+          spawn: { state: 'enforced', plannedMechanism: 'Job Object', message: '已约束' },
+        },
+        reason: '',
+      },
+    }),
+    wrap: async (argv) => ({ enforced: true, wrappedArgv: [...argv] }),
+  }
+}
+
 /** 走真实注册表；scope 就是引擎会传的那个形状 */
 function run(h: Harness, name: string, args: unknown, sessionId = 'sess_1'): Promise<Awaited<ReturnType<InMemoryToolRegistry['execute']>>> {
   const call: ToolCall = { callId: 'c1', name, arguments: JSON.stringify(args) }
@@ -131,7 +233,7 @@ function run(h: Harness, name: string, args: unknown, sessionId = 'sess_1'): Pro
 
 describe('工作区内写：「标准」档放行，且**真的执行了**', () => {
   it('allow → 工具体执行', async () => {
-    const h = harness({ preset: '标准' })
+    const h = harness({ preset: '工作区内修改' })
     const r = await run(h, 'write', { path: 'src/a.ts' })
     expect(r.ok).toBe(true)
     expect(h.executed).toEqual(['src/a.ts'])
@@ -140,7 +242,7 @@ describe('工作区内写：「标准」档放行，且**真的执行了**', () 
 
 describe('P5-00：策略放行才签发文件能力', () => {
   it('工作区内 allow 会签发规范化后的精确写路径', async () => {
-    const h = harness({ preset: '标准', withMutationAuthority: true })
+    const h = harness({ preset: '工作区内修改', withMutationAuthority: true })
     await run(h, 'write', { path: 'src/../approved.ts' })
     expect(h.grants).toEqual([
       { sessionId: 'sess_1', callId: 'c1', paths: [normalizePath(resolve(ROOT, 'approved.ts'))] },
@@ -177,7 +279,7 @@ describe('P5-00：沙箱降级不能静默放行', () => {
     installPolicyHook({
       ctx,
       approval: createApprovalService({ channel: { ask: async (request) => { seen.push(request); return 'allowed-once' } } }),
-      presets: new InMemoryPermissionPresets('标准'),
+      presets: new InMemoryPermissionPresets('工作区内修改'),
       sandbox: degradedSandbox(),
       workspaceOf: () => ROOT,
       getSession: () => undefined,
@@ -191,13 +293,6 @@ describe('P5-00：沙箱降级不能静默放行', () => {
     expect(seen).toMatchObject([{ impact: { sandbox: { status: 'degraded', mechanism: 'none' } } }])
   })
 
-  it('自动档：降级的工作区内写直接拒绝且不执行', async () => {
-    const h = harness({ preset: '自动', sandbox: degradedSandbox() })
-    const result = await run(h, 'write', { path: 'src/a.ts' })
-    expect(result.ok).toBe(false)
-    expect(JSON.stringify(result.meta)).toContain('沙箱不可用')
-    expect(h.executed).toEqual([])
-  })
 
   it('受影响动作落 sandbox/degraded 审计事件', async () => {
     const ctx = createContext()
@@ -214,7 +309,7 @@ describe('P5-00：沙箱降级不能静默放行', () => {
     installPolicyHook({
       ctx,
       approval: createApprovalService({ channel: { ask: async () => 'rejected' } }),
-      presets: new InMemoryPermissionPresets('标准'),
+      presets: new InMemoryPermissionPresets('工作区内修改'),
       sandbox: degradedSandbox('AppContainer 未启用'),
       workspaceOf: () => ROOT,
       getSession: () => session,
@@ -280,7 +375,7 @@ describe('工作区外写：审批通过才执行（M-SEC-02）', () => {
       approval: createApprovalService({
         channel: { ask: async () => new Promise<never>(() => {}) },
       }),
-      presets: new InMemoryPermissionPresets('标准'),
+      presets: new InMemoryPermissionPresets('工作区内修改'),
       workspaceOf: () => ROOT,
       getSession: () => undefined,
     })
@@ -321,7 +416,7 @@ describe('审批问的是**三段齐备**的问题（SEC-APPROVAL-003）', () =>
     installPolicyHook({
       ctx,
       approval,
-      presets: new InMemoryPermissionPresets('标准'),
+      presets: new InMemoryPermissionPresets('工作区内修改'),
       workspaceOf: () => ROOT,
       getSession: () => undefined,
     })
@@ -339,25 +434,9 @@ describe('审批问的是**三段齐备**的问题（SEC-APPROVAL-003）', () =>
     expect(request.callId).toBe('c1')
     expect(request.action.summary).toBe('写入 /etc/passwd')
     expect(request.basis.source).toBe('preset')
-    expect(request.basis.presetName).toBe('标准')
+    expect(request.basis.presetName).toBe('工作区内修改')
     // UI 靠这个字段显著标注（EP-OUTSIDE_WORKSPACE 的要求）
     expect(request.impact.paths?.[0]?.outsideWorkspace).toBe(true)
-  })
-})
-
-describe('`自动` / `无人值守` 档：直接拒绝，不打扰（12 §3.3）', () => {
-  it('越界写 → 拒绝且不执行（never ≠ 放行）', async () => {
-    const h = harness({ preset: '自动' })
-    const r = await run(h, 'write', { path: '/etc/passwd' })
-    expect(r.ok).toBe(false)
-    expect(h.executed).toEqual([])
-  })
-
-  it('工作区内写仍然放行（这一档的用处就是"别打扰我"）', async () => {
-    const h = harness({ preset: '自动' })
-    const r = await run(h, 'write', { path: 'src/a.ts' })
-    expect(r.ok).toBe(true)
-    expect(h.executed).toEqual(['src/a.ts'])
   })
 })
 
@@ -398,7 +477,7 @@ describe('判不出来就按最保守处理', () => {
     })
     installPolicyHook({
       ctx,
-      presets: new InMemoryPermissionPresets('标准'),
+      presets: new InMemoryPermissionPresets('工作区内修改'),
       workspaceOf: () => undefined, // 查不到
       getSession: () => undefined,
     })
@@ -435,7 +514,7 @@ describe('审批去重：只对**并发**去重，不缓存历史结果', () => 
     installPolicyHook({
       ctx,
       approval: createApprovalService({ channel: { ask } }),
-      presets: new InMemoryPermissionPresets('标准'),
+      presets: new InMemoryPermissionPresets('工作区内修改'),
       workspaceOf: () => ROOT,
       getSession: () => undefined,
     })
@@ -464,7 +543,7 @@ describe('审批去重：只对**并发**去重，不缓存历史结果', () => 
     installPolicyHook({
       ctx,
       approval: createApprovalService({ channel: { ask } }),
-      presets: new InMemoryPermissionPresets('标准'),
+      presets: new InMemoryPermissionPresets('工作区内修改'),
       workspaceOf: () => ROOT,
       getSession: () => undefined,
     })
@@ -473,5 +552,184 @@ describe('审批去重：只对**并发**去重，不缓存历史结果', () => 
     await tools.execute(call, opts)
     await tools.execute(call, opts)
     expect(ask).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('只读档：没有系统级沙箱时不裸跑副作用调用', () => {
+  it('shell + 沙箱不可用 → 直接拒绝且不执行', async () => {
+    const h = harness({ preset: '只读', sandbox: degradedSandbox() })
+    const r = await run(h, 'shell', { command: 'echo hi' })
+    expect(r.ok).toBe(false)
+    expect(JSON.stringify(r.meta)).toContain('只读')
+    expect(h.executed).toEqual([])
+  })
+
+  it('shell + 沙箱可用 → 放行；OS 只读 ACL 负责拒绝写入', async () => {
+    const h = harness({ preset: '只读', sandbox: availableSandbox() })
+    const r = await run(h, 'shell', { command: 'echo hi' })
+    expect(r.ok).toBe(true)
+    expect(h.executed).toEqual(['shell'])
+  })
+
+  it('执行 scope 带上当前预设的沙箱档位', async () => {
+    const h = harness({ preset: '完全访问', sandbox: availableSandbox() })
+    const r = await run(h, 'shell', { command: 'echo hi' })
+    expect(r.ok).toBe(true)
+    expect((h.scopes[0] as { sandboxPolicy?: { mode?: string; workspaceRoot?: string } } | undefined)?.sandboxPolicy).toMatchObject({
+      mode: 'danger-full-access',
+      workspaceRoot: ROOT,
+    })
+  })
+})
+
+describe('shell 联网：按回合一次性授权', () => {
+  it('批准后只对本次调用放开网络', async () => {
+    const h = harness({ preset: '工作区内修改', sandbox: availableSandbox() })
+    const r = await run(h, 'shell', { command: 'curl example.com', network: true })
+    expect(r.ok).toBe(true)
+    expect(h.executed).toEqual(['shell'])
+    expect((h.scopes[0] as { sandboxPolicy?: { allowNetwork?: boolean } }).sandboxPolicy?.allowNetwork).toBe(true)
+  })
+
+  it('拒绝审批则不执行，也不放开网络', async () => {
+    const h = harness({ preset: '工作区内修改', sandbox: availableSandbox(), answer: 'rejected' })
+    const r = await run(h, 'shell', { command: 'curl example.com', network: true })
+    expect(r.ok).toBe(false)
+    expect(h.executed).toEqual([])
+    expect(h.scopes).toEqual([])
+  })
+
+  it('未申请联网的命令保持默认拒绝', async () => {
+    const h = harness({ preset: '工作区内修改', sandbox: availableSandbox() })
+    const r = await run(h, 'shell', { command: 'echo hi' })
+    expect(r.ok).toBe(true)
+    expect((h.scopes[0] as { sandboxPolicy?: { allowNetwork?: boolean } }).sandboxPolicy?.allowNetwork).toBe(false)
+  })
+
+  it('只读档直接拒绝联网', async () => {
+    const h = harness({ preset: '只读', sandbox: availableSandbox() })
+    const r = await run(h, 'shell', { command: 'curl example.com', network: true })
+    expect(r.ok).toBe(false)
+    expect(h.executed).toEqual([])
+  })
+})
+
+describe('web_search 每轮次数上限', () => {
+  it('超过上限直接拒绝，不进入审批也不执行', async () => {
+    const h = harness({ preset: '工作区内修改', maxWebSearchesPerTurn: 5 })
+    for (let index = 1; index <= 6; index += 1) {
+      h.session.append({
+        type: 'tool/call',
+        data: {
+          turn: 1,
+          step: index,
+          // 当前调用是 c1；再补 5 条历史，凑满第 6 次
+          callId: index === 6 ? 'c1' : `c${index + 1}`,
+          name: 'web_search',
+          arguments: '{}',
+        },
+      } as never)
+    }
+    const result = await run(h, 'web_search', {})
+    expect(result.ok).toBe(false)
+    expect(h.executed).toEqual([])
+    expect(h.askCount).toBe(0)
+    expect(JSON.stringify(result.meta)).toContain('上限')
+  })
+
+  it('未超上限时正常走审批和执行', async () => {
+    const h = harness({ preset: '工作区内修改', maxWebSearchesPerTurn: 5 })
+    for (let index = 1; index <= 5; index += 1) {
+      h.session.append({
+        type: 'tool/call',
+        data: { turn: 1, step: index, callId: `c${index}`, name: 'web_search', arguments: '{}' },
+      } as never)
+    }
+    // 当前调用 c1，加上 4 条历史正好 5 次
+    const result = await run(h, 'web_search', {})
+    expect(result.ok).toBe(true)
+    expect(h.executed).toEqual(['web_search'])
+    expect(h.askCount).toBe(1)
+  })
+})
+
+describe('web 域名白名单', () => {
+  it('审批通过后按工作区记住，下次同域名不再询问', async () => {
+    const added: Array<{ workspace: string; domains: readonly string[] }> = []
+    const first = harness({
+      preset: '工作区内修改',
+      sandbox: availableSandbox(),
+      webAllowlist: { listFor: () => [], add: (workspace, domains) => added.push({ workspace, domains }) },
+    })
+    expect((await run(first, 'web', {})).ok).toBe(true)
+    expect(added).toEqual([{ workspace: ROOT, domains: ['example.com'] }])
+    expect(first.askCount).toBe(1)
+    expect((first.scopes[0] as { webNetworkPolicy?: unknown }).webNetworkPolicy).toEqual({
+      approvedHosts: ['example.com'],
+      allowlistedHosts: [],
+    })
+    expect(first.events).toContainEqual({
+      type: 'network/request',
+      data: { domain: 'example.com', decision: 'allowed', url: 'https://example.com/page?q=1', detail: 'approved' },
+    })
+
+    const secondAudit: Harness['auditEntries'] = []
+    const second = harness({
+      preset: '工作区内修改',
+      sandbox: availableSandbox(),
+      webAllowlist: { listFor: () => ['example.com'], add: () => undefined },
+      networkAudit: { append: (entry) => secondAudit.push(entry) },
+    })
+    expect((await run(second, 'web', {})).ok).toBe(true)
+    expect(second.askCount).toBe(0)
+    expect((second.scopes[0] as { webNetworkPolicy?: unknown }).webNetworkPolicy).toEqual({
+      approvedHosts: ['example.com'],
+      allowlistedHosts: ['example.com'],
+    })
+    expect(secondAudit).toContainEqual({
+      sessionId: 'sess_1',
+      workspace: ROOT,
+      tool: 'web',
+      domain: 'example.com',
+      decision: 'allowed',
+      url: 'https://example.com/page?q=1',
+      detail: 'allowlisted',
+    })
+  })
+
+  it('审批通过后写跨会话审计', async () => {
+    const audit: Harness['auditEntries'] = []
+    const h = harness({
+      preset: '工作区内修改',
+      sandbox: availableSandbox(),
+      networkAudit: { append: (entry) => audit.push(entry) },
+    })
+    expect((await run(h, 'web', {})).ok).toBe(true)
+    expect(audit).toContainEqual({
+      sessionId: 'sess_1',
+      workspace: ROOT,
+      tool: 'web',
+      domain: 'example.com',
+      decision: 'allowed',
+      url: 'https://example.com/page?q=1',
+      detail: 'approved',
+    })
+  })
+
+  it('拒绝审批则不写入白名单', async () => {
+    const added: unknown[] = []
+    const h = harness({
+      preset: '工作区内修改',
+      sandbox: availableSandbox(),
+      answer: 'rejected',
+      webAllowlist: { listFor: () => [], add: (...args) => added.push(args) },
+    })
+    expect((await run(h, 'web', {})).ok).toBe(false)
+    expect(added).toEqual([])
+    expect(h.scopes).toEqual([])
+    expect(h.events).toContainEqual({
+      type: 'network/request',
+      data: { domain: 'example.com', decision: 'denied', url: 'https://example.com/page?q=1', detail: 'rejected' },
+    })
   })
 })

@@ -4,6 +4,7 @@ import { useLocation, useNavigate } from 'react-router-dom'
 import { CONTEXT_WINDOW_STEP, FALLBACK_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '@lcode/model-api'
 import { Seg, Select, Switch, SwitchRow, TextArea, TextInput } from '../components/controls.tsx'
 import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
+import { PopMenu } from '../components/PopMenu.tsx'
 import { toast } from '../components/toast.ts'
 import { setLocale, t, useLocale } from '../i18n/index.ts'
 import { useUiPrefs } from '../store/uiPrefs.ts'
@@ -11,6 +12,8 @@ import { choosePermissionPreset, syncPermissionPresetFromMain } from '../store/p
 import type { PermissionPresetState } from '../store/permissionSync.ts'
 import { chooseDefaultModel, syncModelsFromMain } from '../store/modelSync.ts'
 import { workspaceTrustBridge } from '../store/sessionBridge.ts'
+import { chooseAgentPreset, listAgentPresets } from '../store/agentPresetSync.ts'
+import type { AgentPresetOption, AgentPresetState } from '../store/agentPresetSync.ts'
 import { sessionBridge } from '../store/sessionBridge.ts'
 import type { SessionMeta } from '../store/sessionBridge.ts'
 import type { TrashEntry } from '../store/sessionBridge.ts'
@@ -1174,22 +1177,35 @@ function hostOf(url: string): string {
 
 /* ───────── 分区：权限预设 ───────── */
 
-/** 五个产品层字面量，写死自文档 12 §3.3（底层是 sandbox/mode × approval/policy 的打包） */
+/** 三个产品层字面量，写死自文档 12 §3.3（底层是 sandbox/mode × approval/policy 的打包） */
 const PERM_PILLS: readonly { id: PermissionPreset; ic: string; pd: string }[] = [
   { id: '只读', ic: 'RO', pd: '不会改动任何文件，适合先让它看代码' },
-  { id: '标准', ic: 'ST', pd: '受保护时可在工作区执行；沙箱降级时改动前确认' },
-  { id: '自动', ic: 'AU', pd: '仅在系统级沙箱可用时自动执行；否则拒绝改动' },
+  { id: '工作区内修改', ic: 'WS', pd: '可改工作区文件；越界或高风险动作前询问' },
   { id: '完全访问', ic: 'FU', pd: '哪里都能碰，但动手前问你' },
-  { id: '无人值守', ic: 'CI', pd: '仅在系统级沙箱可用时用于自动化；否则拒绝改动' },
 ]
+
+interface SandboxStatusView {
+  readonly available: boolean
+  readonly mechanism: string
+  readonly degraded: boolean
+  readonly reason?: string | undefined
+  readonly providerAvailable?: boolean | undefined
+  readonly capabilities: {
+    readonly boundaries: Readonly<Record<string, { readonly state: 'enforced' | 'unavailable'; readonly message: string }>>
+  }
+}
 
 function PermSection() {
   const prefs = useUiPrefs()
   const cur = prefs.permissionPreset
   const [state, setState] = useState<PermissionPresetState | undefined>()
+  const [sandbox, setSandbox] = useState<SandboxStatusView | null>(null)
   const [saving, setSaving] = useState(false)
   useEffect(() => {
     void syncPermissionPresetFromMain().then(setState).catch(() => setState(undefined))
+    void window.lcode.sandbox.status()
+      .then((value) => setSandbox(value as SandboxStatusView))
+      .catch(() => setSandbox(null))
   }, [])
   const selectPreset = (preset: PermissionPreset): void => {
     if (saving || preset === cur) return
@@ -1219,6 +1235,38 @@ function PermSection() {
             ))}
           </div>
         </div>
+      </div>
+      <div className="sect">
+        <div className="sh2">
+          {t('系统沙箱')}
+          <span className={'ext-tag' + (sandbox !== null && sandbox.degraded === false ? ' on' : '')}>
+            {sandbox === null ? t('读取中…') : sandbox.degraded ? t('降级') : t('已启用')}
+          </span>
+        </div>
+        <div className="srow">
+          <div className="sl">{t('机制')}</div>
+          <div className="sr">
+            <span className="src">{sandbox?.mechanism === 'none' || sandbox === null ? t('无（命令在无约束下运行）') : sandbox.mechanism}</span>
+          </div>
+        </div>
+        {sandbox?.reason !== undefined && sandbox.reason !== '' ? (
+          <div className="srow">
+            <div className="sl">{t('说明')}</div>
+            <div className="sr"><span className="src">{sandbox.reason}</span></div>
+          </div>
+        ) : null}
+        {sandbox !== null ? (
+          <div className="srow">
+            <div className="sl">{t('边界')}</div>
+            <div className="sr" style={{ flexWrap: 'wrap' }}>
+              {Object.entries(sandbox.capabilities.boundaries).map(([key, boundary]) => (
+                <span className="src" key={key}>
+                  {t(key === 'filesystem' ? '文件系统' : key === 'network' ? '网络' : '进程')}：{boundary.state === 'enforced' ? t('已约束') : t('未约束')}
+                </span>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </div>
       <div className="sect">
         <div className="sh2">{t('当前生效')}</div>
@@ -1468,6 +1516,420 @@ function SkillsSection() {
   )
 }
 
+/* ───────── 分区：网络访问（web 域名白名单） ───────── */
+
+interface WebAllowlistEntryView {
+  readonly workspace: string
+  readonly domains: readonly string[]
+}
+
+interface NetworkAuditEntryView {
+  readonly at: number
+  readonly sessionId: string
+  readonly workspace: string
+  readonly tool: string
+  readonly domain: string
+  readonly decision: 'allowed' | 'denied'
+  readonly url?: string
+  readonly detail?: string
+}
+
+function parseAuditEntries(value: unknown): readonly NetworkAuditEntryView[] {
+  if (!Array.isArray(value)) return []
+  return value.flatMap((item) => {
+    if (typeof item !== 'object' || item === null) return []
+    const record = item as Record<string, unknown>
+    if (
+      typeof record['at'] !== 'number' ||
+      typeof record['sessionId'] !== 'string' ||
+      typeof record['workspace'] !== 'string' ||
+      typeof record['tool'] !== 'string' ||
+      typeof record['domain'] !== 'string' ||
+      (record['decision'] !== 'allowed' && record['decision'] !== 'denied')
+    ) return []
+    return [{
+      at: record['at'],
+      sessionId: record['sessionId'],
+      workspace: record['workspace'],
+      tool: record['tool'],
+      domain: record['domain'],
+      decision: record['decision'],
+      ...(typeof record['url'] === 'string' ? { url: record['url'] } : {}),
+      ...(typeof record['detail'] === 'string' ? { detail: record['detail'] } : {}),
+    }]
+  })
+}
+
+function workspaceLabel(workspace: string): string {
+  return workspace.split(/[\\/]/).filter(Boolean).pop() ?? workspace
+}
+
+function NetworkAccessSection() {
+  const [entries, setEntries] = useState<readonly WebAllowlistEntryView[]>([])
+  const [audit, setAudit] = useState<readonly NetworkAuditEntryView[]>([])
+  const [busy, setBusy] = useState<string | undefined>()
+  const [clearing, setClearing] = useState(false)
+
+  const loadAllowlist = (): Promise<void> =>
+    window.lcode.webAllowlist.list()
+      .then((value) => setEntries(Array.isArray(value) ? value as WebAllowlistEntryView[] : []))
+      .catch((error: unknown) => { toast(error instanceof Error ? error.message : t('读取网络白名单失败')) })
+  const loadAudit = (): Promise<void> =>
+    window.lcode.networkAudit.list({ limit: 30 })
+      .then((value) => setAudit(parseAuditEntries(value)))
+      .catch((error: unknown) => { toast(error instanceof Error ? error.message : t('读取网络审计失败')) })
+
+  useEffect(() => {
+    void loadAllowlist()
+    void loadAudit()
+  }, [])
+
+  const remove = (workspace: string, domain: string): void => {
+    const key = `${workspace}|${domain}`
+    setBusy(key)
+    void window.lcode.webAllowlist.remove({ workspace, domain })
+      .then((value) => setEntries(Array.isArray(value) ? value as WebAllowlistEntryView[] : []))
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('移除域名失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  const prune = (): void => {
+    setBusy('prune')
+    void window.lcode.webAllowlist.prune()
+      .then((value) => {
+        const record = value as { entries?: unknown; removed?: unknown } | null
+        setEntries(Array.isArray(record?.entries) ? record.entries as WebAllowlistEntryView[] : [])
+        const removed = typeof record?.removed === 'number' ? record.removed : 0
+        toast(removed === 0 ? t('没有失效工作区') : t('已清理 {n} 个失效工作区', { n: removed }))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('清理失效工作区失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  const clearAudit = (): void => {
+    setBusy('audit')
+    void window.lcode.networkAudit.clear()
+      .then(() => {
+        setAudit([])
+        setClearing(false)
+        toast(t('已清空网络审计'))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('清空网络审计失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  return (
+    <>
+      <h2>{t('网络访问')}</h2>
+      <div className="sub">{t('web 工具调用新域名时会请求审批；批准后按工作区记住，可在这里移除。')}</div>
+      <div className="sect">
+        <div className="sh2">
+          {t('已允许的域名')}
+          {entries.length > 0 ? (
+            <button className="mini" disabled={busy !== undefined} onClick={prune}>
+              {t('清理失效工作区')}
+            </button>
+          ) : null}
+        </div>
+        {entries.length === 0 ? (
+          <div className="bplug-note">{t('还没有已允许的域名。')}</div>
+        ) : entries.map((entry) => (
+          <div className="srow" key={entry.workspace}>
+            <div className="sl" title={entry.workspace}>{workspaceLabel(entry.workspace)}</div>
+            <div className="sr" style={{ flexWrap: 'wrap' }}>
+              {entry.domains.map((domain) => (
+                <span className="netdomain" key={domain}>
+                  {domain}
+                  <button
+                    type="button"
+                    title={t('移除')}
+                    disabled={busy === `${entry.workspace}|${domain}`}
+                    onClick={() => remove(entry.workspace, domain)}
+                  >
+                    ✕
+                  </button>
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="sect" style={{ marginTop: 16 }}>
+        <div className="sh2">
+          {t('最近网络请求')}
+          {audit.length > 0 ? (
+            <button className="mini" disabled={busy !== undefined} onClick={() => setClearing(true)}>
+              {t('清空审计')}
+            </button>
+          ) : null}
+        </div>
+        {audit.length === 0 ? (
+          <div className="bplug-note">{t('还没有网络请求记录。')}</div>
+        ) : audit.map((entry, index) => (
+          <div className="srow" key={`${entry.at}-${entry.domain}-${index}`}>
+            <div className="sl" title={entry.workspace}>
+              {new Date(entry.at).toLocaleString()}
+            </div>
+            <div className="sr">
+              <span className="src">
+                <b className={entry.decision === 'allowed' ? 'audit-allowed' : 'audit-denied'}>
+                  {entry.decision === 'allowed' ? t('已允许') : t('已拒绝')}
+                </b>
+                {' · '}{entry.tool}{' · '}<span className="mono">{entry.domain}</span>{' · '}{workspaceLabel(entry.workspace)}
+              </span>
+              {entry.url === undefined ? null : (
+                <span className="src mono net-audit-url" title={entry.url}>{entry.url}</span>
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="warnrow" style={{ marginTop: 16 }}>
+        <span className="wt">{t('安全')}</span>
+        <span>{t('web 工具会拒绝本机、私网与云元数据地址；重定向逐跳校验。')}</span>
+      </div>
+      {clearing ? (
+        <ConfirmDialog
+          title={t('清空网络审计')}
+          message={t('会删除本机的网络请求审计记录（不会影响会话日志），是否继续？')}
+          confirmLabel={t('清空')}
+          danger
+          onCancel={() => setClearing(false)}
+          onConfirm={clearAudit}
+        />
+      ) : null}
+    </>
+  )
+}
+
+/* ───────── 分区：网页搜索 ───────── */
+
+interface WebSearchStatusView {
+  readonly provider: { readonly id: string; readonly label: string; readonly endpointHost: string }
+  readonly configured: boolean
+  readonly source: string | null
+  readonly maxResults: number
+}
+
+function credentialSourceLabel(source: string | null): string {
+  switch (source) {
+    case 'keychain': return t('系统钥匙串')
+    case 'file-0600': return t('本机凭据文件')
+    case 'env': return t('环境变量')
+    case 'lcode-home-env': return t('Lcode Home .env')
+    case 'project-env': return t('项目 .env')
+    default: return t('未配置')
+  }
+}
+
+function toWebSearchStatus(value: unknown): WebSearchStatusView | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const provider = record['provider']
+  if (typeof provider !== 'object' || provider === null) return undefined
+  const info = provider as Record<string, unknown>
+  if (typeof info['id'] !== 'string' || typeof info['label'] !== 'string' || typeof info['endpointHost'] !== 'string') return undefined
+  const maxResults = typeof record['maxResults'] === 'number' ? record['maxResults'] : 5
+  return {
+    provider: { id: info['id'], label: info['label'], endpointHost: info['endpointHost'] },
+    configured: record['configured'] === true,
+    source: typeof record['source'] === 'string' ? record['source'] : null,
+    maxResults: Math.min(10, Math.max(1, Math.floor(maxResults))),
+  }
+}
+
+function WebSearchSection() {
+  const [status, setStatus] = useState<WebSearchStatusView | null>(null)
+  const [apiKey, setApiKey] = useState('')
+  const [maxResults, setMaxResults] = useState('5')
+  const [busy, setBusy] = useState<'save' | 'test' | 'remove' | undefined>()
+  const [removing, setRemoving] = useState(false)
+
+  const apply = (value: unknown): void => {
+    const next = toWebSearchStatus(value)
+    if (next === undefined) return
+    setStatus(next)
+    setMaxResults(String(next.maxResults))
+  }
+
+  useEffect(() => {
+    void window.lcode.webSearch.status()
+      .then(apply)
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('读取网页搜索配置失败')))
+  }, [])
+
+  const save = (): void => {
+    const parsed = Number(maxResults)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 10) {
+      toast(t('每次结果数必须是 1-10 的整数'))
+      return
+    }
+    setBusy('save')
+    void window.lcode.webSearch.save({ apiKey, maxResults: parsed })
+      .then((value) => {
+        apply(value)
+        setApiKey('')
+        toast(t('已保存'))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('保存网页搜索配置失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  const test = (): void => {
+    setBusy('test')
+    void window.lcode.webSearch.test({ apiKey })
+      .then((value) => {
+        const count = typeof value === 'object' && value !== null && typeof (value as { count?: unknown }).count === 'number'
+          ? (value as { count: number }).count
+          : 0
+        toast(t('连接成功（返回 {count} 条结果）', { count }))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('测试连接失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  const remove = (): void => {
+    setBusy('remove')
+    void window.lcode.webSearch.remove()
+      .then((value) => {
+        apply(value)
+        setRemoving(false)
+        toast(t('已移除 Tavily API Key'))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('移除 Tavily API Key 失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  const host = status?.provider.endpointHost ?? 'api.tavily.com'
+  return (
+    <>
+      <h2>{t('网页搜索')}</h2>
+      <div className="sub">{t('让 Agent 具备联网搜索能力。搜索词会发送给 Tavily，结果按不可信内容处理。')}</div>
+      <div className="sect">
+        <div className="sh2">
+          {t('Tavily')}
+          <span className="src" style={{ marginLeft: 'auto' }}>
+            {status?.configured === true ? `${t('已配置')} · ${credentialSourceLabel(status.source)}` : t('未配置')}
+          </span>
+        </div>
+        <div className="srow">
+          <div className="sl">{t('API Key')}</div>
+          <div className="sr">
+            <div className="field">
+              <TextInput
+                type="password"
+                value={apiKey}
+                onChange={setApiKey}
+                placeholder={status?.configured === true ? t('已保存；留空则不修改') : 'tvly-...'}
+                autoComplete="off"
+              />
+            </div>
+            <span className="src">{t('Key 只保存在本机凭据存储，不会写进设置文件，也不会显示完整值。')}</span>
+          </div>
+        </div>
+        <div className="srow">
+          <div className="sl">{t('每次最多结果')}</div>
+          <div className="sr">
+            <div className="field" style={{ maxWidth: 160 }}>
+              <TextInput value={maxResults} onChange={setMaxResults} />
+            </div>
+            <span className="src">{t('范围 1-10；模型也可以请求更少的结果。')}</span>
+          </div>
+        </div>
+        <div className="srow">
+          <div className="sl" />
+          <div className="sr">
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn primary" disabled={busy !== undefined} onClick={save}>{t('保存')}</button>
+              <button className="btn" disabled={busy !== undefined} onClick={test}>{t('测试连接')}</button>
+              {status?.configured === true ? (
+                <button className="btn danger" disabled={busy !== undefined} onClick={() => setRemoving(true)}>{t('移除 Key')}</button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="warnrow" style={{ marginTop: 16 }}>
+        <span className="wt">{t('网络')}</span>
+        <span>{t('搜索端点固定为 {host}；首次搜索仍会按工作区请求网络审批，批准后记住该域名。搜索结果不会自动加入网页抓取白名单；每轮最多 5 次搜索。', { host })}</span>
+      </div>
+      {removing ? (
+        <ConfirmDialog
+          title={t('移除网页搜索 Key')}
+          message={t('移除后将无法使用 web_search，但不会删除任何会话数据。')}
+          confirmLabel={t('移除')}
+          danger
+          onCancel={() => setRemoving(false)}
+          onConfirm={remove}
+        />
+      ) : null}
+    </>
+  )
+}
+
+/* ───────── 分区：Agent 预设 ───────── */
+
+function AgentPresetSection() {
+  const [presets, setPresets] = useState<readonly AgentPresetOption[]>([])
+  const [current, setCurrent] = useState<AgentPresetState | null>(null)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    void listAgentPresets()
+      .then((value) => {
+        setPresets(value.presets)
+        setCurrent(value.current ?? null)
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('读取 Agent 预设失败')))
+  }, [])
+  const choose = (preset: AgentPresetOption): void => {
+    if (!preset.available || saving) return
+    setSaving(true)
+    void chooseAgentPreset(preset.id)
+      .then((state) => {
+        setCurrent(state ?? null)
+        toast(t('已切换 Agent 预设：{name}', { name: t(preset.name) }))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('切换 Agent 预设失败')))
+      .finally(() => setSaving(false))
+  }
+  return (
+    <>
+      <h2>{t('Agent 预设')}</h2>
+      <div className="sub">{t('选择 Agent 的工具和工作方式。日常任务用「标准模式」，扩展能力用「创造模式」。')}</div>
+      <div className="sect">
+        <div className="sh2">{t('内置预设')}</div>
+        <div className="presetgrid">
+          {presets.map((preset) => {
+            const active = current?.preset === preset.id
+            return (
+              <button
+                key={preset.id}
+                type="button"
+                className={'presetcard' + (active ? ' on' : '')}
+                disabled={!preset.available || saving}
+                onClick={() => choose(preset)}
+              >
+                <div className="presethead">
+                  <span className="presetname">{t(preset.name)}</span>
+                  <span className={'ext-tag' + (active ? ' on' : '')}>
+                    {active ? t('当前') : preset.available ? t('可选') : t('规划中')}
+                  </span>
+                </div>
+                <div className="presetdesc">{t(preset.description)}</div>
+                <code className="presetid">{preset.id}</code>
+              </button>
+            )
+          })}
+        </div>
+      </div>
+      <div className="warnrow" style={{ marginTop: 16 }}>
+        <span className="wt">{t('说明')}</span>
+        <span>{t('Agent 预设决定工具与工作方式；权限（只读 / 工作区内修改 / 完全访问）决定能碰什么，两者独立生效。')}</span>
+      </div>
+    </>
+  )
+}
+
 /* ───────── 分区：插件 ───────── */
 
 interface PluginEntry {
@@ -1481,10 +1943,87 @@ interface PluginEntry {
   readonly contributes: { readonly tools?: readonly string[]; readonly services?: readonly string[]; readonly promptSections?: readonly string[] }
 }
 
+type BuiltinPluginModeId = string
+
+interface BuiltinPluginModeState {
+  readonly configured: boolean
+  readonly running: boolean
+}
+
+interface BuiltinPluginView {
+  readonly id: string
+  readonly name: string
+  readonly description: string
+  readonly group: 'session' | 'global'
+  readonly fullName: string
+  readonly source: string
+  readonly provides: readonly string[]
+  readonly requires: readonly string[]
+  readonly modes: Readonly<Record<string, BuiltinPluginModeState>>
+}
+
+interface BuiltinPluginCatalog {
+  readonly profile: string
+  readonly modes: readonly { readonly id: BuiltinPluginModeId; readonly name: string; readonly description: string }[]
+  readonly plugins: readonly BuiltinPluginView[]
+}
+
+function BuiltinPluginCard({
+  plugin,
+  mode,
+  expanded,
+  onToggle,
+}: {
+  readonly plugin: BuiltinPluginView
+  readonly mode: BuiltinPluginModeId
+  readonly expanded: boolean
+  readonly onToggle: () => void
+}) {
+  const state = plugin.modes[mode] ?? { configured: false, running: false }
+  return (
+    <div className={'bplug' + (state.configured ? '' : ' off')}>
+      <button className="bplug-head" aria-expanded={expanded} onClick={onToggle}>
+        <span className="bplug-name">{t(plugin.name)}</span>
+        {state.configured ? null : <span className="bplug-tag">{t('已停用')}</span>}
+        <span className="bplug-chev">{expanded ? '⌃' : '⌄'}</span>
+      </button>
+      <div className="bplug-desc">{t(plugin.description)}</div>
+      <code className="bplug-id">{plugin.id}</code>
+      {expanded ? (
+        <div className="bplug-detail">
+          <div className="bplug-row"><span>{t('完整名称')}</span><code className="mono">{plugin.fullName}</code></div>
+          <div className="bplug-row"><span>{t('来自')}</span><span>{t(plugin.source)}</span></div>
+          <div className="bplug-row"><span>{t('配置状态')}</span><span>{state.configured ? t('已启用') : t('已停用')}</span></div>
+          <div className="bplug-row"><span>{t('运行状态')}</span><span>{state.running ? t('运行中') : t('未运行')}</span></div>
+          {plugin.provides.length > 0 ? (
+            <div className="bplug-row"><span>{t('提供')}</span><span className="mono">{plugin.provides.join('、')}</span></div>
+          ) : null}
+          {plugin.requires.length > 0 ? (
+            <div className="bplug-row"><span>{t('依赖')}</span><span className="mono">{plugin.requires.join('、')}</span></div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  )
+}
+
 function PluginSection() {
+  const [catalog, setCatalog] = useState<BuiltinPluginCatalog | null>(null)
+  const [catalogError, setCatalogError] = useState(false)
+  const [mode, setMode] = useState<BuiltinPluginModeId>('standard')
+  const [expanded, setExpanded] = useState<string | null>(null)
   const [plugins, setPlugins] = useState<readonly PluginEntry[]>([])
   const [busy, setBusy] = useState<string | undefined>()
   const [uninstalling, setUninstalling] = useState<PluginEntry | null>(null)
+  useEffect(() => {
+    void window.lcode.runtime.builtinPlugins()
+      .then((value) => {
+        const next = value as BuiltinPluginCatalog
+        if (next !== null && Array.isArray(next?.plugins)) setCatalog(next)
+        else setCatalogError(true)
+      })
+      .catch(() => setCatalogError(true))
+  }, [])
   const refresh = (): void => {
     void window.lcode.plugins.list().then((value) => setPlugins(Array.isArray(value) ? value as PluginEntry[] : [])).catch((error: unknown) => {
       toast(error instanceof Error ? error.message : t('读取插件失败'))
@@ -1533,19 +2072,78 @@ function PluginSection() {
       setBusy(undefined)
     }
   }
+  const sessionPlugins = catalog?.plugins.filter((plugin) => plugin.group === 'session') ?? []
+  const globalPlugins = catalog?.plugins.filter((plugin) => plugin.group === 'global') ?? []
+  const activeMode = catalog?.modes.find((item) => item.id === mode)
+  const renderCard = (plugin: BuiltinPluginView): ReactNode => (
+    <BuiltinPluginCard
+      key={plugin.id}
+      plugin={plugin}
+      mode={mode}
+      expanded={expanded === plugin.id}
+      onToggle={() => setExpanded(expanded === plugin.id ? null : plugin.id)}
+    />
+  )
   return (
     <>
       <h2>{t('插件')}</h2>
-      <div className="sub">{t('插件在独立受控进程中运行。只有声明的工具、提示段和事件订阅可以注册；沙箱不可用时不会启动。')}</div>
+      <div className="sub">{t('内置插件随模式在代码中启用，这里只能查看，不提供开关。')}</div>
+
       <div className="sect">
         <div className="sh2">
-          {t('已安装插件')}
+          {t('会话插件')}
+          {catalog !== null && catalog.modes.length > 0 ? (
+            <span className="sh2-actions">
+              <PopMenu
+                trigger={`${t(activeMode?.name ?? '标准模式（默认）')} ▾`}
+                buttonClass="btn mini"
+                title="查看不同模式下的插件"
+                dense
+                width={196}
+                items={catalog.modes.map((item) => ({
+                  id: item.id,
+                  label: item.name,
+                  hint: item.description,
+                  checked: item.id === mode,
+                }))}
+                onSelect={(id) => {
+                  setMode(id as BuiltinPluginModeId)
+                  setExpanded(null)
+                }}
+              />
+            </span>
+          ) : null}
+        </div>
+        <div className="sub">{t('由 Agent 预设按会话组成')}{activeMode === undefined ? '' : ` · ${t(activeMode.description)}`}</div>
+        {catalogError ? (
+          <div className="bplug-note">{t('读取内置插件失败，重启应用后再试。')}</div>
+        ) : catalog === null ? (
+          <div className="bplug-note">{t('正在读取内置插件…')}</div>
+        ) : (
+          <div className="bplug-grid">{sessionPlugins.map(renderCard)}</div>
+        )}
+      </div>
+
+      <div className="sect">
+        <div className="sh2">{t('全局插件')}</div>
+        <div className="sub">{t('系统与所有会话共用')}</div>
+        {catalogError ? null : catalog === null ? (
+          <div className="bplug-note">{t('正在读取内置插件…')}</div>
+        ) : (
+          <div className="bplug-grid">{globalPlugins.map(renderCard)}</div>
+        )}
+      </div>
+
+      <div className="sect">
+        <div className="sh2">
+          {t('第三方插件')}
           <span className="sh2-actions">
             <button className="mini" disabled={busy !== undefined} onClick={() => void install()}>
               ＋ {busy === 'install' ? t('正在安装…') : t('从文件夹安装')}
             </button>
           </span>
         </div>
+        <div className="sub">{t('第三方插件在独立受控进程中运行，只有声明的工具、提示段和事件订阅可以注册。')}</div>
         {plugins.length > 0 ? (
           <div className="modelList ext-list">
             {plugins.map((plugin) => {
@@ -1580,14 +2178,7 @@ function PluginSection() {
             })}
           </div>
         ) : (
-          <div className="ext-empty">
-            <div className="ext-empty-icon" aria-hidden="true">⬡</div>
-            <div className="ext-empty-title">{t('还没有安装插件')}</div>
-            <div className="ext-empty-note">{t('插件在独立受控进程中运行，只有声明的工具和提示段会注册。')}</div>
-            <div className="ext-empty-actions">
-              <button className="btn" disabled={busy !== undefined} onClick={() => void install()}>{t('从文件夹安装')}</button>
-            </div>
-          </div>
+          <div className="bplug-note">{t('还没有安装第三方插件。')}</div>
         )}
       </div>
       <div className="warnrow" style={{ marginTop: 16 }}>
@@ -1970,12 +2561,15 @@ const SECTIONS: { g?: string; id?: string; label?: string }[] = [
   { id: 'account', label: '账户' },
   { g: '模型' },
   { id: 'providers', label: '模型' },
+  { id: 'agentPresets', label: 'Agent 预设' },
   { g: '扩展' },
   { id: 'skills', label: '技能' },
   { id: 'plugins', label: '插件' },
+  { id: 'webSearch', label: '网页搜索' },
   { g: '权限' },
   { id: 'perm', label: '权限预设' },
   { id: 'trust', label: '工作区信任' },
+  { id: 'network', label: '网络访问' },
   { g: '记忆与历史' },
   { id: 'history', label: '历史与保留' },
   { id: 'export', label: '导出' },
@@ -1994,14 +2588,20 @@ function SectionBody({ id }: { id: string }) {
       return <AccountSection />
     case 'providers':
       return <ModelSection />
+    case 'agentPresets':
+      return <AgentPresetSection />
     case 'skills':
       return <SkillsSection />
     case 'plugins':
       return <PluginSection />
+    case 'webSearch':
+      return <WebSearchSection />
     case 'perm':
       return <PermSection />
     case 'trust':
       return <TrustSection />
+    case 'network':
+      return <NetworkAccessSection />
     case 'history':
       return <HistorySection />
     case 'export':

@@ -114,11 +114,17 @@ export class InMemoryToolRegistry implements ToolRegistry {
     if (pre.deny !== undefined) {
       return this.fail(call, ERROR_CODES.ET_DENIED, pre.deny)
     }
+    /*
+     * 策略钩子会在 pre-execute 阶段把沙箱档位等执行上下文写进 `pre.scope`；
+     * 必须把它交给工具体，否则工具拿不到预设档位（曾经导致 shell/terminal
+     * 永远按自己硬编码的 workspace-write 运行）。
+     */
+    const effectiveOpts = pre.scope === opts.scope ? opts : { ...opts, scope: pre.scope }
 
     // 4. 守卫链（T2：只有 deny / abstain；任一 deny 即拦截）
     for (const guard of this.guards) {
       if (!guard) continue
-      const verdict = await guard(call, { scope: opts.scope })
+      const verdict = await guard(call, { scope: pre.scope })
       if (verdict === 'deny') {
         return this.fail(call, ERROR_CODES.ET_DENIED, 'denied by guard')
       }
@@ -127,7 +133,7 @@ export class InMemoryToolRegistry implements ToolRegistry {
     // 5. 执行
     let value: unknown
     try {
-      value = await tool.execute({ ...call, parsed }, opts)
+      value = await tool.execute({ ...call, parsed }, effectiveOpts)
     } catch (err) {
       return this.fail(call, toCode(err), err instanceof Error ? err.message : String(err))
     }

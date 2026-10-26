@@ -22,6 +22,8 @@
     "@lcode/model-api": "workspace:*",
     "@lcode/session": "workspace:*",
     "@lcode/session-persistence-sqlite": "workspace:*",
+    "@lcode/web-fetch": "workspace:^",
+    "@lcode/web-search": "workspace:^",
     "better-sqlite3": "^11.10.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

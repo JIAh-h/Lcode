@@ -42,22 +42,31 @@ export function createMacosSandbox(options: MacosSandboxOptions = {}): SandboxSe
       knownEscapeSurfaces: enforced ? ['sandbox-exec 已废弃，需随 macOS 版本持续回归'] : ['文件系统（无约束）', '网络（无约束）', '进程（无约束）'],
       degraded: !enforced,
       ...(reason === undefined ? {} : { reason }),
+      providerAvailable: isEnforced(lastProbe),
       capabilities: capabilities(enforced, reason),
     }
   }
+  const wrap = async (argv: readonly string[], policy: ResolvedSandboxPolicy): Promise<SandboxWrapResult> => {
+    // 完全访问按定义不设文件/网络边界：不包装，也不假装有沙箱。
+    if (policy.mode === 'danger-full-access') return { enforced: true, mechanism: 'none (full access)', wrappedArgv: [...argv] }
+    const current = lastProbe ?? await safeProbe(probe)
+    lastProbe = current
+    if (!isEnforced(current)) return { enforced: false, wrappedArgv: [...argv], degradationReason: current.reason ?? 'macOS Seatbelt 未通过自检。' }
+    if (options.bridge !== undefined) return requireEnforced(await options.bridge.wrap(argv, policy), 'macOS 原生桥')
+    const profile = createSeatbeltProfile(policy)
+    return { enforced: true, mechanism: MECHANISM, wrappedArgv: [path, '-p', profile, '--', ...argv], profile }
+  }
   return {
     status,
-    async wrap(argv, policy) {
-      const current = lastProbe ?? await safeProbe(probe)
-      lastProbe = current
-      if (!isEnforced(current)) return { enforced: false, wrappedArgv: [...argv], degradationReason: current.reason ?? 'macOS Seatbelt 未通过自检。' }
-      if (options.bridge !== undefined) return requireEnforced(await options.bridge.wrap(argv, policy), 'macOS 原生桥')
-      const profile = createSeatbeltProfile(policy)
-      return { enforced: true, wrappedArgv: [path, '-p', profile, '--', ...argv], profile }
+    wrap,
+    // PTY 与普通命令使用同一 SBPL 包装：node-pty 的 shell 就是 sandbox-exec，
+    // 交互终端的 stdin/stdout 仍连着 pty。
+    async wrapPty(argv: readonly string[], policy: ResolvedSandboxPolicy): Promise<SandboxWrapResult> {
+      if (options.bridge?.wrapPty !== undefined) {
+        return requireEnforced(await options.bridge.wrapPty(argv, policy), 'macOS 原生 PTY 桥')
+      }
+      return wrap(argv, policy)
     },
-    ...(options.bridge?.wrapPty === undefined ? {} : { async wrapPty(argv: readonly string[], policy: ResolvedSandboxPolicy) {
-      return requireEnforced(await options.bridge!.wrapPty!(argv, policy), 'macOS 原生 PTY 桥')
-    } }),
     async releaseWorkspace(workspace) {
       if (options.bridge?.releaseWorkspace === undefined) return { released: true, reason: `Seatbelt 不持久化工作区 ACL，无需撤销：${workspace}` }
       return options.bridge.releaseWorkspace(workspace)

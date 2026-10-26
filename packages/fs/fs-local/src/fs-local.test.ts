@@ -1,8 +1,8 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { normalizePath } from '@lcode/fs'
+import { canonicalPath, normalizePath } from '@lcode/fs'
 import { createFsMutationAuthority, createLocalFs } from './fs-local.ts'
 import type { FsService } from '@lcode/fs'
 
@@ -261,5 +261,26 @@ describe('路径：相对工作区解析成绝对路径', () => {
     // fs-local 只负责解析，**不负责拦**——"算不算工作区内"是接口层的事（20 §6.1）
     expect(r.path).toBe(normalizePath(join(root, '..', 'outside.txt')))
     rmSync(join(root, '..', 'outside.txt'), { force: true })
+  })
+})
+
+describe('真实路径（canonicalPath）', () => {
+  it('跟随目录链接解析到目标；写入许可也按真实路径匹配', async () => {
+    const outside = mkdtempSync(join(tmpdir(), 'lcode-fs-out-'))
+    try {
+      const link = join(root, 'escape')
+      symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+      const realOutside = realpathSync.native(outside).replaceAll('\\', '/')
+      expect(canonicalPath(join(link, 'a.txt'))).toBe(`${realOutside}/a.txt`)
+
+      const authority = createFsMutationAuthority()
+      const guarded = createLocalFs({ workspaceRoot: root, mutationAuthority: authority })
+      const access = { sessionId: 's', callId: 'c' }
+      authority.grant({ ...access, paths: [join(link, 'a.txt')] })
+      await guarded.write('escape/a.txt', 'outside', { mutationAccess: access })
+      expect(readFileSync(join(outside, 'a.txt'), 'utf8')).toBe('outside')
+    } finally {
+      rmSync(outside, { recursive: true, force: true })
+    }
   })
 })

@@ -25,3 +25,28 @@ describe('sandbox-macos', () => {
     expect(wrapped.wrappedArgv.join(' ')).not.toContain('network-outbound')
   })
 })
+
+describe('sandbox-macos 档位与 PTY', () => {
+  it('完全访问档不包装 argv（按定义不设文件/网络边界）', async () => {
+    const sandbox = createMacosSandbox({ platform: 'darwin', sandboxExecPath: process.execPath })
+    await expect(sandbox.wrap(['node', 'task.mjs'], { ...policy, mode: 'danger-full-access' })).resolves.toEqual({
+      enforced: true,
+      mechanism: 'none (full access)',
+      wrappedArgv: ['node', 'task.mjs'],
+    })
+  })
+
+  it('PTY 与普通命令共用 sandbox-exec 包装，交互终端不再裸启', async () => {
+    const sandbox = createMacosSandbox({ platform: 'darwin', sandboxExecPath: process.execPath })
+    const wrapped = await sandbox.wrapPty?.(['/bin/zsh'], policy)
+    expect(wrapped?.enforced).toBe(true)
+    expect(wrapped?.wrappedArgv[0]).toBe(process.execPath)
+    expect(wrapped?.wrappedArgv).toContain('-p')
+    expect(wrapped?.wrappedArgv.slice(-2)).toEqual(['--', '/bin/zsh'])
+  })
+
+  it('只读档 profile 不包含 file-write 规则', async () => {
+    const profile = createSeatbeltProfile({ ...policy, mode: 'read-only' })
+    expect(profile).not.toContain('file-write*')
+  })
+})

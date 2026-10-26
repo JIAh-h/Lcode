@@ -248,6 +248,7 @@ export interface TaskBridge {
 export interface PlanBridge {
   enter(input: { readonly session_id: string }): Promise<unknown>
   confirm(input: { readonly session_id: string }): Promise<unknown>
+  cancel(input: { readonly session_id: string }): Promise<unknown>
 }
 
 export interface WorkspaceTrustBridge {

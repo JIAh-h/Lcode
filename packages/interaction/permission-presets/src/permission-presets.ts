@@ -15,10 +15,11 @@ import { dirname, resolve } from 'node:path'
  * | 预设 | `sandbox/mode` | `approval/policy` | 用户预期 |
  * |---|---|---|---|
  * | 只读 | `read-only` | `ask` | 它只能看，不能改 |
- * | **标准**（默认） | `workspace-write` | `ask` | 能改我的项目，动手前问我 |
- * | 自动 | `workspace-write` | `never` | 受系统级沙箱约束时，工作区内自行执行 |
+ * | **工作区内修改**（默认） | `workspace-write` | `ask` | 能改工作区内的文件，动手前问我 |
  * | 完全访问 | `danger-full-access` | `ask` | 哪里都能碰，但动手前问我 |
- * | 无人值守 | `workspace-write` | `never` | 受系统级沙箱约束时用于自动化 |
+ *
+ * 2026-10-26 收敛为三档：移除「自动审批 / 无人值守」。产品上不再提供“不问人”
+ * 的权限档；`never` 策略保留在底层（审批通道缺席时仍 fail-closed），只是没有预设映射。
  *
  * ## `never` **不等于**"默认允许"
  *
@@ -27,7 +28,7 @@ import { dirname, resolve } from 'node:path'
  * 把 `never` 实现成放行，等于把"无人值守"变成"无防护"。
  */
 
-export const PERMISSION_PRESETS = ['只读', '标准', '自动', '完全访问', '无人值守'] as const
+export const PERMISSION_PRESETS = ['只读', '工作区内修改', '完全访问'] as const
 export type PermissionPreset = (typeof PERMISSION_PRESETS)[number]
 
 /** `approval/policy` 的两个取值 */
@@ -41,21 +42,17 @@ export interface PresetKnobs {
 /** 预设 → 两条轴（12 §3.3 的表格，逐格对应） */
 export const PRESET_KNOBS: Readonly<Record<PermissionPreset, PresetKnobs>> = {
   只读: { sandboxMode: 'read-only', approvalPolicy: 'ask' },
-  标准: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
-  自动: { sandboxMode: 'workspace-write', approvalPolicy: 'never' },
+  工作区内修改: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
   完全访问: { sandboxMode: 'danger-full-access', approvalPolicy: 'ask' },
-  无人值守: { sandboxMode: 'workspace-write', approvalPolicy: 'never' },
 }
 
-export const DEFAULT_PRESET: PermissionPreset = '标准'
+export const DEFAULT_PRESET: PermissionPreset = '工作区内修改'
 
 /** 预设的用户可读说明（与 UI 里那份是同一段文字） */
 export const PRESET_HINT: Readonly<Record<PermissionPreset, string>> = {
   只读: '它只能看，不能改',
-  标准: '能改我的项目，动手前问我',
-  自动: '受系统级沙箱约束时，工作区内自行执行',
+  工作区内修改: '能改工作区内的文件；越界或高风险动作前问你',
   完全访问: '哪里都能碰，但动手前问我',
-  无人值守: '受系统级沙箱约束时用于自动化',
 }
 
 export function isPermissionPreset(value: unknown): value is PermissionPreset {
@@ -207,20 +204,33 @@ export function createLocalPermissionPresets(options: LocalPermissionPresetsOpti
   }
 }
 
+/**
+ * 旧版本落盘的预设名 → 当前词表。
+ * 2026-10-26 收敛为三档：旧的 `标准` / `自动` / `自动审批` / `无人值守` 统一迁移到
+ * `工作区内修改`（更保守：自动审批原本不问人，现在会恢复逐次审批）。
+ */
+function normalizePreset(value: unknown): PermissionPreset | undefined {
+  if (value === '标准' || value === '自动' || value === '自动审批' || value === '无人值守') return '工作区内修改'
+  return isPermissionPreset(value) ? value : undefined
+}
+
 function loadPersisted(file: string): PersistedPermissionPresets {
   const fallback: PersistedPermissionPresets = { version: 1, preset: DEFAULT_PRESET, source: 'default', audit: [] }
   if (!existsSync(file)) return fallback
   try {
     const value = JSON.parse(readFileSync(file, 'utf8')) as Partial<PersistedPermissionPresets>
-    if (value.version !== 1 || !isPermissionPreset(value.preset) || value.source !== 'user' || typeof value.changedAt !== 'number' || !Array.isArray(value.audit)) {
+    const preset = normalizePreset(value.preset)
+    if (value.version !== 1 || preset === undefined || value.source !== 'user' || typeof value.changedAt !== 'number' || !Array.isArray(value.audit)) {
       return fallback
     }
-    const audit = value.audit.flatMap((entry) =>
-      isPermissionPreset(entry?.from) && isPermissionPreset(entry?.to) && typeof entry.changedAt === 'number'
-        ? [{ from: entry.from, to: entry.to, changedAt: entry.changedAt }]
-        : [],
-    ).slice(0, 20)
-    return { version: 1, preset: value.preset, source: 'user', changedAt: value.changedAt, audit }
+    const audit = value.audit.flatMap((entry) => {
+      const from = normalizePreset(entry?.from)
+      const to = normalizePreset(entry?.to)
+      return from !== undefined && to !== undefined && typeof entry.changedAt === 'number'
+        ? [{ from, to, changedAt: entry.changedAt }]
+        : []
+    }).slice(0, 20)
+    return { version: 1, preset, source: 'user', changedAt: value.changedAt, audit }
   } catch {
     // 损坏配置不能变成更宽松的权限，安全回落到默认“标准”。
     return fallback

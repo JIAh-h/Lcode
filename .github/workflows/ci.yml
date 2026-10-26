@@ -90,3 +90,31 @@ jobs:
 
       - name: 索引体积与容量基线
         run: pnpm check:index-size:test && pnpm check:index-size
+
+  # Windows 原生沙箱：真实创建 AppContainer、临时授予/撤销工作区 ACL，并验证
+  # 只读拒写 / 工作区读写 / 完全访问越界 / 网络 deny / Job Object 清理。
+  # 只在 Windows runner 上跑；smoke 自身会在 finally 里撤销临时 ACL。
+  sandbox-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.12.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: 安装依赖
+        run: pnpm install --frozen-lockfile
+
+      - name: 构建 Windows 沙箱 helper
+        run: pnpm native:build-sandbox-win32
+
+      - name: 沙箱真机验收（三档）
+        env:
+          LCODE_E2E_SANDBOX_WIN32: '1'
+        run: node scripts/smoke-sandbox-win32.mjs

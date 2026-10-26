@@ -15,7 +15,7 @@ import type {
   FsWriteOpts,
   FsWriteResult,
 } from '@lcode/fs'
-import { normalizePath } from '@lcode/fs'
+import { canonicalPath, normalizePath } from '@lcode/fs'
 import { ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 import { readFileSync } from 'node:fs'
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
@@ -61,7 +61,7 @@ export function createFsMutationAuthority(): FsMutationAuthority {
   return {
     grant(grant): void {
       if (grant.sessionId === '' || grant.callId === '' || grant.paths.length === 0) return
-      grants.set(keyOf(grant), new Set(grant.paths.map((path) => normalizePath(resolve(path)))))
+      grants.set(keyOf(grant), new Set(grant.paths.map((path) => canonicalPath(path))))
     },
     consume(access, path): void {
       if (access === undefined || access.sessionId === '' || access.callId === '') {
@@ -75,7 +75,7 @@ export function createFsMutationAuthority(): FsMutationAuthority {
       const key = keyOf(access)
       const paths = grants.get(key)
       grants.delete(key)
-      const target = normalizePath(resolve(path))
+      const target = canonicalPath(path)
       if (paths?.has(target) === true) return
       throw new LcodeErrorImpl({
         code: ERROR_CODES.ET_DENIED,
@@ -132,7 +132,8 @@ export function createLocalFs(options: LocalFsOptions): FsService {
     },
 
     async write(path: string, data: string, opts: FsWriteOpts = {}): Promise<FsWriteResult> {
-      const file = abs(path)
+      // 真实路径：写入许可与落盘都必须跟随 symlink，避免“判定是工作区内、实际写到外面”
+      const file = canonicalPath(abs(path))
       options.mutationAuthority?.consume(opts.mutationAccess, file)
       const created = !(await exists(file))
       let before = ''
@@ -159,7 +160,7 @@ export function createLocalFs(options: LocalFsOptions): FsService {
     },
 
     async edit(input: FsEditInput): Promise<FsEditResult> {
-      const file = abs(input.path)
+      const file = canonicalPath(abs(input.path))
       options.mutationAuthority?.consume(input.mutationAccess, file)
       let text: string
       try {

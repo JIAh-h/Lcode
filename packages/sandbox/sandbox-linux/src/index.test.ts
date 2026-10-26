@@ -7,6 +7,7 @@ describe('sandbox-linux', () => {
   it('没有 Linux native helper 时 fail-closed', async () => {
     const sandbox = createLinuxSandbox({ platform: 'linux' })
     expect((await sandbox.status()).capabilities.boundaries.filesystem.state).toBe('unavailable')
+    expect((await sandbox.status()).providerAvailable).toBe(false)
     expect((await sandbox.wrap(['node', 'task.mjs'], policy)).enforced).toBe(false)
   })
 
@@ -17,6 +18,6 @@ describe('sandbox-linux', () => {
     }
     const sandbox = createLinuxSandbox({ platform: 'linux', bridge })
     expect((await sandbox.status()).available).toBe(true)
-    expect(await sandbox.wrap(['node', 'task.mjs'], policy)).toEqual({ enforced: true, wrappedArgv: ['lcode-sandbox-linux', '--', 'node', 'task.mjs'] })
+    expect(await sandbox.wrap(['node', 'task.mjs'], policy)).toEqual({ enforced: true, mechanism: 'Landlock + seccomp', wrappedArgv: ['lcode-sandbox-linux', '--', 'node', 'task.mjs'] })
   })
 })

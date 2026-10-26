@@ -1,6 +1,6 @@
 import type { SpawnedPty, SubprocessService } from '@lcode/subprocess'
 import { createLocalSubprocess } from '@lcode/subprocess-local'
-import type { TerminalInfo, TerminalOpenInput, TerminalReadResult, TerminalService } from '@lcode/terminal'
+import type { TerminalInfo, TerminalOpenInput, TerminalReadResult, TerminalSandboxPolicy, TerminalService } from '@lcode/terminal'
 import { ERROR_CODES, LcodeErrorImpl, newId } from '@lcode/util'
 import { resolve } from 'node:path'
 
@@ -24,14 +24,9 @@ export interface LocalTerminalOptions {
 }
 
 export interface PtySandboxStatusSource {
-  status(): Promise<{ readonly degraded: boolean; readonly reason?: string | undefined }>
-  wrapPty?(argv: readonly string[], policy: PtySandboxPolicy): Promise<PtySandboxWrapResult>
-}
-
-/** 终端只需要这一小段沙箱契约，避免 terminal 层反向依赖平台 Provider。 */
-interface PtySandboxPolicy {
-  readonly mode: 'read-only' | 'workspace-write' | 'danger-full-access'
-  readonly workspaceRoot: string
+  status(): Promise<{ readonly degraded: boolean; readonly reason?: string | undefined; readonly providerAvailable?: boolean | undefined }>
+  /** ownerAgentId 用于把沙箱结果写回会话审计（桌面端 agent id 即 session id）。 */
+  wrapPty?(argv: readonly string[], policy: TerminalSandboxPolicy, ownerAgentId?: string): Promise<PtySandboxWrapResult>
 }
 
 interface PtySandboxWrapResult {
@@ -97,7 +92,8 @@ export class LocalTerminalService implements TerminalService {
     const cwd = resolve(input.cwd ?? this.options.workspaceRoot)
     const shell = input.shell ?? defaultShell()
     const terminalId = `term-${newId(16).toLowerCase()}`
-    const launch = await this.preparePtyLaunch(shell, cwd)
+    const sandboxPolicy = input.sandboxPolicy ?? { mode: 'workspace-write' as const, workspaceRoot: cwd }
+    const launch = await this.preparePtyLaunch(shell, sandboxPolicy, input.ownerAgentId)
     const spawnPty = this.subprocess.spawnPty
     if (spawnPty === undefined) {
       throw new LcodeErrorImpl({
@@ -258,7 +254,7 @@ export class LocalTerminalService implements TerminalService {
     return record
   }
 
-  private async preparePtyLaunch(shell: string, cwd: string): Promise<{ readonly argv: readonly string[] }> {
+  private async preparePtyLaunch(shell: string, policy: TerminalSandboxPolicy, ownerAgentId: string): Promise<{ readonly argv: readonly string[] }> {
     if (this.sandbox === undefined) return { argv: [shell] }
     let status: Awaited<ReturnType<PtySandboxStatusSource['status']>>
     try {
@@ -272,7 +268,9 @@ export class LocalTerminalService implements TerminalService {
     }
     // Windows 的工作区 ACL 在首次获批启动时由原生 helper 准备。此时 status 仍可能
     // 是 degraded，但只要 Provider 能包装 PTY，就必须先走受控 helper；不能因此裸启 shell。
-    if (status.degraded && this.sandbox.wrapPty === undefined) return { argv: [shell] }
+    // 反过来，Provider 明确不可用（providerAvailable === false，例如 macOS 没有
+    // sandbox-exec）时按既有降级路径处理，由权限钩子负责审批/拒绝。
+    if (status.degraded && (this.sandbox.wrapPty === undefined || status.providerAvailable === false)) return { argv: [shell] }
     if (this.sandbox.wrapPty === undefined) {
       throw new LcodeErrorImpl({
         code: ERROR_CODES.EC_NOT_READY,
@@ -282,7 +280,7 @@ export class LocalTerminalService implements TerminalService {
     }
     let wrapped: PtySandboxWrapResult
     try {
-      wrapped = await this.sandbox.wrapPty([shell], { mode: 'workspace-write', workspaceRoot: cwd })
+      wrapped = await this.sandbox.wrapPty([shell], policy, ownerAgentId)
     } catch (cause) {
       throw new LcodeErrorImpl({
         code: ERROR_CODES.EC_NOT_READY,

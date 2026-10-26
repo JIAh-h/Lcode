@@ -21,6 +21,13 @@ export { LocalSettingsService } from './settings-service.ts'
 export type { LocalSettingsOptions } from './settings-service.ts'
 
 // ── 自定义模型配置（18 §2；T4.2 的写路径） ──
-export { MODEL_FIELD_DESCRIPTORS, SETTINGS_NAMESPACE, providerSettingKeys } from './namespace.ts'
+export {
+  MODEL_FIELD_DESCRIPTORS,
+  SETTINGS_NAMESPACE,
+  providerSettingKeys,
+  WEB_SEARCH_FIELD_DESCRIPTORS,
+  WEB_SEARCH_NAMESPACE,
+  webSearchSettingKeys,
+} from './namespace.ts'
 export { CustomModelStore } from './model-store.ts'
 export type { CustomModelConfig, CustomModelInput, CustomModelStoreDeps } from './model-store.ts'

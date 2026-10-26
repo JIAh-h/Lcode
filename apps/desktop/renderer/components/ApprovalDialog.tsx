@@ -35,7 +35,11 @@ interface ApprovalBasis {
 
 interface ApprovalImpact {
   readonly paths?: readonly { path: string; mode: 'read' | 'write'; outsideWorkspace: boolean }[] | undefined
-  readonly network?: { readonly domains: readonly string[] } | undefined
+  readonly network?: {
+    readonly domains: readonly string[]
+    readonly url?: string | undefined
+    readonly scope?: 'call' | 'terminal' | undefined
+  } | undefined
   readonly env?: readonly string[] | undefined
   readonly sandboxChange?: { readonly from: string; readonly to: string } | undefined
   readonly sandbox?: { readonly status: 'degraded'; readonly mechanism: string; readonly reason: string } | undefined
@@ -126,12 +130,21 @@ export function ApprovalDialog() {
 
         {domains.length > 0 && (
           <div className="ap-danger">
-            <div className="ap-danger-title">{t('它要把数据发到这些站点')}</div>
+            <div className="ap-danger-title">{domains.includes('*') ? t('这条命令需要访问网络') : t('它要把数据发到这些站点')}</div>
             {domains.map((d) => (
               <div className="ap-path mono" key={d}>
-                ⇢ {d}
+                ⇢ {d === '*'
+                  ? request.impact.network?.scope === 'terminal'
+                    ? t('任意域名（关闭终端前有效）')
+                    : t('任意域名（仅本次命令）')
+                  : d}
               </div>
             ))}
+            {request.impact.network?.url === undefined ? null : (
+              <div className="ap-url mono" title={request.impact.network.url}>
+                {t('请求地址：')}{request.impact.network.url}
+              </div>
+            )}
           </div>
         )}
 

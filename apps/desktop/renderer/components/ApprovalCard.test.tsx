@@ -11,7 +11,7 @@ describe('ApprovalCard', () => {
         basis={{ source: 'preset', presetName: '标准', reason: '该命令未在项目中出现过' }}
         impact={{
           paths: [{ path: 'C:/outside/.env', mode: 'write', outsideWorkspace: true }],
-          network: { domains: ['deploy.example.com'] },
+          network: { domains: ['deploy.example.com'], url: 'https://deploy.example.com/hook?q=visible' },
           env: ['DEPLOY_TOKEN'],
           sandboxChange: { from: 'read-only', to: 'workspace-write' },
           sandbox: { status: 'degraded', mechanism: 'none', reason: 'Windows 原生隔离尚未接入' },
@@ -24,6 +24,8 @@ describe('ApprovalCard', () => {
     expect(html).toContain('无人应答，已安全拒绝')
     expect(html).toContain('C:/outside/.env')
     expect(html).toContain('deploy.example.com')
+    expect(html).toContain('https://deploy.example.com/hook?q=visible')
+    expect(html).toContain('请求地址：')
     expect(html).toContain('read-only')
     expect(html).toContain('Windows 原生隔离尚未接入')
     expect(html).toContain('DEPLOY_TOKEN')

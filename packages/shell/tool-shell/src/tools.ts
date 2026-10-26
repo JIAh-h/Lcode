@@ -1,4 +1,5 @@
 import type { ShellService } from '@lcode/shell'
+import { sandboxPolicyOf } from '@lcode/tools'
 import type { ToolDefinition } from '@lcode/tools'
 
 /**
@@ -69,11 +70,12 @@ export function createShellTool(deps: ToolShellDeps): ToolDefinition {
         timeoutMs: { type: 'number', description: `超时（毫秒，默认 ${DEFAULT_TIMEOUT_MS}）` },
         workdir: { type: 'string', description: '在哪跑（默认工作区根）' },
         runInBackground: { type: 'boolean', description: '放到后台跑（立即返回 jobId）' },
+        network: { type: 'boolean', description: '这条命令需要联网（会弹一次性审批，仅本次调用放开网络）' },
       },
       required: ['command', 'description'],
     },
     describeAction: (parsed) => {
-      const p = parsed as { command: string; description: string; workdir?: string }
+      const p = parsed as { command: string; description: string; workdir?: string; network?: boolean }
       return {
         summary: p.description,
         // argv 给策略层判断"这是不是一条新命令/破坏性命令"。
@@ -81,6 +83,7 @@ export function createShellTool(deps: ToolShellDeps): ToolDefinition {
         // 可执行文件与第一个子命令（`git push` vs `git log`）。
         argv: roughArgv(p.command),
         ...(p.workdir === undefined ? {} : { paths: [{ path: p.workdir, mode: 'read' as const }] }),
+        ...(p.network === true ? { network: true } : {}),
       }
     },
     execute: async (call, opts) => {
@@ -91,15 +94,17 @@ export function createShellTool(deps: ToolShellDeps): ToolDefinition {
         runInBackground?: boolean
       }
       const argv = shellArgvFor(p.command)
+      const workspace = p.workdir ?? workspaceOfCall(opts.scope) ?? workspaceRoot
       const result = await shell.run(argv, {
         // 按会话的工作区跑，而不是进程启动目录（见 ToolShellDeps.workspaceOf）
-        cwd: p.workdir ?? workspaceOfCall(opts.scope) ?? workspaceRoot,
+        cwd: workspace,
         timeoutMs: p.timeoutMs ?? defaultTimeoutMs,
         signal: opts.signal,
         ...(agentIdOf(opts.scope) === undefined ? {} : { ownerAgentId: agentIdOf(opts.scope) }),
         ...(p.runInBackground === undefined ? {} : { runInBackground: p.runInBackground }),
-        // 与实际 cwd 同一个根交给沙箱，避免多工作区会话错误复用进程级 cwd。
-        sandboxPolicy: { mode: 'workspace-write', workspaceRoot: p.workdir ?? workspaceOfCall(opts.scope) ?? workspaceRoot },
+        // 档位由权限钩子按当前预设写入 scope；缺省（直接调用/测试）才回落到 workspace-write。
+        sandboxPolicy: sandboxPolicyOf(opts.scope) ?? { mode: 'workspace-write', workspaceRoot: workspace },
+        scope: opts.scope,
       })
       return result as never
     },

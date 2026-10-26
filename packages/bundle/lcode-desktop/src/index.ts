@@ -11,6 +11,25 @@
 
 export { createAgentRuntime } from './agent-runtime.ts'
 export type { AgentRuntime, AgentRuntimeOptions } from './agent-runtime.ts'
+export { buildBuiltinPluginCatalog } from './builtin-plugins.ts'
+export { BUILTIN_AGENT_PRESETS } from './builtin-presets.ts'
+export {
+  createLocalAgentPresetSetting,
+  SELECTABLE_AGENT_PRESETS,
+} from './agent-preset-setting.ts'
+export type {
+  AgentPresetId,
+  AgentPresetSettingService,
+  AgentPresetSnapshot,
+} from './agent-preset-setting.ts'
+export type {
+  BuiltinPluginCatalog,
+  BuiltinPluginGroup,
+  BuiltinPluginMode,
+  BuiltinPluginModeId,
+  BuiltinPluginModeState,
+  BuiltinPluginView,
+} from './builtin-plugins.ts'
 export { buildUserContent } from './user-content.ts'
 export type { ImageAttachmentWriter, SkillSource, UserContentInput } from './user-content.ts'
 export { attachmentRefsOf, gcAttachments, putAttachment, readAttachment } from '@lcode/session-api'

@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import type { SessionEvent } from '@lcode/session'
+import type { PlanArtifact, SessionEvent } from '@lcode/session'
 import { ComposerBar, type ComposerSendInput } from '../components/ComposerBar.tsx'
 import { ContextBar } from '../components/ContextBar.tsx'
 import { CompactionDialog } from '../components/CompactionDialog.tsx'
+import { PlanReviewDialog } from '../components/PlanReviewDialog.tsx'
 import { SessionStream } from '../components/SessionStream.tsx'
 import { SessionActionsMenu } from '../components/SessionActionsMenu.tsx'
 import { TaskPanel } from '../components/TaskPanel.tsx'
 import { toast } from '../components/toast.ts'
 import { t } from '../i18n/index.ts'
 import { agentBridge, notifySessionChanged, planBridge, sessionBridge, workspaceInfoBridge, workspaceTrustBridge, type QueuedMessage, type SessionContextUsage, type SessionMeta, type WorkspaceGitInfo } from '../store/sessionBridge.ts'
+import { agentPresetLabel, getAgentPreset } from '../store/agentPresetSync.ts'
+import type { AgentPresetId } from '../store/agentPresetSync.ts'
 
 type Tab = 'changes' | 'files' | 'tasks'
 type Change = {
@@ -72,6 +75,21 @@ function planReadyFrom(events: readonly SessionEvent[]): boolean {
     if (active && event.type === 'plan/proposed') ready = true
   }
   return active && ready
+}
+
+/** 当前计划模式下最新提交、尚未确认的计划。 */
+function pendingPlanFrom(events: readonly SessionEvent[]): { readonly seq: number; readonly plan: PlanArtifact } | undefined {
+  let active = false
+  let latest: { readonly seq: number; readonly plan: PlanArtifact } | undefined
+  for (const event of events) {
+    if (event.type === 'plan/mode') {
+      active = event.data.active
+      if (active) latest = undefined
+    } else if (active && event.type === 'plan/proposed') {
+      latest = { seq: event.seq, plan: event.data.plan }
+    }
+  }
+  return active ? latest : undefined
 }
 
 function workspaceTrustFrom(events: readonly SessionEvent[]): { readonly workspace: string; readonly trusted: boolean } | null {
@@ -254,9 +272,39 @@ export function WorkspacePage() {
   const changes = useMemo(() => changesFrom(events), [events])
   const planActive = useMemo(() => planActiveFrom(events), [events])
   const planReady = useMemo(() => planReadyFrom(events), [events])
+  const pendingPlan = useMemo(() => pendingPlanFrom(events), [events])
   const workspaceTrust = useMemo(() => workspaceTrustFrom(events), [events])
   const composerAction = useMemo(() => primaryActionFrom(events), [events])
   const agentRunning = composerAction === 'pause'
+
+  /*
+   * 计划提交后自动弹确认框。
+   *
+   * 时机选在**本轮结束后**：submit_plan 是工具调用，先落 plan/proposed；
+   * 若立刻弹窗，用户会在模型还在收尾时被打断。关掉后同一份计划不再自动重弹，
+   * 状态 chip 里仍保留「开始执行」。
+   */
+  const [reviewPlanSeq, setReviewPlanSeq] = useState<number | null>(null)
+  const dismissedPlanSeq = useRef<number | null>(null)
+  const [agentPreset, setAgentPreset] = useState<AgentPresetId | null>(null)
+  useEffect(() => {
+    void getAgentPreset()
+      .then((state) => setAgentPreset(state?.preset ?? null))
+      .catch(() => setAgentPreset(null))
+  }, [sessionId])
+  useEffect(() => {
+    dismissedPlanSeq.current = null
+    setReviewPlanSeq(null)
+  }, [sessionId])
+  useEffect(() => {
+    if (!planActive || pendingPlan === undefined) {
+      setReviewPlanSeq(null)
+      return
+    }
+    if (agentRunning) return
+    if (pendingPlan.seq === dismissedPlanSeq.current) return
+    setReviewPlanSeq(pendingPlan.seq)
+  }, [planActive, pendingPlan, agentRunning])
 
   // 状态栏：上下文占用。轮结束、压缩结束、发送成功后各刷新一次（不逐 chunk 轮询）。
   useEffect(() => {
@@ -365,13 +413,41 @@ export function WorkspacePage() {
       toast(t('当前环境没有主进程桥，无法切换计划模式'))
       return
     }
-    const action = planActive ? api.confirm({ session_id: sessionId }) : api.enter({ session_id: sessionId })
+    const wasActive = planActive
+    const action = wasActive ? api.confirm({ session_id: sessionId }) : api.enter({ session_id: sessionId })
     void action.then(() => {
-      if (planActive) toast(t('计划已确认，开始执行'))
+      if (wasActive) toast(t('计划已确认，开始执行'))
+      else toast(t('已进入计划模式：只读探索，确认计划后才会改动'))
       notifySessionChanged()
     }).catch((err: unknown) => {
       toast(err instanceof Error ? err.message : t('切换计划模式失败'))
     })
+  }
+
+  const cancelPlan = (): void => {
+    if (sessionId === undefined) return
+    const api = planBridge()
+    if (api === undefined) {
+      toast(t('当前环境没有主进程桥，无法切换计划模式'))
+      return
+    }
+    void api.cancel({ session_id: sessionId }).then(() => {
+      toast(t('已退出计划模式'))
+      notifySessionChanged()
+    }).catch((err: unknown) => {
+      toast(err instanceof Error ? err.message : t('切换计划模式失败'))
+    })
+  }
+
+  const reviewPlan = pendingPlan !== undefined && reviewPlanSeq === pendingPlan.seq ? pendingPlan : undefined
+  const laterPlan = (): void => {
+    if (reviewPlan !== undefined) dismissedPlanSeq.current = reviewPlan.seq
+    setReviewPlanSeq(null)
+  }
+  const confirmPlan = (): void => {
+    if (reviewPlan !== undefined) dismissedPlanSeq.current = reviewPlan.seq
+    setReviewPlanSeq(null)
+    planAction()
   }
 
   const guideQueued = (queueId: string): void => {
@@ -445,12 +521,17 @@ export function WorkspacePage() {
         <span className="wscumb">
           {workspaceLabel} / {meta?.title || t('未命名会话')}
         </span>
-        <SessionActionsMenu
-          session={{ session_id: sessionId, title: meta?.title ?? '' }}
-          buttonClass="wstitleact"
-          onRenamed={(title) => setMeta((prev) => (prev === null ? prev : { ...prev, title }))}
-          onRemoved={() => navigate('/')}
-        />
+        <span className="wstitleactions">
+          <SessionActionsMenu
+            session={{ session_id: sessionId, title: meta?.title ?? '' }}
+            buttonClass="wstitleact"
+            onRenamed={(title) => setMeta((prev) => (prev === null ? prev : { ...prev, title }))}
+            onRemoved={() => navigate('/')}
+          />
+          {agentPreset === null ? null : (
+            <span className="wspreset" title={t('Agent 预设（设置 → Agent 预设）')}>{agentPresetLabel(agentPreset)}</span>
+          )}
+        </span>
         <span className="wsp" />
         <button className="ticon" title={t('回放时间轴')} onClick={() => navigate(`/sessions/${sessionId}/replay`)}>
           ⏱
@@ -497,6 +578,7 @@ export function WorkspacePage() {
                 planActive={planActive}
                 planReady={planReady}
                 onPlanAction={planAction}
+                onPlanCancel={cancelPlan}
                 queued={queued}
                 onGuideQueued={guideQueued}
                 onEditQueued={editQueued}
@@ -557,6 +639,9 @@ export function WorkspacePage() {
           />
         ) : null}
       </div>
+      {reviewPlan !== undefined ? (
+        <PlanReviewDialog plan={reviewPlan.plan} onLater={laterPlan} onConfirm={confirmPlan} />
+      ) : null}
       {shouldConfirmTrust ? (
         <div className="overlay" role="dialog" aria-modal="true" aria-labelledby="workspace-trust-title">
           <div className="modal" style={{ width: 500 }}>

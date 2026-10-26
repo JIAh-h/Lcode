@@ -1,11 +1,12 @@
 import type { Context } from '@lcode/context'
 import type { ApprovalService } from '@lcode/approval'
-import { normalizePath } from '@lcode/fs'
+import { canonicalPath } from '@lcode/fs'
 import type { FsMutationAuthority } from '@lcode/fs'
 import type { Impact, SessionService } from '@lcode/session'
 import '@lcode/sandbox'
 import type { SandboxService, SandboxStatus } from '@lcode/sandbox'
 import type { ToolActionIntent, ToolCall } from '@lcode/tools'
+import { withSandboxPolicy, withWebNetworkPolicy } from '@lcode/tools'
 import { ERROR_CODES } from '@lcode/util'
 import { evaluate } from './policy.ts'
 import { knobsOf } from './permission-presets.ts'
@@ -48,6 +49,25 @@ export interface ToolExecutionScope {
   readonly agentId: string
 }
 
+export interface WebAllowlistPort {
+  listFor(workspace: string): readonly string[]
+  add(workspace: string, domains: readonly string[]): void
+  removeWorkspace?(workspace: string): void
+}
+
+/** 跨会话网络审计的写入侧；具体落盘实现由装配层提供。 */
+export interface NetworkAuditPort {
+  append(entry: {
+    readonly sessionId: string
+    readonly workspace: string
+    readonly tool: string
+    readonly domain: string
+    readonly decision: 'allowed' | 'denied'
+    readonly url?: string | undefined
+    readonly detail?: string | undefined
+  }): void
+}
+
 export interface PolicyHookOptions {
   readonly ctx: Context
   /** 审批服务。缺失 = 一律 `unavailable`（fail-closed），这是**合法**配置（无人值守） */
@@ -67,6 +87,12 @@ export interface PolicyHookOptions {
   /** "项目已见命令集"（启发式；省略则不据它判定） */
   readonly seenCommands?: ReadonlySet<string> | undefined
   readonly seenDomains?: ReadonlySet<string> | undefined
+  /** web 工具的按工作区域名白名单；审批通过的域名会写入这里。 */
+  readonly webAllowlist?: WebAllowlistPort | undefined
+  /** 跨会话网络审计；省略时只把事实写进会话日志。 */
+  readonly networkAudit?: NetworkAuditPort | undefined
+  /** 每轮 `web_search` 调用上限；省略不限制。 */
+  readonly maxWebSearchesPerTurn?: number | undefined
   /**
    * 文件 Provider 的一次性写入许可。只在本 hook 最终放行之后签发，避免
    * “审批已拒绝、底层却仍能直接写” 的能力旁路。
@@ -110,6 +136,91 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
       return next()
     }
 
+    /*
+     * 把**当前预设**解析出的沙箱档位挂到执行 scope 上：shell / terminal 等工具
+     * 必须按同一档位向 OS 沙箱申请，不能再各自硬编码 workspace-write。
+     * 网络默认拒绝；shell 的 `network:true` 在审批通过后只对本次调用放开。
+     */
+    const preset = presets.get()
+    const knobs = knobsOf(preset)
+    const scopedPolicy = {
+      mode: knobs.sandboxMode,
+      workspaceRoot,
+      allowNetwork: false,
+    }
+    payload.scope = withSandboxPolicy(payload.scope, scopedPolicy)
+    /** 只有本次审批通过时才把网络放开；每次调用都是一次性授权。 */
+    const grantNetwork = (): void => {
+      if (payload.intent?.network !== true || knobs.sandboxMode === 'read-only') return
+      payload.scope = withSandboxPolicy(payload.scope, { ...scopedPolicy, allowNetwork: true })
+    }
+    /** web 域名边界：审批通过的本次域名 + 工作区已记住的域名。 */
+    const approvedHosts = (payload.intent?.domains ?? []).filter((domain) => domain !== '*')
+    const allowlistedHosts = [...(options.webAllowlist?.listFor(workspaceRoot) ?? [])]
+    const grantWebNetwork = (): void => {
+      if (approvedHosts.length === 0 && allowlistedHosts.length === 0) return
+      payload.scope = withWebNetworkPolicy(payload.scope, { approvedHosts, allowlistedHosts })
+    }
+    const hasNetworkIntent = payload.intent.network === true || (payload.intent.domains?.length ?? 0) > 0
+    const recordNetwork = (decision: 'allowed' | 'denied', detail?: string): void => {
+      if (!hasNetworkIntent) return
+      const session = options.getSession(sessionId)
+      if (session === undefined) return
+      const domains = payload.intent?.domains ?? (payload.intent?.network === true ? ['*'] : [])
+      for (const domain of domains) {
+        const data = {
+          domain,
+          decision,
+          ...(payload.intent?.url === undefined ? {} : { url: payload.intent.url }),
+          ...(detail === undefined ? {} : { detail }),
+        }
+        session.append({ type: 'network/request', data })
+        options.networkAudit?.append({
+          sessionId,
+          workspace: workspaceRoot,
+          tool: payload.call.name,
+          domain,
+          decision,
+          ...(payload.intent?.url === undefined ? {} : { url: payload.intent.url }),
+          ...(detail === undefined ? {} : { detail }),
+        })
+      }
+    }
+    /** web 域名审批通过后按工作区记住；shell 的 `*` 不写入。 */
+    const rememberDomains = (): void => {
+      const domains = (payload.intent?.domains ?? []).filter((domain) => domain !== '*')
+      if (domains.length > 0) options.webAllowlist?.add(workspaceRoot, domains)
+    }
+    const seenDomains = new Set([...(options.seenDomains ?? []), ...allowlistedHosts])
+
+    /*
+     * 每轮搜索次数上限：控制搜索 API 费用与上下文体积。
+     * `tool/call` 由引擎在 execute 之前写入，所以当前这次调用已经在日志里。
+     */
+    const searchCap = options.maxWebSearchesPerTurn
+    if (payload.call.name === 'web_search' && searchCap !== undefined && searchCap > 0) {
+      const session = options.getSession(sessionId)
+      const calls = session !== undefined && typeof session.events === 'function'
+        ? session.events().filter((event) => event.type === 'tool/call')
+        : []
+      let currentTurn: number | undefined
+      for (let index = calls.length - 1; index >= 0; index -= 1) {
+        const event = calls[index]
+        if (event?.data.callId === payload.call.callId) {
+          currentTurn = event.data.turn
+          break
+        }
+      }
+      if (currentTurn !== undefined) {
+        const used = calls.filter((event) => event.data.turn === currentTurn && event.data.name === 'web_search').length
+        if (used > searchCap) {
+          payload.deny = `本轮网页搜索次数已达上限（${searchCap} 次）；请先使用已有结果，或在新一轮再搜索。`
+          recordNetwork('denied', 'turn-quota')
+          return next()
+        }
+      }
+    }
+
     // 首次打开的目录默认不可信。读取仍可用于了解项目；写、shell 与终端等副作用
     // 必须等用户在桌面弹窗/设置/CLI 显式授予精确目录信任后才进入后续策略与审批。
     if (isMutationIntent(payload.intent) && options.workspaceTrust?.isTrusted(workspaceRoot) === false) {
@@ -125,22 +236,39 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
         ...(payload.intent.paths === undefined ? {} : { paths: payload.intent.paths }),
         ...(payload.intent.argv === undefined ? {} : { argv: payload.intent.argv }),
         ...(payload.intent.domains === undefined ? {} : { domains: payload.intent.domains }),
+        ...(payload.intent.url === undefined ? {} : { url: payload.intent.url }),
+        ...(payload.intent.network === undefined ? {} : { network: payload.intent.network }),
+        ...(payload.intent.networkScope === undefined ? {} : { networkScope: payload.intent.networkScope }),
         ...(payload.intent.env === undefined ? {} : { env: payload.intent.env }),
       },
       {
-        preset: presets.get(),
+        preset,
         workspaceRoot,
         ...(options.seenCommands === undefined ? {} : { seenCommands: options.seenCommands }),
-        ...(options.seenDomains === undefined ? {} : { seenDomains: options.seenDomains }),
+        seenDomains,
       },
     )
 
     if (verdict.kind === 'deny') {
+      recordNetwork('denied', verdict.code)
       payload.deny = verdict.reason
       return next()
     }
 
     const sandboxStatus = await statusForMutation(options.sandbox, payload.intent)
+    /*
+     * 只读档的硬边界：没有系统级沙箱时，shell/终端等带副作用的调用不能靠
+     * “审批一次”放行——那等于只读档名存实亡。Provider 存在但工作区 ACL 尚未
+     * 首次授予时 providerAvailable 仍为 true，可以照常走审批 + prepare。
+     */
+    if (
+      knobs.sandboxMode === 'read-only' &&
+      isMutationIntent(payload.intent) &&
+      sandboxStatus?.providerAvailable !== true
+    ) {
+      payload.deny = `当前是「只读」预设，但系统级沙箱不可用${sandboxStatus?.reason === undefined ? '' : `（${sandboxStatus.reason}）`}；只读档不会在无约束环境里执行可能产生副作用的操作。`
+      return next()
+    }
     if (sandboxStatus?.degraded === true) {
       const session = options.getSession(sessionId)
       session?.append({
@@ -149,7 +277,7 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
       })
 
       // `never` 的含义不是“关闭询问就允许裸跑”。没有系统级边界时，不可询问
-      // 的自动/无人值守档必须拒绝；否则会把用户选择的“少打扰”变成“无防护”。
+      // 的自动审批档必须拒绝；否则会把用户选择的“少打扰”变成“无防护”。
       if (knobsOf(presets.get()).approvalPolicy === 'never') {
         payload.deny = `当前沙箱不可用，${sandboxStatus.reason ?? '无法强制约束此操作'}；此预设不询问，已按最保守方式拒绝`
         return next()
@@ -168,8 +296,16 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
         basis: forced.basis,
         impact: forced.impact,
       })
-      if (result !== 'allowed-once') payload.deny = denyReason(result)
-      else grantMutation(options.mutationAuthority, payload.call, sessionId, workspaceRoot, payload.intent)
+      if (result !== 'allowed-once') {
+        payload.deny = denyReason(result)
+        recordNetwork('denied', result)
+      } else {
+        grantMutation(options.mutationAuthority, payload.call, sessionId, workspaceRoot, payload.intent)
+        grantNetwork()
+        grantWebNetwork()
+        rememberDomains()
+        recordNetwork('allowed', 'approved-degraded')
+      }
       return next()
     }
 
@@ -184,12 +320,21 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
         basis: verdict.basis,
         impact: verdict.impact,
       })
-      if (result !== 'allowed-once') payload.deny = denyReason(result)
+      if (result !== 'allowed-once') {
+        payload.deny = denyReason(result)
+        recordNetwork('denied', result)
+      } else {
+        rememberDomains()
+        recordNetwork('allowed', 'approved')
+      }
     }
-    // verdict.kind === 'allow' → 什么都不做
+    // verdict.kind === 'allow'：域名已在白名单/本次无需审批，仍然留下审计。
+    if (verdict.kind === 'allow') recordNetwork('allowed', 'allowlisted')
 
     if (payload.deny === undefined) {
       grantMutation(options.mutationAuthority, payload.call, sessionId, workspaceRoot, payload.intent)
+      grantNetwork()
+      grantWebNetwork()
     }
 
     return next()
@@ -285,7 +430,7 @@ function grantMutation(
   if (authority === undefined) return
   const paths = (intent.paths ?? [])
     .filter((path) => path.mode === 'write')
-    .map((path) => normalizePath(resolve(workspaceRoot, path.path)))
+    .map((path) => canonicalPath(resolve(workspaceRoot, path.path)))
   if (paths.length === 0) return
   authority.grant({ sessionId, callId: call.callId, paths })
 }

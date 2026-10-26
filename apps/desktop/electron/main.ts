@@ -1,12 +1,15 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog, shell } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, dialog, session, shell } from "electron";
 import type { ImageAttachmentWriter } from "@lcode/lcode-desktop";
 import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
+  BUILTIN_AGENT_PRESETS,
+  SELECTABLE_AGENT_PRESETS,
+  buildBuiltinPluginCatalog,
   buildUserContent,
   createAgentRuntime,
   createDesktopModelFeature,
@@ -19,6 +22,13 @@ import {
 } from "@lcode/lcode-desktop";
 import type { AgentRuntime, DesktopModelFeature } from "@lcode/lcode-desktop";
 import { createApprovalService } from "@lcode/approval";
+import { createWebFetcher } from "@lcode/web-fetch";
+import {
+  createTavilySearchBackend,
+  createWebSearcher,
+  TAVILY_API_KEY_REF,
+  TAVILY_PROVIDER,
+} from "@lcode/web-search";
 import type { ApprovalChannel, ApprovalRequest } from "@lcode/approval";
 import type { ApprovalResult, ContentBlock } from "@lcode/session";
 
@@ -821,15 +831,78 @@ function abortPendingApprovals(): void {
   pendingApprovals.clear();
 }
 
+/**
+ * 读取 Electron/系统的代理设置，供 Node 侧 fetch 使用。
+ * 只支持 HTTP(S) 代理；PAC/SOCKS 只配置时返回 undefined（直连），避免悄悄绕过代理。
+ */
+async function resolveSystemProxy(target: string): Promise<string | undefined> {
+  try {
+    const raw = await session.defaultSession.resolveProxy(target);
+    for (const part of raw.split(";")) {
+      const [kind, host] = part.trim().split(/\s+/, 2);
+      if (host === undefined || host === "") continue;
+      if (kind === "PROXY" || kind === "HTTPS") return `http://${host}`;
+    }
+  } catch {
+    // 代理解析失败按直连处理，不阻断本地工具
+  }
+  return undefined;
+}
+
 async function agentRuntime(): Promise<AgentRuntime> {
   if (runtime !== null) return runtime;
   if (runtimeInit === null) {
     runtimeInit = (async () => {
       const feature = await models();
+      /*
+       * 网页工具：web_fetch 走域名白名单；web_search 默认内置 Tavily。
+       * Key 每次调用时从本机凭据服务读取，设置页保存后无需重启；没有 Key 时
+       * 工具仍可见，但会在执行阶段给出明确的配置提示。
+       */
+      const searcher = createWebSearcher(
+        createTavilySearchBackend({
+          resolveApiKey: async () =>
+            (await feature.services.credentials.resolve(TAVILY_API_KEY_REF))?.value,
+          resolveProxy: resolveSystemProxy,
+        }),
+      );
+      const searchMaxResults = (): number => {
+        const raw = feature.services.readSetting("webSearch.maxResults");
+        return typeof raw === "number" && Number.isFinite(raw)
+          ? Math.min(10, Math.max(1, Math.floor(raw)))
+          : 5;
+      };
       return createAgentRuntime({
         services: feature.services,
         approval: createApprovalService({ channel: approvalChannel }),
         builtinSkillsDir: join(__dirname, "skills"),
+        web: {
+          fetch: createWebFetcher(undefined, { resolveProxy: resolveSystemProxy }).fetch,
+          search: async (input) => {
+            const configured = searchMaxResults();
+            return searcher.search({
+              ...input,
+              maxResults: Math.min(configured, input.maxResults ?? configured),
+            });
+          },
+          searchProvider: searcher.provider,
+        },
+        webSearch: true,
+        /*
+         * 只给沙箱 helper 一个精确候选：
+         * - 打包态只认 resources/app/native；
+         * - 开发态认仓库里的构建产物。
+         * 不再让 Provider 按 process.cwd() 兜底，避免被同名文件替换。
+         */
+        ...(process.platform === "win32"
+          ? {
+              sandboxHelperPaths: [
+                app.isPackaged
+                  ? join(process.resourcesPath, "app", "native", "lcode-sandbox-win32.exe")
+                  : join(__dirname, "../../../packages/sandbox/sandbox-win32/native/lcode-sandbox-win32.exe"),
+              ],
+            }
+          : {}),
       });
     })();
   }
@@ -843,9 +916,141 @@ async function agentRuntime(): Promise<AgentRuntime> {
   return runtime;
 }
 
+// ─────────────── Agent 预设（全局默认；与权限预设正交） ───────────────
+
+ipcMain.handle("lcode:agentPreset.get", async () => (await agentRuntime()).ctx.get("agentPreset").snapshot());
+ipcMain.handle("lcode:agentPreset.set", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const preset = (input as { preset?: unknown } | null)?.preset;
+  if (typeof preset !== "string") throw new Error("preset 必填");
+  return (await agentRuntime()).ctx.get("agentPreset").set(preset as never);
+});
+ipcMain.handle("lcode:agentPreset.list", async () => {
+  const rt = await agentRuntime();
+  return {
+    presets: BUILTIN_AGENT_PRESETS.map((preset) => ({
+      id: preset.id,
+      name: preset.name,
+      description: preset.description,
+      available: (SELECTABLE_AGENT_PRESETS as readonly string[]).includes(preset.id),
+    })),
+    current: rt.ctx.get("agentPreset").snapshot(),
+  };
+});
+
+// ─────────────── web 域名白名单（按工作区） ───────────────
+
+ipcMain.handle("lcode:webAllowlist.list", async () => (await agentRuntime()).ctx.get("webAllowlist").snapshot());
+ipcMain.handle("lcode:webAllowlist.remove", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const workspace = record["workspace"];
+  const domain = record["domain"];
+  if (typeof workspace !== "string" || workspace === "" || typeof domain !== "string" || domain === "") throw new Error("workspace 与 domain 必填");
+  const allowlist = (await agentRuntime()).ctx.get("webAllowlist");
+  allowlist.remove(workspace, domain);
+  return allowlist.snapshot();
+});
+ipcMain.handle("lcode:webAllowlist.prune", async () => {
+  const allowlist = (await agentRuntime()).ctx.get("webAllowlist");
+  let removed = 0;
+  for (const entry of allowlist.snapshot()) {
+    if (existsSync(entry.workspace)) continue;
+    allowlist.removeWorkspace(entry.workspace);
+    removed += 1;
+  }
+  return { entries: allowlist.snapshot(), removed };
+});
+
+// ─────────────── 网络审计（跨会话最近记录） ───────────────
+
+ipcMain.handle("lcode:networkAudit.list", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const raw = record["limit"];
+  const limit = typeof raw === "number" && Number.isFinite(raw) ? Math.min(200, Math.max(1, Math.floor(raw))) : 50;
+  return (await agentRuntime()).ctx.get("networkAudit").list(limit);
+});
+ipcMain.handle("lcode:networkAudit.clear", async () => {
+  (await agentRuntime()).ctx.get("networkAudit").clear();
+  return [];
+});
+
+// ─────────────── 网页搜索（Tavily 内置 provider） ───────────────
+
+/**
+ * credentials_refs 的 scope 约束只允许 llm / plugin:* / sandbox:*。
+ * 内置搜索没有单独的 plugin 包，用 `plugin:web-search` 作为命名空间即可，
+ * 不为一个 scope 改表结构；值本身仍只落在本机 0600 凭据文件。
+ */
+const TAVILY_CREDENTIAL_SCOPE = "plugin:web-search";
+
+async function webSearchStatus(): Promise<{
+  provider: typeof TAVILY_PROVIDER;
+  configured: boolean;
+  source: string | null;
+  maxResults: number;
+}> {
+  const rt = await agentRuntime();
+  const resolved = await rt.services.credentials.describeSource(TAVILY_API_KEY_REF);
+  const refs = await rt.services.credentials.listRefs(TAVILY_CREDENTIAL_SCOPE);
+  const storedBackend = refs.find((item) => item.ref === TAVILY_API_KEY_REF && item.present)?.source;
+  const raw = rt.services.readSetting("webSearch.maxResults");
+  const maxResults =
+    typeof raw === "number" && Number.isFinite(raw)
+      ? Math.min(10, Math.max(1, Math.floor(raw)))
+      : 5;
+  return {
+    provider: TAVILY_PROVIDER,
+    configured: resolved !== undefined,
+    // `describeSource` 对已写入值统一回 keychain；实际后端以 credentials_refs 为准。
+    source: storedBackend ?? resolved ?? null,
+    maxResults,
+  };
+}
+
+ipcMain.handle("lcode:webSearch.status", async () => webSearchStatus());
+
+ipcMain.handle("lcode:webSearch.save", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const apiKey = typeof record["apiKey"] === "string" ? record["apiKey"].trim() : "";
+  const maxResults = record["maxResults"];
+  const rt = await agentRuntime();
+  if (apiKey !== "") {
+    if (apiKey.length > 512) throw new Error("Tavily API Key 过长");
+    await rt.services.credentials.write(TAVILY_API_KEY_REF, apiKey, TAVILY_CREDENTIAL_SCOPE);
+  }
+  if (maxResults !== undefined) {
+    if (typeof maxResults !== "number" || !Number.isInteger(maxResults) || maxResults < 1 || maxResults > 10) {
+      throw new Error("每次结果数必须是 1-10 的整数");
+    }
+    await rt.services.settings.setByKey("webSearch.maxResults", maxResults);
+  }
+  return webSearchStatus();
+});
+
+ipcMain.handle("lcode:webSearch.remove", async () => {
+  const rt = await agentRuntime();
+  await rt.services.credentials.delete(TAVILY_API_KEY_REF);
+  return webSearchStatus();
+});
+
+ipcMain.handle("lcode:webSearch.test", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const typed = typeof record["apiKey"] === "string" ? record["apiKey"].trim() : "";
+  const rt = await agentRuntime();
+  const stored = typed === "" ? (await rt.services.credentials.resolve(TAVILY_API_KEY_REF))?.value : undefined;
+  const apiKey = typed !== "" ? typed : stored ?? "";
+  if (apiKey === "") throw new Error("请先填写或保存 Tavily API Key");
+  const backend = createTavilySearchBackend({
+    resolveApiKey: () => apiKey,
+    timeoutMs: 12_000,
+    resolveProxy: resolveSystemProxy,
+  });
+  const results = await backend.search({ query: "Lcode AI coding tool", maxResults: 1 });
+  return { ok: true, count: results.length };
+});
+
 // ─────────────── 权限预设（P4-05：主进程持状态，renderer 只显示） ───────────────
 
-const PERMISSION_PRESETS = new Set(['只读', '标准', '自动', '完全访问', '无人值守']);
+const PERMISSION_PRESETS = new Set(['只读', '工作区内修改', '完全访问']);
 
 ipcMain.handle('lcode:permissions.get', async () => {
   const presets = (await agentRuntime()).ctx.get('permissionPresets');
@@ -892,6 +1097,20 @@ function publicPlugins(rt: AgentRuntime) {
 ipcMain.handle('lcode:plugins.list', async () => publicPlugins(await agentRuntime()));
 ipcMain.handle('lcode:plugins.inspect', async () => (await agentRuntime()).plugins.inspect());
 ipcMain.handle('lcode:runtime.composition', async () => (await agentRuntime()).composition);
+/** 沙箱状态：机制、降级原因与三项边界（设置页只读展示）。 */
+ipcMain.handle('lcode:sandbox.status', async () => (await agentRuntime()).ctx.get('sandbox').status());
+/**
+ * 内置插件总览：全局插件来自实际组合快照，会话插件来自当前工具注册表。
+ * 只读视图；启用/停用由代码与模式决定（见 @lcode/lcode-desktop 的 builtin-plugins）。
+ */
+ipcMain.handle('lcode:runtime.builtinPlugins', async () => {
+  const rt = await agentRuntime();
+  return buildBuiltinPluginCatalog({
+    composition: rt.composition,
+    tools: rt.ctx.get('tools').schemas().map(({ name, description }) => ({ name, description })),
+    platform: process.platform,
+  });
+});
 ipcMain.handle('lcode:plugins.install', async (_e: IpcMainInvokeEvent, input: unknown) => {
   const path = (input as { path?: unknown } | null)?.path;
   if (typeof path !== 'string' || path.trim() === '') throw new Error('插件目录 path 必填');
@@ -1976,6 +2195,18 @@ ipcMain.handle(
     const rt = await agentRuntime();
     rt.ctx.get("planMode").enter(sessionId);
     return { active: true };
+  },
+);
+
+ipcMain.handle(
+  "lcode:plan.cancel",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const sessionId = (input as { session_id?: unknown } | null)?.session_id;
+    if (typeof sessionId !== "string" || sessionId === "")
+      throw new Error("session_id 必填");
+    const rt = await agentRuntime();
+    rt.ctx.get("planMode").cancel(sessionId);
+    return { active: false };
   },
 );
 

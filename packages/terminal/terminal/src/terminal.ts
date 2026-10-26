@@ -16,6 +16,15 @@ export interface TerminalOpenInput {
   readonly ownerAgentId: string
   readonly cwd?: string | undefined
   readonly shell?: string | undefined
+  /** 由权限钩子按预设写入；缺省时 Provider 按 workspace-write 处理（直接调用/测试）。 */
+  readonly sandboxPolicy?: TerminalSandboxPolicy | undefined
+}
+
+/** 终端只需要这一小段沙箱契约，避免 terminal 层反向依赖平台 Provider。 */
+export interface TerminalSandboxPolicy {
+  readonly mode: 'read-only' | 'workspace-write' | 'danger-full-access'
+  readonly workspaceRoot: string
+  readonly allowNetwork?: boolean | undefined
 }
 
 export interface TerminalReadResult {

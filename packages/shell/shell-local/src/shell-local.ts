@@ -30,7 +30,7 @@ export interface LocalShellOptions {
    * 沙箱包装器。省略 = 无沙箱（等价于 `sandbox-local`），并且结果里如实标 `enforced: false`。
    */
   readonly wrap?:
-    ((argv: readonly string[], policy: ResolvedSandboxPolicy) => Promise<{ enforced: boolean; wrappedArgv: readonly string[] }>) | undefined
+    ((argv: readonly string[], policy: ResolvedSandboxPolicy, scope?: unknown) => Promise<{ enforced: boolean; wrappedArgv: readonly string[] }>) | undefined
   /** 发布即脱离的后台作业服务；省略则后台模式明确报错。 */
   readonly jobs?: JobsService | undefined
   /** 子进程 Provider；桌面运行时显式注入，独立使用时回退到本机 Provider。 */
@@ -68,7 +68,7 @@ export function createLocalShell(options: LocalShellOptions): CreateLocalShellRe
         mode: 'workspace-write',
         workspaceRoot: root,
         ...(opts.sandboxPolicy === undefined ? {} : opts.sandboxPolicy),
-      })
+      }, opts.scope)
 
       const background = opts.runInBackground === true
 
@@ -189,12 +189,13 @@ async function wrapWith(
   options: LocalShellOptions,
   argv: readonly string[],
   policy: ResolvedSandboxPolicy,
+  scope?: unknown,
 ): Promise<{ enforced: boolean; wrappedArgv: readonly string[] }> {
   if (options.wrap === undefined) {
     // 没装沙箱：如实报告，不假装
     return { enforced: false, wrappedArgv: [...argv] }
   }
-  const result = await options.wrap(argv, policy)
+  const result = await options.wrap(argv, policy, scope)
   return { enforced: result.enforced, wrappedArgv: [...result.wrappedArgv] }
 }
 

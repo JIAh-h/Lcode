@@ -11,15 +11,20 @@ function call(args: unknown): ToolCall {
 
 function harness(): {
   readonly terminals: TerminalService
-  readonly opened: Array<{ readonly ownerAgentId: string; readonly cwd?: string | undefined }>
+  readonly opened: Array<{ readonly ownerAgentId: string; readonly cwd?: string | undefined; readonly allowNetwork?: boolean | undefined }>
   readonly sent: Array<{ readonly ownerAgentId: string; readonly terminalId: string; readonly data: string }>
   readonly tools: InMemoryToolRegistry
+  readonly tool: ReturnType<typeof createTerminalTool>
 } {
-  const opened: Array<{ ownerAgentId: string; cwd?: string | undefined }> = []
+  const opened: Array<{ ownerAgentId: string; cwd?: string | undefined; allowNetwork?: boolean | undefined }> = []
   const sent: Array<{ ownerAgentId: string; terminalId: string; data: string }> = []
   const terminals: TerminalService = {
     async open(input) {
-      opened.push({ ownerAgentId: input.ownerAgentId, ...(input.cwd === undefined ? {} : { cwd: input.cwd }) })
+      opened.push({
+        ownerAgentId: input.ownerAgentId,
+        ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+        ...(input.sandboxPolicy === undefined ? {} : { allowNetwork: input.sandboxPolicy.allowNetwork }),
+      })
       return { terminalId: 'term-1' }
     },
     async send(input) {
@@ -41,8 +46,9 @@ function harness(): {
   }
   const ctx = createContext()
   const tools = new InMemoryToolRegistry(ctx)
-  tools.register(createTerminalTool({ terminals, workspaceRoot: 'D:/repo' }))
-  return { terminals, opened, sent, tools }
+  const tool = createTerminalTool({ terminals, workspaceRoot: 'D:/repo' })
+  tools.register(tool)
+  return { terminals, opened, sent, tools, tool }
 }
 
 function run(h: ReturnType<typeof harness>, args: unknown, scope: unknown = { sessionId: 's1', agentId: 'agent-a' }) {
@@ -66,6 +72,25 @@ describe('terminal tool', () => {
     expect(h.sent).toEqual([{ ownerAgentId: 'agent-a', terminalId: 'term-1', data: 'echo ok\n' }])
     expect(read).toMatchObject({ ok: true, value: { data: 'terminal output', offset: 15 }, meta: { card: 'terminal', stdout: 'terminal output' } })
     expect(listed).toMatchObject({ ok: true, value: { terminals: [{ ownerAgentId: 'agent-a' }] } })
+  })
+
+  it('open 申请联网时申报终端级 scope，并把 allowNetwork 交给 PTY', async () => {
+    const h = harness()
+    expect(h.tool.describeAction?.({ op: 'open', network: true })).toMatchObject({
+      network: true,
+      networkScope: 'terminal',
+    })
+    const result = await run(
+      h,
+      { op: 'open', network: true },
+      {
+        sessionId: 's1',
+        agentId: 'agent-a',
+        sandboxPolicy: { mode: 'workspace-write', workspaceRoot: 'D:/repo', allowNetwork: true },
+      },
+    )
+    expect(result).toMatchObject({ ok: true, value: { terminalId: 'term-1' } })
+    expect(h.opened[0]?.allowNetwork).toBe(true)
   })
 
   it('缺少运行时 agent scope 或条件参数时，返回结构化工具错误', async () => {

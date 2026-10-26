@@ -173,6 +173,7 @@ export function ComposerBar({
   planActive = false,
   planReady = false,
   onPlanAction,
+  onPlanCancel,
   queued = [],
   onGuideQueued,
   onEditQueued,
@@ -207,6 +208,8 @@ export function ComposerBar({
   /** 是否已有可确认的结构化计划。 */
   planReady?: boolean
   onPlanAction?: (() => void) | undefined
+  /** 退出计划模式（未提交计划时也能退出） */
+  onPlanCancel?: (() => void) | undefined
   /** 当前任务完成后才发送的运行时消息队列。 */
   queued?: readonly QueuedMessage[]
   onGuideQueued?: ((queueId: string) => void) | undefined
@@ -593,18 +596,21 @@ export function ComposerBar({
 
   const planItem: PopMenuItem | null = onPlanAction === undefined
     ? null
-    : {
-        id: 'plan',
-        label: planActive
-          ? (planReady ? '确认计划并开始执行' : '计划模式（等待计划）')
-          : '计划模式',
-        hint: planActive
-          ? (planReady ? '计划已提交，确认后开始改动' : '助手正在只读探索并整理计划')
-          : '只读探索，先给出计划再执行',
-        checked: planActive,
-        disabled: planActive && !planReady,
-        separator: true,
-      }
+    : planActive
+      ? {
+          id: 'plan',
+          label: planReady ? '确认计划并开始执行' : '退出计划模式',
+          hint: planReady ? '计划已提交，确认后开始改动' : '回到标准模式，恢复全部工具',
+          checked: true,
+          separator: true,
+        }
+      : {
+          id: 'plan',
+          label: '计划模式',
+          hint: '只读探索，先给出计划再执行',
+          checked: false,
+          separator: true,
+        }
   const addItems: readonly PopMenuItem[] = [
     { id: 'file', label: '添加文件…', hint: '内容随消息发送，超长时用工具续读' },
     { id: 'folder', label: '添加文件夹…', hint: '发送目录结构，具体文件按需读取' },
@@ -830,13 +836,33 @@ export function ComposerBar({
           onOpen={refreshSkills}
           onSelect={(id) => {
             if (id === 'plan') {
-              onPlanAction?.()
+              if (planActive && !planReady && onPlanCancel !== undefined) onPlanCancel()
+              else onPlanAction?.()
               return
             }
             if (id === 'skills') return 'keep-open'
             void pickFile(id === 'folder' ? 'folder' : 'file')
           }}
         />
+        {planActive ? (
+          <span className="planchip" title={planReady ? t('计划已提交，确认后开始改动') : t('只读探索中：助手只能读和搜索，不能改文件')}>
+            <span className="planchip-name">🧭 {planReady ? t('计划已就绪') : t('计划模式 · 等待计划')}</span>
+            {planReady ? (
+              <button type="button" className="planchip-go" onClick={onPlanAction}>{t('开始执行')}</button>
+            ) : null}
+            {onPlanCancel === undefined ? null : (
+              <button
+                type="button"
+                className="planchip-x"
+                title={t('退出计划模式')}
+                aria-label={t('退出计划模式')}
+                onClick={onPlanCancel}
+              >
+                ✕
+              </button>
+            )}
+          </span>
+        ) : null}
         <PopMenu
           trigger={`${t('权限')}：${t(prefs.permissionPreset)} ▾`}
           title="权限预设"

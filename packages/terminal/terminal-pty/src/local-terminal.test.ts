@@ -107,11 +107,15 @@ describe('LocalTerminalService', () => {
 
   it('系统级 Provider 提供 wrapPty 时，PTY 宿主只能启动包装后的 helper argv', async () => {
     const launches: unknown[] = []
+    const owners: Array<string | undefined> = []
     const guarded = new LocalTerminalService({
       workspaceRoot: root,
       sandbox: {
         status: async () => ({ degraded: false }),
-        wrapPty: async () => ({ enforced: true, wrappedArgv: ['lcode-sandbox-win32.exe', '--run', '--', 'cmd.exe'] }),
+        wrapPty: async (_argv, _policy, ownerAgentId) => {
+          owners.push(ownerAgentId)
+          return { enforced: true, wrappedArgv: ['lcode-sandbox-win32.exe', '--run', '--', 'cmd.exe'] }
+        },
       },
       subprocess: {
         spawn: async () => { throw new Error('not used') },
@@ -123,6 +127,7 @@ describe('LocalTerminalService', () => {
     })
     await guarded.open({ ownerAgentId: 'agent-a' })
     expect(launches).toEqual([expect.objectContaining({ shell: 'lcode-sandbox-win32.exe', args: ['--run', '--', 'cmd.exe'] })])
+    expect(owners).toEqual(['agent-a'])
     await guarded.dispose()
   })
 

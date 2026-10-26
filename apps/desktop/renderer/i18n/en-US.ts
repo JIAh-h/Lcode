@@ -71,6 +71,33 @@ export const EN: Readonly<Record<string, string>> = {
   压缩上下文失败: 'Failed to compact context',
   计划模式: 'Plan mode',
   '计划模式（等待计划）': 'Plan mode (waiting for plan)',
+  '计划模式 · 等待计划': 'Plan mode · waiting for plan',
+  计划已就绪: 'Plan ready',
+  开始执行: 'Start',
+  退出计划模式: 'Exit plan mode',
+  '已进入计划模式：只读探索，确认计划后才会改动':
+    'Plan mode on: read-only exploration; changes start only after you confirm the plan',
+  已退出计划模式: 'Exited plan mode',
+  '只读探索中：助手只能读和搜索，不能改文件':
+    'Read-only exploration: the assistant can read and search, but cannot change files',
+  系统沙箱: 'System sandbox',
+  降级: 'Degraded',
+  机制: 'Mechanism',
+  说明: 'Details',
+  边界: 'Boundaries',
+  文件系统: 'Filesystem',
+  网络: 'Network',
+  进程: 'Processes',
+  已约束: 'enforced',
+  未约束: 'not enforced',
+  '无（命令在无约束下运行）': 'None (commands run unconstrained)',
+  '回到标准模式，恢复全部工具': 'Return to standard mode and restore all tools',
+  '模型已提交执行计划，确认后会退出计划模式并立即开始执行。':
+    'The assistant submitted a plan. Confirming exits plan mode and starts executing immediately.',
+  目标: 'Goal',
+  步骤: 'Steps',
+  风险: 'Risks',
+  稍后: 'Later',
   '确认计划并开始执行': 'Confirm plan and start',
   '只读探索，先给出计划再执行': 'Explore read-only and propose a plan first',
   '计划已提交，确认后开始改动': 'Plan is ready; confirm to start making changes',
@@ -483,16 +510,19 @@ export const EN: Readonly<Record<string, string>> = {
   /* ── 权限预设（产品层字面量，写死自文档 12 §3.3） ── */
   只读: 'Read-only',
   标准: 'Standard',
-  自动: 'Auto',
+  工作区内修改: 'Workspace changes',
+  自动审批: 'Auto-approve',
   完全访问: 'Full access',
-  无人值守: 'Unattended',
   '它只能看，不能改': 'It can only look, never change',
   '能改我的项目，动手前问我': 'Can change my project, asks first',
-  '受系统级沙箱约束时，工作区内自行执行': 'Works inside the workspace only when system sandboxing is enforced',
-  '受系统级沙箱约束时用于自动化': 'For automation only when system sandboxing is enforced',
+  '能改工作区内的文件；越界或高风险动作前问你':
+    'Can change files in the workspace; asks before out-of-scope or high-risk actions',
+  '可改工作区文件；越界或高风险动作前询问':
+    'Can change workspace files; asks before out-of-scope or high-risk actions',
+  '工作区内自动执行；高风险动作不打断、直接拒绝':
+    'Runs inside the workspace without asking; high-risk actions are denied without a prompt',
   '哪里都能碰，但动手前问我': 'Can touch anything, but asks first',
   '哪里都能碰，但动手前问你': 'Can touch anything, but asks first',
-  '用于自动化，不打扰我': 'For automation, doesn’t interrupt me',
 
   /* ── 会话流（stream 组件） ── */
   '过程记录 · {n} 步': 'Process log · {n} steps',
@@ -597,6 +627,7 @@ export const EN: Readonly<Record<string, string>> = {
   它要把数据发到这些站点: 'It wants to send data to these sites',
   '会拿到这些环境变量：': 'It will receive these environment variables: ',
   '依据：': 'Basis: ',
+  '请求地址：': 'Request URL: ',
   '影响：': 'Impact: ',
   拒绝: 'Reject',
   允许这一次: 'Allow this once',
@@ -742,12 +773,10 @@ export const EN: Readonly<Record<string, string>> = {
     'Decides when Lcode needs to ask you. Changes apply immediately.',
   预设: 'Presets',
   '不会改动任何文件，适合先让它看代码': 'Changes nothing — good for having it read code first',
-  '受保护时可在工作区执行；沙箱降级时改动前确认':
-    'Runs in the workspace when protected; asks before mutations when sandboxing is degraded',
-  '仅在系统级沙箱可用时自动执行；否则拒绝改动':
-    'Runs automatically only when system sandboxing is available; otherwise rejects mutations',
-  '仅在系统级沙箱可用时用于自动化；否则拒绝改动':
-    'For automation only when system sandboxing is available; otherwise rejects mutations',
+  '受保护时可在工作区执行；越界或高风险动作前确认':
+    'Runs in the workspace when protected; asks before out-of-scope or high-risk actions',
+  '工作区内自动执行，高风险动作不打断、直接拒绝':
+    'Runs inside the workspace automatically; high-risk actions are denied without prompting',
   细则: 'Details',
   工作区外文件每次都问: 'Always ask for files outside the workspace',
   '没有「记住选择」；一次确认只管一次':
@@ -809,4 +838,187 @@ export const EN: Readonly<Record<string, string>> = {
   '搜索设置…': 'Search settings…',
   个人: 'Personal',
   '记忆与历史': 'Memory & history',
+
+  /* ── 设置：内置插件总览 ── */
+  '内置插件随模式在代码中启用，这里只能查看，不提供开关。':
+    'Built-in plugins are enabled by code and the active mode; this view is read-only.',
+  会话插件: 'Session plugins',
+  全局插件: 'Global plugins',
+  '由 Agent 预设按会话组成': 'Composed per chat by the agent preset',
+  '系统与所有会话共用': 'Shared by the system and every chat',
+  '查看不同模式下的插件': 'Inspect plugins per mode',
+  '标准模式（默认）': 'Standard mode (default)',
+  标准模式: 'Standard mode',
+  创造模式: 'Creator mode',
+  'Agent 预设': 'Agent presets',
+  '选择 Agent 的工具和工作方式。日常任务用「标准模式」，扩展能力用「创造模式」。':
+    'Choose how the agent works. Use Standard for everyday tasks and Creator when extending capabilities.',
+  内置预设: 'Built-in presets',
+  可选: 'Available',
+  规划中: 'Planned',
+  'Agent 预设决定工具与工作方式；权限（只读 / 工作区内修改 / 完全访问）决定能碰什么，两者独立生效。':
+    'Agent presets decide tools and working style; permissions (read-only / workspace changes / full access) decide what it may touch. They apply independently.',
+  '读取 Agent 预设失败': 'Failed to load agent presets',
+  '已切换 Agent 预设：{name}': 'Agent preset switched: {name}',
+  '切换 Agent 预设失败': 'Failed to switch agent preset',
+  'Agent 预设（设置 → Agent 预设）': 'Agent preset (Settings → Agent presets)',
+  网络访问: 'Network access',
+  'web 工具调用新域名时会请求审批；批准后按工作区记住，可在这里移除。':
+    'Web tools ask before a new domain; approved domains are remembered per workspace and can be removed here.',
+  已允许的域名: 'Allowed domains',
+  '还没有已允许的域名。': 'No domains allowed yet.',
+  读取网络白名单失败: 'Failed to load the network allowlist',
+  移除域名失败: 'Failed to remove the domain',
+  清理失效工作区: 'Remove missing workspaces',
+  没有失效工作区: 'No missing workspaces',
+  '已清理 {n} 个失效工作区': 'Removed {n} missing workspaces',
+  清理失效工作区失败: 'Failed to remove missing workspaces',
+  最近网络请求: 'Recent network requests',
+  清空审计: 'Clear audit',
+  '还没有网络请求记录。': 'No network requests yet.',
+  已允许: 'Allowed',
+  已拒绝: 'Denied',
+  读取网络审计失败: 'Failed to load the network audit',
+  清空网络审计: 'Clear network audit',
+  '会删除本机的网络请求审计记录（不会影响会话日志），是否继续？':
+    'This deletes the local network audit log (chat logs are unaffected). Continue?',
+  已清空网络审计: 'Network audit cleared',
+  清空网络审计失败: 'Failed to clear the network audit',
+  'web 工具会拒绝本机、私网与云元数据地址；重定向逐跳校验。':
+    'Web tools reject localhost, private networks and cloud metadata addresses; redirects are checked hop by hop.',
+  网页读取工具: 'Web tools',
+  '读取网页并调用 Tavily 搜索；出站域名按工作区白名单授权，返回内容按不可信数据处理。':
+    'Fetches pages and searches via Tavily; outbound domains are allowlisted per workspace and results are treated as untrusted.',
+  网页搜索: 'Web search',
+  '让 Agent 具备联网搜索能力。搜索词会发送给 Tavily，结果按不可信内容处理。':
+    'Gives the agent web search. Search queries are sent to Tavily and results are treated as untrusted content.',
+  Tavily: 'Tavily',
+  已配置: 'Configured',
+  未配置: 'Not configured',
+  'API Key': 'API Key',
+  '已保存；留空则不修改': 'Saved; leave blank to keep it',
+  'Key 只保存在本机凭据存储，不会写进设置文件，也不会显示完整值。':
+    'The key is stored in local credentials only, never in settings, and never shown in full.',
+  系统钥匙串: 'System keychain',
+  本机凭据文件: 'Local credential file',
+  环境变量: 'Environment variable',
+  'Lcode Home .env': 'Lcode Home .env',
+  '项目 .env': 'Project .env',
+  每次最多结果: 'Max results per search',
+  '范围 1-10；模型也可以请求更少的结果。': 'Range 1–10; the model may request fewer.',
+  '移除 Key': 'Remove key',
+  '连接成功（返回 {count} 条结果）': 'Connection succeeded ({count} results)',
+  '读取网页搜索配置失败': 'Failed to load web search settings',
+  '保存网页搜索配置失败': 'Failed to save web search settings',
+  '每次结果数必须是 1-10 的整数': 'Max results must be an integer from 1 to 10',
+  '已移除 Tavily API Key': 'Tavily API key removed',
+  '移除 Tavily API Key 失败': 'Failed to remove the Tavily API key',
+  '移除网页搜索 Key': 'Remove web search key',
+  '移除后将无法使用 web_search，但不会删除任何会话数据。':
+    'After removal web_search will stop working, but no chat data is deleted.',
+  '搜索端点固定为 {host}；首次搜索仍会按工作区请求网络审批，批准后记住该域名。搜索结果不会自动加入网页抓取白名单；每轮最多 5 次搜索。':
+    'The search endpoint is fixed to {host}. The first search still asks for network approval per workspace and remembers the domain after approval. Search results are not added to the fetch allowlist automatically; at most 5 searches per turn.',
+  '任意域名（仅本次命令）': 'Any domain (this command only)',
+  '任意域名（关闭终端前有效）': 'Any domain (until this terminal is closed)',
+  这条命令需要访问网络: 'This command needs network access',
+  '读写与命令工具全开，按当前权限预设执行。':
+    'All read/write and command tools are available, subject to the current permission preset.',
+  '在标准能力上增加代码运行器，便于编写/组合工具、技能与插件源码。':
+    'Adds the code runtime to the standard toolset for authoring and composing tools, skills and plugin sources.',
+  '标准模式、计划模式': 'Standard + plan mode',
+  '读写工具全开，按当前权限预设执行。':
+    'All read/write tools are available, subject to the current permission preset.',
+  '只读探索：仅保留读取与搜索工具，写操作在确认计划后才执行。':
+    'Read-only exploration: only read and search tools; writes start after the plan is confirmed.',
+  '读取内置插件失败，重启应用后再试。':
+    'Could not load built-in plugins. Restart the app and try again.',
+  '正在读取内置插件…': 'Loading built-in plugins…',
+  '完整名称': 'Full name',
+  来自: 'From',
+  配置状态: 'Configured',
+  运行状态: 'Runtime',
+  已启用: 'Enabled',
+  已停用: 'Disabled',
+  未运行: 'Not running',
+  提供: 'Provides',
+  依赖: 'Requires',
+  内置内核: 'Built-in core',
+  运行时注册: 'Registered at runtime',
+  第三方插件: 'Third-party plugins',
+  '第三方插件在独立受控进程中运行，只有声明的工具、提示段和事件订阅可以注册。':
+    'Third-party plugins run in an isolated managed process; only declared tools, prompt sections and event subscriptions are registered.',
+  '还没有安装第三方插件。': 'No third-party plugins installed.',
+  '内置运行时组合条目。': 'Built-in runtime composition entry.',
+  智能体角色设定: 'Agent persona',
+  '为当前智能体提供组合中定义的角色与行为说明。':
+    'Provides the role and behaviour defined by the active composition.',
+  工作区指令加载: 'Workspace instructions',
+  '读取 AGENTS.md、CLAUDE.md 等工作区规则文件，为 AI 提供工作区约定。':
+    'Loads AGENTS.md, CLAUDE.md and similar files as workspace rules.',
+  时间与环境感知: 'Time & environment',
+  '每一步把当前时间、工作区与运行环境告诉模型。':
+    'Tells the model the current time, workspace and runtime environment each step.',
+  只读探索约束: 'Read-only exploration guard',
+  '计划模式下收窄可见工具与写操作，只允许读取、搜索与提交计划。':
+    'In plan mode narrows visible tools and writes to reading, searching and submitting a plan.',
+  文件读取工具: 'File read tool',
+  '让 AI 读取工作区文件。': 'Lets the AI read workspace files.',
+  文件写入工具: 'File write tool',
+  '让 AI 创建、编辑工作区文件。': 'Lets the AI create and edit workspace files.',
+  文件搜索工具: 'File search tool',
+  '让 AI 按文件名或文本内容搜索本地文件。':
+    'Lets the AI search local files by name or text content.',
+  'Shell 命令工具': 'Shell tool',
+  'PowerShell 命令工具': 'PowerShell tool',
+  '让 AI 执行系统命令，并按权限预设管理前台与后台运行。':
+    'Lets the AI run system commands, managing foreground and background execution under the permission preset.',
+  终端工具: 'Terminal tool',
+  '为 AI 与用户提供可复用的终端会话。':
+    'Provides reusable terminal sessions for the AI and the user.',
+  子代理工具: 'Subagent tool',
+  '把独立子任务交给受限的进程内子代理执行。':
+    'Runs isolated subtasks in a restricted in-process subagent.',
+  技能工具: 'Skill tools',
+  '列出并按需加载本地技能说明。': 'Lists and loads local skill instructions on demand.',
+  计划工具: 'Plan tools',
+  '提交结构化计划，并在执行实质偏离时请求用户确认。':
+    'Submits a structured plan and asks for confirmation when execution drifts from it.',
+  会话与事件日志: 'Sessions & event log',
+  'JSONL 权威日志、表面投影与分叉；索引只是可重建的投影。':
+    'Authoritative JSONL log, surface projection and forks; the index is a rebuildable projection.',
+  本机执行底座: 'Local execution base',
+  '子进程、沙箱、文件系统、Shell、终端与压缩剪枝。':
+    'Subprocesses, sandbox, filesystem, shell, terminals and compaction pruning.',
+  工具系统: 'Tool system',
+  '工具注册表、参数校验、权限守卫与系统提示装配。':
+    'Tool registry, argument validation, permission guards and system-prompt assembly.',
+  模型服务: 'Model service',
+  '复用宿主已配置的模型与凭据引用，不把密钥带进渲染进程。':
+    'Reuses host-configured models and credential references without exposing keys to the renderer.',
+  模型路由: 'Model routing',
+  '按会话与轮次选择供应商和模型。': 'Selects provider and model per chat and turn.',
+  权限与策略: 'Permissions & policy',
+  '权限预设、工作区信任、计划模式与子代理。':
+    'Permission presets, workspace trust, plan mode and subagents.',
+  扩展服务: 'Extension services',
+  '技能目录、Agent 预设与第三方插件宿主。':
+    'Skill catalog, agent presets and the third-party plugin host.',
+  代码运行服务: 'Code runtime',
+  '受控代码运行时：提供 run_code 工具，在隔离环境执行并逐项走权限。':
+    'Controlled code runtime: provides the run_code tool, executing in isolation with per-call permissions.',
+  代码运行工具: 'Code execution tool',
+  '在受限代码运行器中执行 JavaScript，用 await tools.<工具名>(参数) 调用当前可见工具。':
+    'Runs JavaScript in the restricted code runtime and calls visible tools via await tools.<name>(args).',
+  'Agent 循环': 'Agent loop',
+  '请求装配、上下文预算、压缩与工具循环。':
+    'Request assembly, context budget, compaction and the tool loop.',
+  会话编排主干: 'Session spine',
+  '轮次装配、技能注入与宿主补充上下文。':
+    'Turn assembly, skill injection and host-supplied context.',
+  'Web 能力': 'Web capability',
+  '显式配置后才加入组合的网页抓取与搜索工具。':
+    'Web fetch/search tools added only when explicitly configured.',
+  'LSP 能力': 'LSP capability',
+  '显式配置后才加入组合的语言服务工具。':
+    'Language-service tools added only when explicitly configured.',
 }

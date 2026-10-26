@@ -52,6 +52,8 @@ export interface ShellRunOpts {
   readonly runInBackground?: boolean | undefined
   /** 沙箱策略（由策略层从预设解出；执行器把它交给 `ctx.sandbox.wrap`） */
   readonly sandboxPolicy?: ResolvedSandboxPolicy | undefined
+  /** 执行 scope（会话/调用身份）；只用于把沙箱结果写回会话审计，不参与命令语义。 */
+  readonly scope?: unknown
 }
 
 export interface ShellService {

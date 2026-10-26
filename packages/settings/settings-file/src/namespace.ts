@@ -42,3 +42,29 @@ export const MODEL_FIELD_DESCRIPTORS: readonly FieldDescriptor[] = [
     description: '自定义模型清单（每项含 name / base_url / api_key_ref；**不含凭据值**）',
   },
 ]
+
+/** 网页搜索的非敏感配置；API Key 由 credentials 管理，不在这里。 */
+export const WEB_SEARCH_NAMESPACE = 'webSearch'
+
+export const webSearchSettingKeys = {
+  provider: 'provider',
+  maxResults: 'maxResults',
+} as const
+
+export const WEB_SEARCH_FIELD_DESCRIPTORS: readonly FieldDescriptor[] = [
+  {
+    namespace: WEB_SEARCH_NAMESPACE,
+    key: webSearchSettingKeys.provider,
+    type: 'string',
+    enumValues: ['tavily'],
+    default: 'tavily',
+    description: '搜索服务提供方（当前仅内置 Tavily）',
+  },
+  {
+    namespace: WEB_SEARCH_NAMESPACE,
+    key: webSearchSettingKeys.maxResults,
+    type: 'number',
+    default: 5,
+    description: '每次搜索默认返回条数（1-10）',
+  },
+]

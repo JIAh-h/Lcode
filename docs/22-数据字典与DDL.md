@@ -923,10 +923,8 @@ END;
 | 轴一 `sandbox/mode` | `read-only` / `workspace-write` / `danger-full-access` | 工作区只读 / 工作区可读写（**默认**） / 全部路径 |
 | 轴二 `approval/policy` | `ask` / `never` | 需要时向有应答者请求一次性批准 / **不问人**（不安全即 `deny`，**绝不等于默认允许**） |
 | **预设** 只读 | `read-only` + `ask` | "它只能看，不能改" |
-| **预设** 标准（默认） | `workspace-write` + `ask` | "能改我的项目，动手前问我" |
-| **预设** 自动 | `workspace-write` + `never` | "工作区内自己干，不打扰我" |
+| **预设** 工作区内修改（默认） | `workspace-write` + `ask` | "能改工作区内的文件；越界或高风险动作前问我" |
 | **预设** 完全访问 | `danger-full-access` + `ask` | "哪里都能碰，但动手前问我" |
-| **预设** 无人值守 | `workspace-write` + `never` | 用于 CI / 自动化，配合最严**守卫** |
 
 出现位置：`permissionPresets/preset`、`ResolvedSandboxPolicy`、UI（[12 §3](./12-安全权限与沙箱模型.md#3-三条正交的权限轴)）。**UI 只呈现预设，不暴露两条轴**（`SEC-AXES-001`），但"为什么"面板与日志**必须**展示两条轴实际值（[12 §3.4](./12-安全权限与沙箱模型.md#34-为什么不能合并成一个枚举)）。
 

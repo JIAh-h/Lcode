@@ -11,9 +11,10 @@
     }
   },
   "dependencies": {
-    "@lcode/web": "workspace:*",
     "@lcode/context": "workspace:*",
-    "@lcode/util": "workspace:*"
+    "@lcode/util": "workspace:*",
+    "@lcode/web": "workspace:*",
+    "undici": "6.28.1"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json --noEmit"

@@ -7,7 +7,7 @@ import { OpenAiCompatibleAdapter } from '@lcode/llm-openai-compatible'
 import { LocalModelApi, toProbeFailure } from '@lcode/model-api'
 import type { CustomModelInfo, ProbeFailure } from '@lcode/model-api'
 import { setNativePackageRoot } from '@lcode/session-persistence-sqlite'
-import { LocalSettingsService, MODEL_FIELD_DESCRIPTORS, providerSettingKeys } from '@lcode/settings-file'
+import { LocalSettingsService, MODEL_FIELD_DESCRIPTORS, providerSettingKeys, WEB_SEARCH_FIELD_DESCRIPTORS } from '@lcode/settings-file'
 import { CustomModelStore } from '@lcode/settings-file'
 import { resolveLcodeHome } from '@lcode/util'
 import { existsSync, readFileSync } from 'node:fs'
@@ -101,6 +101,7 @@ export function createServices(options: CreateServicesOptions = {}): DesktopServ
   const settings = new LocalSettingsService({ home })
   // 必须先注册命名空间：`settings.update()` 对未注册的 key 会抛"未知设置项"
   settings.registerNamespace(MODEL_FIELD_DESCRIPTORS)
+  settings.registerNamespace(WEB_SEARCH_FIELD_DESCRIPTORS)
   settings.open()
 
   const credentials = new LocalCredentialsService({ home })

@@ -37,6 +37,7 @@ export function createLocalSandbox(options: LocalSandboxOptions = {}): SandboxSe
       .map(([name]) => ({ filesystem: '文件系统', network: '网络', spawn: '进程' }[name] ?? name) + '（无约束）'),
     degraded: true,
     reason,
+    providerAvailable: false,
     capabilities,
   }
 
@@ -49,7 +50,7 @@ export function createLocalSandbox(options: LocalSandboxOptions = {}): SandboxSe
       // `_policy` 被忽略是**刻意的**：这里没有任何强制能力，按策略"演"一遍
       // 只会让上层以为约束生效了。参数留着是为了满足接口形状。
       void _policy
-      return { enforced: false, wrappedArgv: [...argv], degradationReason: reason }
+      return { enforced: false, mechanism: 'none', wrappedArgv: [...argv], degradationReason: reason }
     },
   }
 }

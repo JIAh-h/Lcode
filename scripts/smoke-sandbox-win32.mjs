@@ -102,13 +102,55 @@ try {
     "network denial",
   );
 
+  console.log("verify read-only mode...");
+  runJson([
+    "--prepare",
+    "--workspace",
+    workspace,
+    "--network",
+    "deny",
+    "--mode",
+    "read-only",
+  ]);
+  runTarget(
+    ["cmd.exe", "/d", "/s", "/c", "echo readonly-write> readonly.txt"],
+    "read-only workspace write",
+    { mustFail: true, mode: "read-only" },
+  );
+  if (existsSync(join(workspace, "readonly.txt")))
+    throw new Error("只读档仍然能写入工作区");
+  runTarget(
+    ["cmd.exe", "/d", "/s", "/c", "type allowed.txt"],
+    "read-only workspace read",
+    { mode: "read-only" },
+  );
+
+  console.log("verify full-access mode...");
+  runJson([
+    "--prepare",
+    "--workspace",
+    workspace,
+    "--network",
+    "allow",
+    "--mode",
+    "full-access",
+  ]);
+  runTarget(
+    ["cmd.exe", "/d", "/s", "/c", `echo full-access> ${outside}`],
+    "full-access outside write",
+    { mode: "full-access" },
+  );
+  if (!existsSync(outside))
+    throw new Error("完全访问档无法写入工作区之外");
+  rmSync(outside, { force: true });
+
   console.log("verify Job Object process cleanup...");
   const jobCheck = runJson(["--verify-job"]);
   if (jobCheck.jobObject !== true)
     throw new Error(`Job Object 进程清理未通过：${jobCheck.reason ?? "未知错误"}`);
 
   console.log(
-    "Windows 原生沙箱真机验收通过：工作区 ACL、无网络 AppContainer 与 Job Object 进程树清理均已验证。",
+    "Windows 原生沙箱真机验收通过：workspace-write 工作区 ACL、只读档拒绝写入、完全访问可越界、无网络 AppContainer 与 Job Object 进程树清理均已验证。",
   );
 } finally {
   if (prepared) {
@@ -129,7 +171,7 @@ function probe() {
 function runTarget(target, label, options = {}) {
   const result = spawnSync(
     helper,
-    ["--run", "--workspace", workspace, "--network", "deny", "--", ...target],
+    ["--run", "--workspace", workspace, "--network", "deny", "--mode", options.mode ?? "workspace-write", "--", ...target],
     {
       encoding: "utf8",
       windowsHide: true,

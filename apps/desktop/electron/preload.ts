@@ -170,6 +170,8 @@ const api = {
   plan: {
     enter: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plan.enter', input),
     confirm: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plan.confirm', input),
+    /** 退出只读探索（未提交计划时也能退出，避免被锁在计划模式里） */
+    cancel: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plan.cancel', input),
   },
   workspaceTrust: {
     list: (): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.list'),
@@ -183,6 +185,30 @@ const api = {
     get: (): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.get'),
     set: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.set', input),
   },
+  /** Agent 预设：全局默认模式（标准 / 创造占位），与权限档位正交 */
+  agentPreset: {
+    get: (): Promise<unknown> => ipcRenderer.invoke('lcode:agentPreset.get'),
+    set: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:agentPreset.set', input),
+    list: (): Promise<unknown> => ipcRenderer.invoke('lcode:agentPreset.list'),
+  },
+  /** web 工具按工作区记住的域名白名单 */
+  webAllowlist: {
+    list: (): Promise<unknown> => ipcRenderer.invoke('lcode:webAllowlist.list'),
+    remove: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:webAllowlist.remove', input),
+    prune: (): Promise<unknown> => ipcRenderer.invoke('lcode:webAllowlist.prune'),
+  },
+  /** 跨会话网络请求审计（只读记录 + 清空） */
+  networkAudit: {
+    list: (input?: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:networkAudit.list', input),
+    clear: (): Promise<unknown> => ipcRenderer.invoke('lcode:networkAudit.clear'),
+  },
+  /** 网页搜索（Tavily）；Key 只进主进程凭据存储，状态接口只回布尔/来源 */
+  webSearch: {
+    status: (): Promise<unknown> => ipcRenderer.invoke('lcode:webSearch.status'),
+    save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:webSearch.save', input),
+    remove: (): Promise<unknown> => ipcRenderer.invoke('lcode:webSearch.remove'),
+    test: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:webSearch.test', input),
+  },
   plugins: {
     list: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.list'),
     inspect: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.inspect'),
@@ -193,6 +219,12 @@ const api = {
   },
   runtime: {
     composition: (): Promise<unknown> => ipcRenderer.invoke('lcode:runtime.composition'),
+    /** 内置插件总览（只读）：会话/全局、按模式的配置与运行状态 */
+    builtinPlugins: (): Promise<unknown> => ipcRenderer.invoke('lcode:runtime.builtinPlugins'),
+  },
+  /** 系统沙箱状态（设置页只读展示） */
+  sandbox: {
+    status: (): Promise<unknown> => ipcRenderer.invoke('lcode:sandbox.status'),
   },
   tasks: {
     list: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:tasks.list', input),

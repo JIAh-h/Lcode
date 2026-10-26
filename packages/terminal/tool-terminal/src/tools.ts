@@ -1,4 +1,5 @@
 import type { TerminalService } from '@lcode/terminal'
+import { sandboxPolicyOf } from '@lcode/tools'
 import type { ToolActionIntent, ToolDefinition } from '@lcode/tools'
 import type { JsonValue } from '@lcode/util'
 import { ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
@@ -14,6 +15,8 @@ interface TerminalToolArgs {
   readonly signal?: string | undefined
   readonly cwd?: string | undefined
   readonly shell?: string | undefined
+  /** 仅 open：允许这个终端会话联网（关闭终端即收回）。 */
+  readonly network?: boolean | undefined
 }
 
 export interface ToolTerminalDeps {
@@ -33,7 +36,8 @@ export function createTerminalTool(deps: ToolTerminalDeps): ToolDefinition<Termi
     name: 'terminal',
     description:
       '管理持久终端：open 打开，send 发送输入，read 按 offset 读取增量输出，signal 中断，' +
-      'close 关闭，list 列出当前任务拥有的终端。终端输入不会自动进入对话上下文。',
+      'close 关闭，list 列出当前任务拥有的终端。终端输入不会自动进入对话上下文。' +
+      'open 时传 network=true 可申请联网；授权覆盖整个终端会话，关闭后收回。',
     card: 'terminal',
     timeoutMs: 30_000,
     inputSchema: {
@@ -45,6 +49,7 @@ export function createTerminalTool(deps: ToolTerminalDeps): ToolDefinition<Termi
         signal: { type: 'string', description: '信号名称，例如 SIGINT（signal 必填）' },
         cwd: { type: 'string', description: '打开终端的工作目录（open 可选，默认当前工作区）' },
         shell: { type: 'string', description: '终端 shell（open 可选）' },
+        network: { type: 'boolean', description: '仅 open：允许这个终端会话联网（会弹一次审批，关闭终端前有效）' },
       },
       required: ['op'],
     },
@@ -54,12 +59,14 @@ export function createTerminalTool(deps: ToolTerminalDeps): ToolDefinition<Termi
       const args = call.parsed
       const ownerAgentId = agentIdOf(opts.scope)
       const root = workspaceFor(opts.scope, deps)
+      const sandboxPolicy = sandboxPolicyOf(opts.scope)
       switch (args.op) {
         case 'open': {
           const opened = await deps.terminals.open({
             ownerAgentId,
             cwd: args.cwd === undefined ? root : resolve(root, args.cwd),
             ...(args.shell === undefined ? {} : { shell: args.shell }),
+            ...(sandboxPolicy === undefined ? {} : { sandboxPolicy }),
           })
           return opened as never
         }
@@ -99,6 +106,8 @@ function actionFor(args: TerminalToolArgs): ToolActionIntent {
     // 它们会被拒绝，而不是绕开用户选择的边界。
     paths: [{ path: args.cwd ?? '.', mode: 'write' }],
     argv: ['terminal', args.op],
+    // PTY 是长会话，无法逐命令切换网络；授权只能覆盖打开期间。
+    ...(args.op === 'open' && args.network === true ? { network: true, networkScope: 'terminal' as const } : {}),
   }
 }
 
@@ -159,7 +168,8 @@ function invalidArgs(message: string): LcodeErrorImpl {
 
 function actionSummary(args: TerminalToolArgs): string {
   switch (args.op) {
-    case 'open': return `打开持久终端${args.cwd === undefined ? '' : `：${args.cwd}`}`
+    case 'open':
+      return `打开持久终端${args.cwd === undefined ? '' : `：${args.cwd}`}${args.network === true ? '（允许联网，关闭终端前有效）' : ''}`
     case 'send': return `向终端发送输入：${args.terminalId ?? ''}`
     case 'read': return `读取终端输出：${args.terminalId ?? ''}`
     case 'signal': return `中断终端：${args.terminalId ?? ''}`

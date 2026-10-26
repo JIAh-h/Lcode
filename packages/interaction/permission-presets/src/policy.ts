@@ -1,4 +1,4 @@
-import { isInsideWorkspace, normalizePath } from '@lcode/fs'
+import { canonicalPath, isInsideWorkspace } from '@lcode/fs'
 import type { ApprovalBasis, ApprovalPathImpact, Impact } from '@lcode/session'
 import type { SandboxMode } from '@lcode/sandbox'
 import { resolve } from 'node:path'
@@ -40,6 +40,11 @@ export interface ActionIntent {
   readonly argv?: readonly string[] | undefined
   /** 出站域名（web 族） */
   readonly domains?: readonly string[] | undefined
+  /** web 工具请求的完整 URL（审批展示用；不影响域名判定） */
+  readonly url?: string | undefined
+  /** 命令需要访问网络（shell/终端族）：OS 沙箱按本次调用或终端会话放开网络。 */
+  readonly network?: boolean | undefined
+  readonly networkScope?: 'call' | 'terminal' | undefined
   /** 涉及的环境变量**名**（只给名字不给值，I7） */
   readonly env?: readonly string[] | undefined
   /** 请求的沙箱档位（放宽档位本身要审批，12 §9.3 ⑤） */
@@ -106,7 +111,11 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
    *
    * 实测踩过：Windows 上所有工作区内写入都会弹窗。
    */
-  const workspaceRoot = normalizePath(resolve(ctx.workspaceRoot))
+  /*
+   * **真实路径**：工作区内一个指向外部的 symlink 不能因为字符串前缀“看起来在工作区”
+   * 就通过边界判定。目标不存在时 canonicalPath 会取最近存在祖先的真实路径。
+   */
+  const workspaceRoot = canonicalPath(ctx.workspaceRoot)
 
   // ── 先把"要不要问"算出来（与档位无关，档位只决定 ask 还是 deny）──
   const reasons: { basis: ApprovalBasis; impact: Impact }[] = []
@@ -114,7 +123,7 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   // ① 写工作区**之外**的路径（12 §9.3 ①）
   const pathImpacts: ApprovalPathImpact[] = []
   for (const p of intent.paths ?? []) {
-    const abs = normalizePath(resolve(workspaceRoot, p.path))
+    const abs = canonicalPath(resolve(workspaceRoot, p.path))
     pathImpacts.push({ path: abs, mode: p.mode, outsideWorkspace: !isInsideWorkspace(workspaceRoot, abs) })
   }
   const outsideWrites = pathImpacts.filter((p) => p.mode === 'write' && p.outsideWorkspace)
@@ -158,7 +167,24 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   if (newDomains.length > 0) {
     reasons.push({
       basis: { source: 'preset', reason: '要把数据发到这个站点', presetName: ctx.preset },
-      impact: { network: { domains: newDomains } },
+      impact: {
+        network: {
+          domains: newDomains,
+          ...(intent.url === undefined ? {} : { url: intent.url }),
+        },
+      },
+    })
+  }
+  // shell 显式要求联网：即使没有具体域名也必须在本次调用上问一次。
+  if (intent.network === true) {
+    reasons.push({
+      basis: { source: 'preset', reason: '这条命令要访问网络', presetName: ctx.preset },
+      impact: {
+        network: {
+          domains: ['*'],
+          ...(intent.networkScope === undefined ? {} : { scope: intent.networkScope }),
+        },
+      },
     })
   }
 
@@ -178,6 +204,10 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
     const writes = pathImpacts.filter((p) => p.mode === 'write')
     if (writes.length > 0) {
       return { kind: 'deny', code: 'EP-OUTSIDE_WORKSPACE', reason: '当前是「只读」预设，不能改动任何文件' }
+    }
+    // 只读不开放网络出站：否则“只看”可以被用来把工作区内容发出去。
+    if (intent.network === true || (intent.domains?.length ?? 0) > 0) {
+      return { kind: 'deny', code: 'EP-DENIED_BY_GUARD', reason: '当前是「只读」预设，不开放网络访问' }
     }
   }
 
@@ -204,7 +234,7 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   /*
    * `never` 档：**直接拒绝，不是放行**（12 §3.3）。
    *
-   * 这是全局最容易读错的一格。"无人值守/自动"的语义是"别打扰我"，
+   * 这是全局最容易读错的一格。“自动审批”的语义是"别打扰我"，
    * 那意味着遇到高风险动作时**按最保守的方式处理**（拒掉），而不是"那都随你"。
    */
   if (approvalPolicy === 'never') {
@@ -261,18 +291,27 @@ function mergeReasons(reasons: readonly { basis: ApprovalBasis; impact: Impact }
   basis: ApprovalBasis
   impact: Impact
 } {
-  const first = reasons[0]!
+  const first = reasons[0]
+  if (first === undefined) throw new Error('mergeReasons 至少需要一条理由')
   if (reasons.length === 1) return first
 
   const paths = reasons.flatMap((r) => r.impact.paths ?? [])
   const domains = reasons.flatMap((r) => r.impact.network?.domains ?? [])
+  const url = reasons.find((r) => r.impact.network?.url !== undefined)?.impact.network?.url
+  const networkScope = reasons.find((r) => r.impact.network?.scope !== undefined)?.impact.network?.scope
   const env = reasons.flatMap((r) => r.impact.env ?? [])
   return {
     // 理由用"；"接起来——用户看到的是一句话，而不是三个 bullet
     basis: { ...first.basis, reason: reasons.map((r) => r.basis.reason).join('；') },
     impact: {
       ...(paths.length === 0 ? {} : { paths }),
-      ...(domains.length === 0 ? {} : { network: { domains } }),
+      ...(domains.length === 0 ? {} : {
+        network: {
+          domains,
+          ...(url === undefined ? {} : { url }),
+          ...(networkScope === undefined ? {} : { scope: networkScope }),
+        },
+      }),
       ...(env.length === 0 ? {} : { env }),
       ...(first.impact.processScope === undefined ? {} : { processScope: first.impact.processScope }),
       ...(first.impact.sandboxChange === undefined ? {} : { sandboxChange: first.impact.sandboxChange }),

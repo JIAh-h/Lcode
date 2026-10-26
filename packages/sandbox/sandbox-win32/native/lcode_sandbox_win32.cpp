@@ -16,7 +16,22 @@ namespace {
 
 constexpr wchar_t kProfileName[] = L"Lcode.Sandbox";
 constexpr wchar_t kInternetClientCapability[] = L"internetClient";
-constexpr DWORD kWorkspaceAccess = FILE_GENERIC_READ | FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE | SYNCHRONIZE;
+/** 只读档：能读、能执行，但不能写。 */
+constexpr DWORD kWorkspaceReadAccess = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE | SYNCHRONIZE;
+/** 工作区写档：在读的基础上加写。 */
+constexpr DWORD kWorkspaceWriteAccess = kWorkspaceReadAccess | FILE_GENERIC_WRITE;
+
+enum class SandboxMode { ReadOnly, WorkspaceWrite, FullAccess };
+
+SandboxMode parseMode(const std::wstring& value) {
+  if (value == L"read-only") return SandboxMode::ReadOnly;
+  if (value == L"full-access") return SandboxMode::FullAccess;
+  return SandboxMode::WorkspaceWrite;
+}
+
+DWORD modeAccessMask(SandboxMode mode) {
+  return mode == SandboxMode::ReadOnly ? kWorkspaceReadAccess : kWorkspaceWriteAccess;
+}
 
 struct Probe {
   bool appContainer = false;
@@ -150,7 +165,7 @@ bool canConfigureNetworkCapability(std::wstring* reason) {
   return addInternetClientCapability(&capability, reason);
 }
 
-bool accessAllowedForSid(const std::wstring& path, PSID wanted) {
+bool accessMaskForSid(const std::wstring& path, PSID wanted, DWORD* foundMask) {
   PACL dacl = nullptr;
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   const DWORD status = GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
@@ -160,6 +175,7 @@ bool accessAllowedForSid(const std::wstring& path, PSID wanted) {
     return false;
   }
   bool found = false;
+  DWORD mask = 0;
   for (DWORD index = 0; index < dacl->AceCount; ++index) {
     void* ace = nullptr;
     if (!GetAce(dacl, index, &ace)) continue;
@@ -167,17 +183,25 @@ bool accessAllowedForSid(const std::wstring& path, PSID wanted) {
     if (header->AceType != ACCESS_ALLOWED_ACE_TYPE) continue;
     const auto* allowed = static_cast<ACCESS_ALLOWED_ACE*>(ace);
     const PSID sid = reinterpret_cast<PSID>(const_cast<DWORD*>(&allowed->SidStart));
-    if (EqualSid(sid, wanted) && (allowed->Mask & kWorkspaceAccess) == kWorkspaceAccess) {
-      found = true;
-      break;
-    }
+    if (!EqualSid(sid, wanted)) continue;
+    mask |= allowed->Mask;
+    found = true;
   }
   LocalFree(descriptor);
+  if (found) *foundMask = mask;
   return found;
 }
 
-bool grantAccess(const std::wstring& path, PSID sid, bool directory, std::wstring* reason) {
-  if (accessAllowedForSid(path, sid)) return true;
+bool accessAllowedForSid(const std::wstring& path, PSID wanted, DWORD wantedMask) {
+  DWORD current = 0;
+  return accessMaskForSid(path, wanted, &current) && (current & wantedMask) == wantedMask;
+}
+
+bool grantAccess(const std::wstring& path, PSID sid, bool directory, DWORD mask, bool tightenReadOnly, std::wstring* reason) {
+  DWORD current = 0;
+  const bool has = accessMaskForSid(path, sid, &current);
+  // 只读档必须确认**没有写位**：已有读权限不代表已经从 workspace-write 降级。
+  if (has && (current & mask) == mask && (!tightenReadOnly || (current & FILE_GENERIC_WRITE) == 0)) return true;
   PACL oldDacl = nullptr;
   PSECURITY_DESCRIPTOR descriptor = nullptr;
   DWORD status = GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
@@ -188,8 +212,10 @@ bool grantAccess(const std::wstring& path, PSID sid, bool directory, std::wstrin
   }
 
   EXPLICIT_ACCESSW access{};
-  access.grfAccessPermissions = kWorkspaceAccess;
-  access.grfAccessMode = GRANT_ACCESS;
+  access.grfAccessPermissions = mask;
+  // SET_ACCESS：从 workspace-write 切到 read-only 时必须**降级**已有 ACE，
+  // 只做 GRANT_ACCESS 会把写权限留在原处，只读档名存实亡。
+  access.grfAccessMode = SET_ACCESS;
   access.grfInheritance = directory ? (CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE) : NO_INHERITANCE;
   access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
   access.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
@@ -210,21 +236,24 @@ bool grantAccess(const std::wstring& path, PSID sid, bool directory, std::wstrin
   return true;
 }
 
-bool grantWorkspace(const std::wstring& root, PSID sid, std::wstring* reason) {
+bool grantWorkspace(const std::wstring& root, PSID sid, SandboxMode mode, std::wstring* reason) {
+  if (mode == SandboxMode::FullAccess) return true; // 完全访问不设文件边界
+  const DWORD mask = modeAccessMask(mode);
+  const bool tightenReadOnly = mode == SandboxMode::ReadOnly;
   std::error_code error;
   const std::filesystem::path base(root);
   if (!std::filesystem::is_directory(base, error) || error) {
     *reason = L"工作区目录不存在或不可访问: " + root;
     return false;
   }
-  if (!grantAccess(root, sid, true, reason)) return false;
+  if (!grantAccess(root, sid, true, mask, tightenReadOnly, reason)) return false;
 
   std::filesystem::recursive_directory_iterator it(base, std::filesystem::directory_options::skip_permission_denied, error);
   const std::filesystem::recursive_directory_iterator end;
   while (!error && it != end) {
     const std::filesystem::path item = it->path();
     const bool directory = it->is_directory(error);
-    if (error || !grantAccess(item.wstring(), sid, directory, reason)) return false;
+    if (error || !grantAccess(item.wstring(), sid, directory, mask, tightenReadOnly, reason)) return false;
     it.increment(error);
   }
   if (error) {
@@ -385,7 +414,8 @@ Probe probe(const std::wstring& workspace) {
   PSID sid = nullptr;
   if (!getAppContainerSid(&sid, &result.reason)) return result;
   result.appContainer = true;
-  result.workspaceAcl = accessAllowedForSid(workspace, sid);
+  // 只读 ACL 已授予即视为“Provider 就绪”；写权限在 prepare 时按档位升级。
+  result.workspaceAcl = accessAllowedForSid(workspace, sid, kWorkspaceReadAccess);
   std::wstring networkReason;
   result.networkPolicy = canConfigureNetworkCapability(&networkReason);
   std::wstring jobReason;
@@ -397,18 +427,20 @@ Probe probe(const std::wstring& workspace) {
   return result;
 }
 
-Probe prepare(const std::wstring& workspace, bool allowNetwork) {
+Probe prepare(const std::wstring& workspace, bool allowNetwork, SandboxMode mode) {
   Probe result;
   std::wstring networkReason;
   if (!canConfigureNetworkCapability(&networkReason)) { result.reason = networkReason; return result; }
   PSID sid = nullptr;
   if (!getAppContainerSid(&sid, &result.reason)) return result;
   result.appContainer = true;
-  if (!grantWorkspace(workspace, sid, &result.reason)) {
+  if (!grantWorkspace(workspace, sid, mode, &result.reason)) {
     FreeSid(sid);
     return result;
   }
-  result.workspaceAcl = accessAllowedForSid(workspace, sid);
+  result.workspaceAcl = mode == SandboxMode::FullAccess
+    ? true
+    : accessAllowedForSid(workspace, sid, modeAccessMask(mode));
   result.networkPolicy = true;
   std::wstring jobReason;
   result.jobObject = canCreateJob(&jobReason);
@@ -433,7 +465,54 @@ std::wstring quote(const std::wstring& arg) {
   return out;
 }
 
-int runSandboxed(const std::wstring& workspace, bool allowNetwork, const std::vector<std::wstring>& target) {
+/**
+ * 完全访问：不套 AppContainer/ACL，只保留 Job Object 做进程树回收。
+ * 文件与网络边界由策略/审批决定，而不是 OS 沙箱。
+ */
+int runWithJobOnly(const std::wstring& workspace, const std::vector<std::wstring>& target) {
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (job == nullptr || !SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+    std::wcerr << L"无法创建受控 Job Object: " << lastError() << std::endl;
+    if (job != nullptr) CloseHandle(job);
+    return 7;
+  }
+
+  std::wstring commandLine;
+  for (const auto& arg : target) {
+    if (!commandLine.empty()) commandLine += L' ';
+    commandLine += quote(arg);
+  }
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  const BOOL launched = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, TRUE,
+                                       CREATE_SUSPENDED, nullptr, workspace.c_str(), &startup, &process);
+  if (!launched) {
+    std::wcerr << L"无法启动目标程序: " << lastError() << std::endl;
+    CloseHandle(job);
+    return 10;
+  }
+  if (!AssignProcessToJobObject(job, process.hProcess)) {
+    std::wcerr << L"无法把目标程序加入 Job Object: " << lastError() << std::endl;
+    TerminateProcess(process.hProcess, 1);
+    CloseHandle(process.hThread); CloseHandle(process.hProcess);
+    CloseHandle(job);
+    return 11;
+  }
+  ResumeThread(process.hThread);
+  WaitForSingleObject(process.hProcess, INFINITE);
+  DWORD exitCode = 1;
+  GetExitCodeProcess(process.hProcess, &exitCode);
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+  CloseHandle(job);
+  return static_cast<int>(exitCode);
+}
+
+int runSandboxed(const std::wstring& workspace, bool allowNetwork, SandboxMode mode, const std::vector<std::wstring>& target) {
+  if (mode == SandboxMode::FullAccess) return runWithJobOnly(workspace, target);
   CapabilitySet networkCapabilities;
   std::wstring networkReason;
   if (allowNetwork && !addInternetClientCapability(&networkCapabilities, &networkReason)) {
@@ -446,7 +525,7 @@ int runSandboxed(const std::wstring& workspace, bool allowNetwork, const std::ve
     std::wcerr << reason << std::endl;
     return 5;
   }
-  if (!grantWorkspace(workspace, sid, &reason)) {
+  if (!grantWorkspace(workspace, sid, mode, &reason)) {
     std::wcerr << reason << std::endl;
     FreeSid(sid);
     return 6;
@@ -515,7 +594,7 @@ int runSandboxed(const std::wstring& workspace, bool allowNetwork, const std::ve
   return static_cast<int>(exitCode);
 }
 
-void usage() { std::wcerr << L"Usage: lcode-sandbox-win32.exe --probe|--prepare|--revoke --workspace ROOT [--network deny|allow] | --run --workspace ROOT --network deny|allow -- COMMAND ... | --verify-job" << std::endl; }
+void usage() { std::wcerr << L"Usage: lcode-sandbox-win32.exe --probe|--prepare|--revoke --workspace ROOT [--network deny|allow] [--mode read-only|workspace-write|full-access] | --run --workspace ROOT --network deny|allow --mode MODE -- COMMAND ... | --verify-job" << std::endl; }
 
 } // namespace
 
@@ -543,17 +622,20 @@ int wmain() {
   }
   if (!isProbe && !isPrepare && !isRevoke && !isRun) { usage(); return 64; }
   std::wstring workspace;
+  std::wstring modeValue = L"workspace-write";
   bool allowNetwork = false;
   size_t targetStart = args.size();
   for (size_t i = 1; i < args.size(); ++i) {
     if (args[i] == L"--workspace" && i + 1 < args.size()) workspace = args[++i];
     else if (args[i] == L"--network" && i + 1 < args.size()) allowNetwork = args[++i] == L"allow";
+    else if (args[i] == L"--mode" && i + 1 < args.size()) modeValue = args[++i];
     else if (args[i] == L"--") { targetStart = i + 1; break; }
   }
   if (workspace.empty()) { usage(); return 64; }
+  const SandboxMode mode = parseMode(modeValue);
   if (isProbe) { printProbe(probe(workspace)); return 0; }
-  if (isPrepare) { printProbe(prepare(workspace, allowNetwork)); return 0; }
+  if (isPrepare) { printProbe(prepare(workspace, allowNetwork, mode)); return 0; }
   if (isRevoke) { printRelease(revokeWorkspace(workspace)); return 0; }
   if (targetStart >= args.size()) { usage(); return 64; }
-  return runSandboxed(workspace, allowNetwork, std::vector<std::wstring>(args.begin() + static_cast<std::ptrdiff_t>(targetStart), args.end()));
+  return runSandboxed(workspace, allowNetwork, mode, std::vector<std::wstring>(args.begin() + static_cast<std::ptrdiff_t>(targetStart), args.end()));
 }

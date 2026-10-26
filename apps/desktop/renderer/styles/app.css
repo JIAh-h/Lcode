@@ -245,6 +245,21 @@
 
 /* ── 输入区附件（FR-SESSION-004：附件以引用形式呈现）── */
 .composer-editor { position: relative; }
+/* 计划模式状态 chip：放在工具条上，不打开「＋」也能看见当前模式 */
+.planchip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 9px; border-radius: 999px; background: var(--accent-weak); color: var(--accent); font-size: 11.5px; line-height: 20px; white-space: nowrap; }
+.planchip-name { display: inline-flex; align-items: center; gap: 4px; }
+.planchip-go { border: none; background: var(--accent); color: #fff; border-radius: 999px; padding: 2px 9px; font-size: 11px; line-height: 16px; cursor: pointer; }
+.planchip-go:hover { opacity: 0.9; }
+.planchip-x { border: none; background: transparent; color: var(--accent); cursor: pointer; padding: 0 5px; font-size: 11px; line-height: 16px; }
+.planchip-x:hover { opacity: 0.7; }
+/* 计划确认框：步骤/风险可滚动，长计划不撑爆窗口 */
+.planreview { width: 560px; max-width: calc(100vw - 48px); }
+.planreview .mb { max-height: min(62vh, 520px); overflow-y: auto; display: flex; flex-direction: column; gap: 12px; }
+.planreview .sub { margin: 0; }
+.planreview-sec { display: flex; flex-direction: column; gap: 5px; }
+.planreview-lab { font-size: 11.5px; color: var(--text-muted); }
+.planreview-text { font-size: 13px; line-height: 20px; color: var(--text-primary); }
+.planreview-list { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; font-size: 13px; line-height: 20px; color: var(--text-primary); }
 /* 拖入文件/文件夹：整块输入区高亮，提示贴着上缘，不遮住正文 */
 .composer-drop { position: relative; border-radius: var(--r3); }
 .composer-drop.dragging { outline: 1.5px dashed var(--accent); outline-offset: 6px; }
@@ -291,7 +306,9 @@
 .wstitlebar { height: 38px; display: flex; align-items: center; gap: var(--s4); padding: 0 var(--s5); border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel); flex: none; }
 .wstitleact { width: 24px; height: 24px; display: grid; place-items: center; border: 0; background: transparent; border-radius: var(--r1); font-size: 14px; line-height: 1; color: var(--text-secondary); cursor: pointer; }
 .wstitleact:hover { background: var(--bg-inset); color: var(--text-primary); }
-.wstitlebar .wscumb { font-size: 12.5px; color: var(--text-secondary); font-weight: 500; }
+.wstitlebar .wscumb { min-width: 0; font-size: 12.5px; color: var(--text-secondary); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 会话操作（…）与它右侧的 Agent 预设 chip 作为一组，间距小于标题与组之间 */
+.wstitlebar .wstitleactions { display: flex; align-items: center; gap: 6px; flex: none; }
 .wstitlebar .wsp { flex: 1; }
 .wstitlebar .ticon { margin-left: 0; font-size: 13px; color: var(--text-muted); }
 .wstitlebar .ticon:hover { background: var(--bg-inset); color: var(--text-secondary); }
@@ -524,6 +541,8 @@ body.noside .side { display: none; }
 .setcol { max-width: 680px; display: flex; flex-direction: column; gap: var(--s6); }
 .setcol h2 { font-size: 17px; font-weight: 600; margin: 0; }
 .setcol .sub { font-size: 12.5px; color: var(--text-muted); margin-top: -12px; }
+/* 卡片内的小标题是 .sh2 的下一行，不能再吃页面级 -12px，否则压到分隔线上 */
+.sect .sub { margin-top: 10px; padding: 0 var(--s5); line-height: 18px; }
 .setcol .field { max-width: none; }
 .sect { border: 1px solid var(--border-subtle); border-radius: var(--r4); background: var(--bg-elevated); overflow: hidden; box-shadow: var(--sh-1); }
 .sect .sh2 { padding: var(--s4) var(--s5); border-bottom: 1px solid var(--border-subtle); font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: var(--s3); }
@@ -585,6 +604,42 @@ body.noside .side { display: none; }
 .ext-empty-note { margin-top: 4px; font-size: 11.5px; color: var(--text-muted); }
 .ext-empty-actions { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
 .ext-empty .btn { padding: 6px 14px; font-size: 12px; }
+/* 内置插件总览：两列卡片，只读；停用项带灰标签，展开显示运行细节 */
+.bplug-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px var(--s5) var(--s5); }
+.bplug { display: flex; flex-direction: column; gap: 5px; padding: 10px 12px 9px; border: 1px solid var(--border-subtle); border-radius: var(--r3); background: var(--bg-canvas); min-width: 0; }
+.bplug-head { display: flex; align-items: center; gap: 6px; padding: 0; border: none; background: transparent; text-align: left; cursor: pointer; min-width: 0; }
+.bplug-name { font-size: 13px; font-weight: 500; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bplug-tag { flex: none; padding: 1px 6px; border-radius: 4px; background: var(--bg-inset); color: var(--text-muted); font-size: 10.5px; }
+.bplug-chev { margin-left: auto; flex: none; color: var(--text-muted); font-size: 11px; }
+.bplug-head:hover .bplug-name { color: var(--accent); }
+.bplug-desc { font-size: 11.5px; line-height: 17px; color: var(--text-secondary); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.bplug-id { align-self: flex-start; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); background: var(--bg-inset); border-radius: 4px; padding: 1px 6px; }
+.bplug.off .bplug-name, .bplug.off .bplug-desc { color: var(--text-muted); }
+.bplug-detail { margin-top: 5px; padding: 8px 10px; border-radius: var(--r2); background: var(--bg-inset); display: flex; flex-direction: column; gap: 5px; }
+.bplug-row { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: 8px; align-items: start; font-size: 11.5px; line-height: 16px; }
+.bplug-row > span:first-child { color: var(--text-muted); }
+.bplug-row > span:last-child, .bplug-row > code { color: var(--text-secondary); overflow-wrap: anywhere; }
+.bplug-note { margin-top: 12px; padding: 14px 12px; border: 1px dashed var(--border-subtle); border-radius: var(--r3); font-size: 12px; color: var(--text-muted); }
+/* Agent 预设：两列卡片，当前项高亮；未开放的预设保留占位并灰显 */
+.presetgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: var(--s4) var(--s5) var(--s5); }
+.presetcard { display: flex; flex-direction: column; gap: 8px; padding: 12px; border: 1px solid var(--border-subtle); border-radius: var(--r3); background: var(--bg-canvas); color: var(--text-primary); text-align: left; cursor: pointer; }
+.presetcard:hover:not(:disabled) { border-color: var(--border-strong); }
+.presetcard.on { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-weak); }
+.presetcard:disabled { cursor: not-allowed; }
+.presethead { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.presetname { font-size: 13px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.presetdesc { font-size: 12px; line-height: 18px; color: var(--text-secondary); }
+.presetcard:disabled .presetname, .presetcard:disabled .presetdesc { color: var(--text-muted); }
+.presetid { align-self: flex-start; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-muted); background: var(--bg-inset); border-radius: 4px; padding: 1px 6px; }
+/* 网络白名单域名 chip */
+.netdomain { display: inline-flex; align-items: center; gap: 4px; padding: 1px 4px 1px 8px; border-radius: 6px; background: var(--bg-inset); color: var(--text-secondary); font-size: 11.5px; line-height: 18px; }
+.netdomain button { border: none; background: transparent; color: var(--text-muted); cursor: pointer; padding: 0 3px; font-size: 10.5px; }
+.netdomain button:hover { color: var(--text-primary); }
+.audit-allowed { color: var(--state-success); font-weight: 600; }
+.audit-denied { color: var(--state-error); font-weight: 600; }
+.net-audit-url { font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 工作台标题栏：会话名右侧显示当前 Agent 预设 */
+.wspreset { flex: none; padding: 1px 8px; border: 1px solid var(--border-subtle); border-radius: 999px; color: var(--text-muted); font-size: 11px; line-height: 17px; white-space: nowrap; }
 /* 账户头像 / 色板 */
 .avatarlg { width: 52px; height: 52px; border-radius: 50%; background: linear-gradient(135deg, #8a8a92, #4a4a52); color: #fff; display: grid; place-items: center; font-size: 20px; font-weight: 600; flex: none; }
 .swatches { display: flex; gap: var(--s3); }
@@ -832,6 +887,7 @@ body.noside .side { display: none; }
 .ap-danger-hint { font-size: 11.5px; color: var(--text-muted); }
 .ap-paths { display: flex; flex-direction: column; gap: 4px; }
 .ap-path { font-size: 12px; color: var(--text-secondary); word-break: break-all; }
+.ap-url { margin-top: 2px; font-size: 11.5px; color: var(--text-secondary); word-break: break-all; }
 .ap-meta { font-size: 12px; color: var(--text-muted); }
 .ap-foot { display: flex; justify-content: flex-end; gap: var(--s2); margin-top: var(--s2); }
 .ask-page { display: grid; place-items: center; min-height: 240px; }
@@ -849,6 +905,7 @@ body.noside .side { display: none; }
 .approval-card-basis, .approval-card-meta { color: var(--text-secondary); font-size: 11.5px; line-height: 18px; overflow-wrap: anywhere; }
 .approval-card-danger { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; border-left: 3px solid var(--state-error); border-radius: 5px; background: var(--bg-inset); color: var(--text-secondary); font-size: 11.5px; overflow-wrap: anywhere; }
 .approval-card-danger strong { color: var(--state-error); font-size: 11.5px; }
+.approval-card-url { margin-top: 2px; color: var(--text-primary); word-break: break-all; }
 .approval-card-id { color: var(--text-muted); font-size: 10.5px; }
 
 /* 工具过程记录：与"用户说的话"明确区分（派生历史里两者都是 user 角色） */

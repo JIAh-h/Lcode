@@ -90,20 +90,27 @@ export function createWindowsSandboxBridge(options: WindowsSandboxBridgeOptions)
       const prepared = await invoke(options.subprocess, [
         candidate, '--prepare', '--workspace', policy.workspaceRoot,
         '--network', policy.allowNetwork === true ? 'allow' : 'deny',
+        '--mode', policy.mode,
       ])
       const proof = parseProbe(prepared.stdout)
-      if (proof === undefined || !isEnforced(proof)) {
+      const ready = proof === undefined
+        ? false
+        : policy.mode === 'danger-full-access'
+          ? proof.jobObject
+          : isEnforced(proof)
+      if (!ready || proof === undefined) {
         return {
           enforced: false,
           wrappedArgv: [...argv],
-          degradationReason: proof?.reason ?? (prepared.stderr.trim() || 'Windows 原生 helper 未能完成工作区 ACL 预检。'),
+          degradationReason: proof?.reason ?? (prepared.stderr.trim() || 'Windows 原生 helper 未能完成工作区预检。'),
         }
       }
       // helper 自己继承 Node 已设置好的 cwd / env；所以这里仅写 argv，不把环境变量
       // 或路径参数拼进 shell 字符串。
       return {
         enforced: true,
-        wrappedArgv: [candidate, '--run', '--workspace', policy.workspaceRoot, '--network', policy.allowNetwork === true ? 'allow' : 'deny', '--', ...argv],
+        mechanism: MECHANISM,
+        wrappedArgv: [candidate, '--run', '--workspace', policy.workspaceRoot, '--network', policy.allowNetwork === true ? 'allow' : 'deny', '--mode', policy.mode, '--', ...argv],
       }
     },
     async wrapPty(argv, policy): Promise<SandboxWrapResult> {
@@ -168,6 +175,7 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): Sandb
       knownEscapeSurfaces: enforced ? ['网络 capability 只能按回合开关授予，域名级限制仍由策略层负责'] : missingBoundaries(lastProbe),
       degraded: !enforced,
       ...(reason === undefined ? {} : { reason }),
+      providerAvailable: canPrepare(lastProbe),
       capabilities: capabilities(enforced, reason),
     }
   }
@@ -177,7 +185,7 @@ export function createWindowsSandbox(options: WindowsSandboxOptions = {}): Sandb
     async wrap(argv, policy) {
       const current = lastProbe ?? await probe()
       lastProbe = current
-      if (!canPrepare(current) || options.bridge === undefined) {
+      if (!canPrepare(current, policy.mode) || options.bridge === undefined) {
         // 策略层会先读 status 并走审批/拒绝分支；这里保持 SandboxService 的降级形状，
         // 不能把“没有桥”伪装成被包装了。
         return { enforced: false, wrappedArgv: [...argv], degradationReason: current.reason ?? missingBoundaryReason(current) }
@@ -221,8 +229,9 @@ function isEnforced(probe: WindowsSandboxProbe): boolean {
   return probe.appContainer && probe.workspaceAcl && probe.networkPolicy && probe.jobObject
 }
 
-/** 首次执行可在获批后由 helper 授予工作区 ACL；其余三个边界必须已可用。 */
-function canPrepare(probe: WindowsSandboxProbe): boolean {
+/** 首次执行可在获批后由 helper 授予工作区 ACL；其余边界必须已可用。完全访问只需要 Job Object。 */
+function canPrepare(probe: WindowsSandboxProbe, mode: ResolvedSandboxPolicy['mode'] = 'workspace-write'): boolean {
+  if (mode === 'danger-full-access') return probe.jobObject
   return probe.appContainer && probe.networkPolicy && probe.jobObject
 }
 

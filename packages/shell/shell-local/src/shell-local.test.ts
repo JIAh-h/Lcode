@@ -142,6 +142,19 @@ describe('沙箱：降级必须如实上报', () => {
     expect(r.stdout).toBe('sandboxed')
     expect(r.sandbox.enforced).toBe(true)
   })
+
+  it('把执行 scope 交给包装器（供会话审计回写）', async () => {
+    let seen: unknown
+    const s = createLocalShell({
+      workspaceRoot: root,
+      wrap: async (argv, _policy, scope) => {
+        seen = scope
+        return { enforced: true, wrappedArgv: [...argv] }
+      },
+    }).shell
+    await s.run([node, '-e', '0'], { scope: { sessionId: 'sess-1' } })
+    expect(seen).toEqual({ sessionId: 'sess-1' })
+  })
 })
 
 describe('执行 Provider', () => {

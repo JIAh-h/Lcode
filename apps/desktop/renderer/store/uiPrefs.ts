@@ -30,16 +30,14 @@ export interface ModelEntry {
 }
 
 /** 权限预设：产品层字面量，写死在文档 12 §3.3 与 UI 中（底层是两条轴的打包） */
-export const PERMISSION_PRESETS = ['只读', '标准', '自动', '完全访问', '无人值守'] as const
+export const PERMISSION_PRESETS = ['只读', '工作区内修改', '完全访问'] as const
 export type PermissionPreset = (typeof PERMISSION_PRESETS)[number]
 
 /** 权限预设的用户预期（文档 12 §3.3 表格原文，用于菜单里的说明行） */
 export const PERMISSION_PRESET_HINT: Readonly<Record<PermissionPreset, string>> = {
   只读: '它只能看，不能改',
-  标准: '能改我的项目，动手前问我',
-  自动: '受系统级沙箱约束时，工作区内自行执行',
+  工作区内修改: '能改工作区内的文件；越界或高风险动作前问你',
   完全访问: '哪里都能碰，但动手前问我',
-  无人值守: '受系统级沙箱约束时用于自动化',
 }
 
 export interface UiPrefs {
@@ -69,7 +67,7 @@ const INITIAL: UiPrefs = {
   /** 空串 = 还没选；拿到清单后由 `syncModelsFromMain()` 按主进程的设置回填 */
   defaultProvider: '',
   defaultModel: '',
-  permissionPreset: '标准',
+  permissionPreset: '工作区内修改',
 }
 
 let state: UiPrefs = INITIAL

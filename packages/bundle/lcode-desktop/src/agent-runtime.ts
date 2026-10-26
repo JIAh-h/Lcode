@@ -60,6 +60,8 @@ export interface AgentRuntimeOptions {
   readonly profile?: BuiltinRuntimeProfileId | undefined
   /** 显式注入的网页 Provider；省略时默认 Profile 不暴露联网工具。 */
   readonly web?: WebService | undefined
+  /** 是否注册 web_search；未配置搜索 backend 时桌面端传 false。 */
+  readonly webSearch?: boolean | undefined
   /** 显式注入的语言服务 Provider；省略时默认 Profile 不启动语言服务进程。 */
   readonly lsp?: LspService | undefined
   /** 可替换的模型路由策略；省略时仍挂载空规则 provider，保持整轮冻结语义。 */
@@ -68,6 +70,11 @@ export interface AgentRuntimeOptions {
   readonly codeRuntime?: CodeRuntime | undefined
   /** 显式摘要器；只在用户手动压缩时调用，不参与自动触发。 */
   readonly compactionSummarizer?: CompactionSummarizer | undefined
+  /**
+   * Windows 沙箱 helper 的精确路径。桌面主进程按“打包/开发”给出唯一候选，
+   * 避免默认实现里的 `process.cwd()` 兜底被同名文件替换。
+   */
+  readonly sandboxHelperPaths?: readonly string[] | undefined
 }
 
 import type { Disposer } from '@lcode/util'
@@ -84,7 +91,11 @@ import { createShellTool } from '@lcode/tool-shell'
 import { createTerminalTool } from '@lcode/tool-terminal'
 import { createLocalTerminal } from '@lcode/terminal-pty'
 import { createFsTools } from '@lcode/tool-fs'
-import type { SandboxService } from '@lcode/sandbox'
+import type { SandboxService, ResolvedSandboxPolicy, SandboxWrapResult, SandboxMode } from '@lcode/sandbox'
+import { gcSandboxGrants, recordSandboxGrant } from './sandbox-grants.ts'
+import { createLocalAgentPresetSetting } from './agent-preset-setting.ts'
+import { createLocalWebAllowlist } from './web-allowlist.ts'
+import { createLocalNetworkAudit } from './network-audit.ts'
 import { createLocalPermissionPresets, createLocalWorkspaceTrust, installPolicyHook } from '@lcode/permission-presets'
 import { createPlanModeService } from '@lcode/plan-mode'
 import { LocalPluginRegistry, type PluginInfo } from '@lcode/plugin-registry'
@@ -317,6 +328,22 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
   const composition = await composeRuntimeProfile(services.ctx, profile)
   compositionSnapshot = composition.snapshot
   if (mounted === undefined) throw new Error('内部组合未能挂载 lcode-spine')
+
+  /*
+   * 启动 GC：上一次进程可能崩溃在“授予 ACL 之后、撤销之前”。这里只处理
+   * **已不再受信任**的工作区；撤销失败保留到下次启动重试，不能阻塞启动。
+   */
+  try {
+    const trust = services.ctx.has('workspaceTrust') ? services.ctx.get('workspaceTrust') : undefined
+    await gcSandboxGrants({
+      home: services.home,
+      sandbox: services.ctx.get('sandbox'),
+      isTrusted: (workspace) => trust?.isTrusted(workspace) ?? false,
+    })
+  } catch {
+    // 清理失败不影响运行时；授权日志会保留，下次启动重试。
+  }
+
   return {
     ...mounted,
     composition: composition.snapshot,
@@ -353,14 +380,32 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
 function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServices, sessions: LocalSessionsApi, mutationAuthority: ReturnType<typeof createFsMutationAuthority>, ctx: DesktopServices['ctx'], profile: () => RuntimeCompositionSnapshot): Disposer {
   const permissionPresets = createLocalPermissionPresets({ home: services.home })
   const unregisterPresets = ctx.set('permissionPresets', permissionPresets)
+  const webAllowlist = createLocalWebAllowlist({ home: services.home })
+  const unregisterWebAllowlist = ctx.set('webAllowlist', webAllowlist)
+  const networkAudit = createLocalNetworkAudit({ home: services.home })
+  const unregisterNetworkAudit = ctx.set('networkAudit', networkAudit)
   const workspaceTrust = createLocalWorkspaceTrust({ home: services.home })
   const unregisterTrust = ctx.set('workspaceTrust', workspaceTrust)
   const subagentProvider = registerInprocessSubagents({ ctx, sessions, workspaceOf: (id) => sessions.workspaceOf(id), profile })
   const unregisterSubagentTool = ctx.get('tools').register(createSubagentTool(ctx))
-  const uninstallPolicy = installPolicyHook({ ctx, ...(options.approval === undefined ? {} : { approval: options.approval }), sandbox: ctx.get('sandbox'), presets: permissionPresets, workspaceTrust, mutationAuthority, workspaceOf: (id) => sessions.workspaceOf(id), getSession: (id) => { try { return sessions.sessionServiceFor(id) } catch { return undefined } } })
+  const uninstallPolicy = installPolicyHook({
+    ctx,
+    ...(options.approval === undefined ? {} : { approval: options.approval }),
+    sandbox: ctx.get('sandbox'),
+    presets: permissionPresets,
+    workspaceTrust,
+    webAllowlist,
+    networkAudit,
+    maxWebSearchesPerTurn: 5,
+    mutationAuthority,
+    workspaceOf: (id) => sessions.workspaceOf(id),
+    getSession: (id) => {
+      try { return sessions.sessionServiceFor(id) } catch { return undefined }
+    },
+  })
   const planMode = createPlanModeService({ ctx, getSession: (id) => sessions.sessionServiceFor(id), systemPrompt: ctx.get('systemPrompt'), tools: ctx.get('tools'), ...(options.approval === undefined ? {} : { approval: options.approval }) })
   const unregisterPlan = ctx.set('planMode', planMode)
-  return () => { planMode.dispose(); unregisterPlan(); uninstallPolicy(); unregisterSubagentTool(); subagentProvider.dispose(); unregisterTrust(); unregisterPresets() }
+  return () => { planMode.dispose(); unregisterPlan(); uninstallPolicy(); unregisterSubagentTool(); subagentProvider.dispose(); unregisterTrust(); unregisterNetworkAudit(); unregisterWebAllowlist(); unregisterPresets() }
 }
 
 /**
@@ -377,7 +422,7 @@ function createOptionalCapabilityEntries(options: AgentRuntimeOptions): readonly
       provides: ['web'],
       mount: (ctx) => {
         const unregisterWeb = ctx.set('web', web)
-        const unregisterTools = createWebTools(web).map((tool) => ctx.get('tools').register(tool))
+        const unregisterTools = createWebTools(web, { search: options.webSearch !== false }).map((tool) => ctx.get('tools').register(tool))
         return () => {
           for (const unregister of unregisterTools.reverse()) unregister()
           unregisterWeb()
@@ -502,12 +547,13 @@ function mountCodeRuntimeBundle(options: AgentRuntimeOptions, ctx: DesktopServic
   }
 }
 
-function mountExecutionBundle(options: AgentRuntimeOptions, services: DesktopServices, _sessions: LocalSessionsApi, ctx: DesktopServices['ctx']): { readonly fsMutationAuthority: ReturnType<typeof createFsMutationAuthority>; readonly dispose: Disposer } {
+function mountExecutionBundle(options: AgentRuntimeOptions, services: DesktopServices, sessions: LocalSessionsApi, ctx: DesktopServices['ctx']): { readonly fsMutationAuthority: ReturnType<typeof createFsMutationAuthority>; readonly dispose: Disposer } {
   const unregister: Disposer[] = []
   const workspaceRoot = options.workspaceRoot ?? process.cwd()
   const subprocess = createLocalSubprocess()
   unregister.push(ctx.set('subprocess', subprocess))
-  const sandbox = options.sandbox ?? defaultSandbox(subprocess, workspaceRoot)
+  unregister.push(ctx.set('agentPreset', createLocalAgentPresetSetting({ home: services.home })))
+  const sandbox = options.sandbox ?? defaultSandbox(subprocess, workspaceRoot, options.sandboxHelperPaths)
   unregister.push(ctx.set('sandbox', sandbox))
   const fsMutationAuthority = createFsMutationAuthority()
   unregister.push(ctx.set('fs', createLocalFs({ workspaceRoot, mutationAuthority: fsMutationAuthority })))
@@ -515,9 +561,63 @@ function mountExecutionBundle(options: AgentRuntimeOptions, services: DesktopSer
   unregister.push(registerLocalSpill({ ctx, home: services.home }))
   const jobs = createLocalJobs()
   unregister.push(ctx.set('jobs', jobs))
-  const { shell } = createLocalShell({ workspaceRoot, subprocess, wrap: (argv, policy) => sandbox.wrap(argv, policy), jobs })
+
+  /*
+   * 沙箱结果写回会话审计：`sandbox/profile` 记录本次实际生效的机制/档位，
+   * 回放时能还原“当时到底有没有沙箱、什么档位”。同一会话连续相同的 profile
+   * 只记一次，避免每条命令都重复一条事件。
+   */
+  const lastProfile = new Map<string, string>()
+  const recordSandbox = (sessionId: string | undefined, policy: ResolvedSandboxPolicy, result: SandboxWrapResult): void => {
+    if (!result.enforced || sessionId === undefined || sessionId === '') return
+    if (policy.mode !== 'danger-full-access') recordSandboxGrant(services.home, policy.workspaceRoot)
+    const profile = result.profile ?? `${result.mechanism ?? 'OS sandbox'} · ${policy.mode}${policy.allowNetwork === true ? ' · network' : ''}`
+    const key = `${policy.mode}|${profile}`
+    if (lastProfile.get(sessionId) === key) return
+    lastProfile.set(sessionId, key)
+    try {
+      sessions.sessionServiceFor(sessionId).append({
+        type: 'sandbox/profile',
+        data: { profile, mode: policy.mode as SandboxMode },
+      })
+    } catch {
+      // 会话未打开/已关闭：审计事件不是执行前提，不能反过来让命令失败。
+    }
+  }
+  const sessionIdOfScope = (scope: unknown): string | undefined => {
+    if (typeof scope !== 'object' || scope === null) return undefined
+    const id = (scope as { sessionId?: unknown }).sessionId
+    return typeof id === 'string' && id !== '' ? id : undefined
+  }
+
+  const { shell } = createLocalShell({
+    workspaceRoot,
+    subprocess,
+    jobs,
+    wrap: async (argv, policy, scope) => {
+      const result = await sandbox.wrap(argv, policy)
+      recordSandbox(sessionIdOfScope(scope), policy, result)
+      return result
+    },
+  })
   unregister.push(ctx.set('shell', shell))
-  const terminals = createLocalTerminal({ workspaceRoot, subprocess, sandbox })
+
+  const terminalSandbox = {
+    status: () => sandbox.status(),
+    ...(sandbox.wrapPty === undefined
+      ? {}
+      : {
+          async wrapPty(argv: readonly string[], policy: ResolvedSandboxPolicy, ownerAgentId?: string) {
+            const result = await sandbox.wrapPty!(argv, policy)
+            recordSandbox(ownerAgentId, policy, result)
+            return result
+          },
+        }),
+    ...(sandbox.releaseWorkspace === undefined
+      ? {}
+      : { releaseWorkspace: (workspace: string) => sandbox.releaseWorkspace!(workspace) }),
+  }
+  const terminals = createLocalTerminal({ workspaceRoot, subprocess, sandbox: terminalSandbox })
   unregister.push(ctx.set('terminals', terminals))
   return { fsMutationAuthority, dispose: async () => { await jobs.dispose(); await terminals.dispose(); for (const dispose of unregister.reverse()) dispose() } }
 }
@@ -820,8 +920,8 @@ function activeContextWindow(services: DesktopServices): number | undefined {
   return FALLBACK_CONTEXT_WINDOW
 }
 
-function defaultSandbox(subprocess: ReturnType<typeof createLocalSubprocess>, workspaceRoot: string): SandboxService {
-  if (process.platform === 'win32') return createWindowsSandbox({ bridge: createWindowsSandboxBridge({ subprocess, workspaceRoot }) })
+function defaultSandbox(subprocess: ReturnType<typeof createLocalSubprocess>, workspaceRoot: string, helperPaths?: readonly string[]): SandboxService {
+  if (process.platform === 'win32') return createWindowsSandbox({ bridge: createWindowsSandboxBridge({ subprocess, workspaceRoot, ...(helperPaths === undefined ? {} : { helperPaths }) }) })
   if (process.platform === 'darwin') return createMacosSandbox()
   if (process.platform === 'linux') return createLinuxSandbox()
   // 未知平台也必须保守降级；Linux/macOS 不能被未知平台的实现假冒。

@@ -740,7 +740,7 @@ describe('A. 装配的接线正确性', () => {
     expect(rt.ctx.get('terminals')).toBeDefined()
     expect(rt.ctx.get('jobs')).toBeDefined()
     expect(rt.ctx.get('sandbox')).toBeDefined()
-    expect(rt.ctx.get('permissionPresets').get()).toBe('标准')
+    expect(rt.ctx.get('permissionPresets').get()).toBe('工作区内修改')
   })
 
   it('P6 产品接入：本地插件、Skill 和预设都经 Runtime 装配且可追溯', async () => {

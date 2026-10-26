@@ -21,8 +21,9 @@ export interface PlatformSandboxCapabilities {
 /**
  * 三平台能力矩阵的唯一来源。
  *
- * 当前所有原生后端均未接入，因此所有 boundary 都必须明确为 unavailable。后续各
- * 平台实现只能在真机验收通过后把对应项升为 enforced；不得只改产品文案。
+ * 这里是**无原生 Provider 时的降级文案**（`sandbox-local` 使用）；Windows/Linux/macOS
+ * 各自的原生 Provider 会给出自己真实的能力快照。原生实现只能在真机验收通过后把
+ * 对应 boundary 升为 enforced；不得只改产品文案。
  */
 export function platformSandboxCapabilities(platform: string = process.platform): PlatformSandboxCapabilities {
   const descriptor = platformDescriptor(platform)
@@ -48,17 +49,17 @@ function platformDescriptor(platform: string): { readonly mechanism: string; rea
     case 'win32':
       return {
         mechanism: 'AppContainer + Job Object',
-        reason: 'Windows 原生沙箱（AppContainer + Job Object）尚未接入，命令在无约束下运行。',
+        reason: '未检测到 Windows 原生沙箱 helper（AppContainer + Job Object）；命令在无约束下运行。',
       }
     case 'darwin':
       return {
         mechanism: 'Seatbelt',
-        reason: 'macOS 沙箱（Seatbelt）尚未接入，命令在无约束下运行。',
+        reason: '未检测到可用的 Seatbelt（sandbox-exec）；命令在无约束下运行。',
       }
     case 'linux':
       return {
         mechanism: 'Landlock + seccomp',
-        reason: 'Linux 沙箱（Landlock + seccomp）尚未接入，命令在无约束下运行。',
+        reason: 'Linux 原生沙箱 helper 尚未安装；命令在无约束下运行。',
       }
     default:
       return {

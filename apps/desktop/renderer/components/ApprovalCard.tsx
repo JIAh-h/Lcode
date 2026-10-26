@@ -38,6 +38,7 @@ export function ApprovalCard({ callId, action, basis, impact, decision }: Approv
   const outside = (impact.paths ?? []).filter((path) => path.outsideWorkspace)
   const inside = (impact.paths ?? []).filter((path) => !path.outsideWorkspace)
   const domains = impact.network?.domains ?? []
+  const networkUrl = impact.network?.url
 
   return (
     <section className="approval-card" aria-label={t('审批记录')}>
@@ -58,8 +59,17 @@ export function ApprovalCard({ callId, action, basis, impact, decision }: Approv
       ) : null}
       {domains.length > 0 ? (
         <div className="approval-card-danger">
-          <strong>{t('出站网络')}</strong>
-          {domains.map((domain) => <span className="mono" key={domain}>{domain}</span>)}
+          <strong>{domains.includes('*') ? t('网络访问') : t('出站网络')}</strong>
+          {domains.map((domain) => (
+            <span className="mono" key={domain}>
+              {domain === '*'
+                ? impact.network?.scope === 'terminal'
+                  ? t('任意域名（关闭终端前有效）')
+                  : t('任意域名（仅本次命令）')
+                : domain}
+            </span>
+          ))}
+          {networkUrl === undefined ? null : <span className="mono approval-card-url" title={networkUrl}>{t('请求地址：')}{networkUrl}</span>}
         </div>
       ) : null}
       {inside.length > 0 ? <div className="approval-card-meta">{t('工作区内：')}{inside.map((path) => `${path.mode === 'write' ? '写入' : '读取'} ${path.path}`).join('，')}</div> : null}

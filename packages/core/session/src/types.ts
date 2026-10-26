@@ -68,8 +68,13 @@ export interface ApprovalPathImpact {
  */
 export interface Impact {
   readonly paths?: readonly ApprovalPathImpact[] | undefined
-  /** 出站的域名（不是 URL——用户判断的是"要不要让数据去这个站"） */
-  readonly network?: { readonly domains: readonly string[] } | undefined
+  /** 出站的域名；`url` 额外展示完整请求地址（web 工具），用户才能看见路径/查询里的数据。 */
+  readonly network?: {
+    readonly domains: readonly string[]
+    readonly url?: string | undefined
+    /** 联网授权覆盖范围：一次性命令或持久终端会话。 */
+    readonly scope?: 'call' | 'terminal' | undefined
+  } | undefined
   /** 涉及的**环境变量名**（**只给名字不给值**——值可能含凭据，I7） */
   readonly env?: readonly string[] | undefined
   /** 沙箱档位变化（放宽档位本身是需要审批的动作之一，12 §9.3 ⑤） */
@@ -336,6 +341,15 @@ export interface SessionEventMap {
   'sandbox/degraded': { readonly reason: string; readonly mechanism: string }
   /** 某次执行生成的原生约束配置，供回放解释当时的实际边界。 */
   'sandbox/profile': { readonly profile: string; readonly mode: string }
+  /** 一次 web/命令联网审批的最终结果；域名 `*` 表示 shell 的整命令联网。 */
+  'network/request': {
+    readonly domain: string
+    readonly decision: 'allowed' | 'denied'
+    /** web 工具的完整请求地址；shell 整命令联网没有这一项。 */
+    readonly url?: string
+    /** 供回放解释的补充（如 rejected / sandbox-degraded）。 */
+    readonly detail?: string
+  }
   /** 已闭合回合的文件检查点；快照内容独立保存，日志只保存可审计的索引。 */
   'checkpoint/created': {
     readonly checkpointId: string

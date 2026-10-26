@@ -41,18 +41,20 @@ export function createLinuxSandbox(options: LinuxSandboxOptions = {}): SandboxSe
       knownEscapeSurfaces: enforced ? ['旧内核或过宽 seccomp 白名单需要持续回归'] : ['文件系统（无约束）', '网络（无约束）', '进程（无约束）'],
       degraded: !enforced,
       ...(reason === undefined ? {} : { reason }),
+      providerAvailable: isEnforced(lastProbe),
       capabilities: capabilities(enforced, reason),
     }
   }
   return {
     status,
     async wrap(argv, policy) {
+      if (policy.mode === 'danger-full-access') return { enforced: true, mechanism: 'none (full access)', wrappedArgv: [...argv] }
       const current = lastProbe ?? await safeProbe(probe)
       lastProbe = current
       if (!isEnforced(current) || options.bridge === undefined) return { enforced: false, wrappedArgv: [...argv], degradationReason: current.reason ?? missingReason(current) }
       const wrapped = await options.bridge.wrap(argv, policy)
       if (!wrapped.enforced || wrapped.wrappedArgv.length === 0) throw new Error(`Linux 原生沙箱 helper 未能包装命令：${wrapped.degradationReason ?? 'unknown'}`)
-      return { ...wrapped, wrappedArgv: [...wrapped.wrappedArgv] }
+      return { ...wrapped, mechanism: wrapped.mechanism ?? MECHANISM, wrappedArgv: [...wrapped.wrappedArgv] }
     },
     ...(options.bridge?.wrapPty === undefined ? {} : { async wrapPty(argv: readonly string[], policy: ResolvedSandboxPolicy) {
       const result = await options.bridge!.wrapPty!(argv, policy)

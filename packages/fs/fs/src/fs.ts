@@ -1,3 +1,6 @@
+import { realpathSync } from 'node:fs'
+import { basename, dirname, join, resolve } from 'node:path'
+
 /**
  * FsService —— 文件系统能力（文档 20 §6.1 文件族；21 §3.1–3.5 是工具侧的规范值形状）。
  *
@@ -167,6 +170,29 @@ declare module '@lcode/context' {
 /** 路径工具（接口层统一，22 §7.3） */
 export function normalizePath(p: string): string {
   return p.replace(/\\/g, '/').replace(/\/+/g, '/').replace(/\/$/, '') || '/'
+}
+
+/**
+ * 解析真实路径（symlink/junction 跟随）；目标不存在时取最近存在祖先的真实路径再接回剩余段。
+ *
+ * 策略判定与文件写入许可必须用**真实路径**：否则工作区内一个指向外部的 symlink
+ * 就能让“工作区内写”看起来合法，实际写到根目录之外。
+ */
+export function canonicalPath(path: string): string {
+  const absolute = resolve(path)
+  let current = absolute
+  const missing: string[] = []
+  for (;;) {
+    try {
+      const real = realpathSync.native(current)
+      return normalizePath(missing.length === 0 ? real : join(real, ...missing.reverse()))
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) return normalizePath(absolute)
+      missing.push(basename(current))
+      current = parent
+    }
+  }
 }
 
 /**

@@ -39,6 +39,8 @@ export interface SandboxWrapResult {
   readonly wrappedArgv: readonly string[]
   /** profile 文本（macOS 的 SBPL 等）；会写进 `sandbox/profile` 事件供回放 */
   readonly profile?: string | undefined
+  /** 实际生效的机制名（供审计事件与 UI 展示，例如 AppContainer + Job Object） */
+  readonly mechanism?: string | undefined
   /** 降级原因（仅在 `enforced: false` 时有意义，必须是**可读的**） */
   readonly degradationReason?: string | undefined
 }
@@ -51,6 +53,11 @@ export interface SandboxStatus {
   readonly degraded: boolean
   /** 降级时的可读原因；`degraded: false` 时为 undefined */
   readonly reason?: string | undefined
+  /**
+   * Provider 机制本身可用（工作区 ACL 等首次授权可能还没发生）。
+   * 只读档用它区分“还没 prepare”与“根本没有沙箱”，后者必须拒绝裸跑命令。
+   */
+  readonly providerAvailable?: boolean | undefined
   /** 文件、网络、进程三项的实际约束能力；不能由 UI 或文案自行推断。 */
   readonly capabilities: PlatformSandboxCapabilities
 }
