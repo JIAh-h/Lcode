@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "description": "Lcode — 可插拔内核 + 全链路可重放的桌面级 AI 编程工作台",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": "^22.19 || >=24"

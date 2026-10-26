@@ -149,4 +149,4 @@ pnpm --filter @lcode/cli start -- sessions list
 
 ## 许可证
 
-尚未设置开源许可证。
+[MIT](./LICENSE) © 2026 JIAh-h
