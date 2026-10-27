@@ -75,12 +75,18 @@ export interface AgentRuntimeOptions {
    * 避免默认实现里的 `process.cwd()` 兜底被同名文件替换。
    */
   readonly sandboxHelperPaths?: readonly string[] | undefined
+  /**
+   * fs worker 源码（由桌面装配层从安装包读取）。省略时文件工具继续走 fs-local；
+   * 提供后工作区内读写会进入受 OS 沙箱约束的 worker。
+   */
+  readonly fsWorkerSource?: string | undefined
 }
 
 import type { Disposer } from '@lcode/util'
 import type { SessionEvent } from '@lcode/session'
 import type { ApprovalService } from '@lcode/approval'
 import { createFsMutationAuthority, createLocalFs } from '@lcode/fs-local'
+import { createSandboxedFs } from '@lcode/fs-sandbox'
 import { createLocalShell } from '@lcode/shell-local'
 import { createWindowsSandbox, createWindowsSandboxBridge } from '@lcode/sandbox-win32'
 import { createMacosSandbox } from '@lcode/sandbox-macos'
@@ -96,7 +102,7 @@ import { gcSandboxGrants, recordSandboxGrant } from './sandbox-grants.ts'
 import { createLocalAgentPresetSetting } from './agent-preset-setting.ts'
 import { createLocalWebAllowlist } from './web-allowlist.ts'
 import { createLocalNetworkAudit } from './network-audit.ts'
-import { createLocalPermissionPresets, createLocalWorkspaceTrust, installPolicyHook } from '@lcode/permission-presets'
+import { knobsOf, createLocalPermissionPresets, createLocalWorkspaceTrust, installPolicyHook } from '@lcode/permission-presets'
 import { createPlanModeService } from '@lcode/plan-mode'
 import { LocalPluginRegistry, type PluginInfo } from '@lcode/plugin-registry'
 import { createPluginHost, InstalledPluginLifecycleService, PluginLifecycleManager, pluginUtilityRunnerPath } from '@lcode/plugin-host'
@@ -122,7 +128,9 @@ import { createModelRouter, registerModelRouter, type ModelRoutingService } from
 import type { CodeRuntime } from '@lcode/code-runtime'
 import { createSubprocessCodeRuntime } from '@lcode/code-runtime-subprocess'
 import { createCodeTool } from '@lcode/tool-code'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
+import { normalizePath } from '@lcode/fs'
+import type { FsService } from '@lcode/fs'
 import { createBuiltinRuntimeProfile, type BuiltinRuntimeProfileId } from './runtime-profile.ts'
 import { chooseCompactionRange, createModelCompactionSummarizer, type CompactionRangePlan, type CompactionSummarizer } from './compaction-summarizer.ts'
 
@@ -333,21 +341,33 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
    * 启动 GC：上一次进程可能崩溃在“授予 ACL 之后、撤销之前”。这里只处理
    * **已不再受信任**的工作区；撤销失败保留到下次启动重试，不能阻塞启动。
    */
-  try {
+  const runSandboxGrantGc = async (): Promise<void> => {
     const trust = services.ctx.has('workspaceTrust') ? services.ctx.get('workspaceTrust') : undefined
     await gcSandboxGrants({
       home: services.home,
       sandbox: services.ctx.get('sandbox'),
       isTrusted: (workspace) => trust?.isTrusted(workspace) ?? false,
     })
-  } catch {
-    // 清理失败不影响运行时；授权日志会保留，下次启动重试。
   }
+  try {
+    await runSandboxGrantGc()
+  } catch {
+    // 清理失败不影响运行时；授权日志会保留，下次启动/定时任务重试。
+  }
+  /*
+   * 应用可能长期不重启；只在启动时 GC 会让一次撤销失败留到下次重启。
+   * 定时重试，失败仍保留在授权日志里。
+   */
+  const grantGcTimer = setInterval(() => { void runSandboxGrantGc().catch(() => undefined) }, 30 * 60 * 1000)
+  grantGcTimer.unref?.()
 
   return {
     ...mounted,
     composition: composition.snapshot,
-    dispose: async () => { await composition.dispose() },
+    dispose: async () => {
+      clearInterval(grantGcTimer)
+      await composition.dispose()
+    },
   }
 }
 
@@ -371,7 +391,8 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
   })
   const unregisterPrompt = ctx.set('systemPrompt', systemPrompt)
   const workspaceOf = (sessionId: string) => sessions.workspaceOf(sessionId)
-  for (const tool of createFsTools({ fs: ctx.get('fs'), workspaceRoot, workspaceOf, spill: ctx.get('spill') })) tools.register(tool)
+  const fs = ctx.has('fsFor') ? ctx.get('fsFor') : ctx.get('fs')
+  for (const tool of createFsTools({ fs, workspaceRoot, workspaceOf, spill: ctx.get('spill') })) tools.register(tool)
   const unregisterShell = tools.register(createShellTool({ shell: ctx.get('shell'), workspaceRoot, workspaceOf }))
   const unregisterTerminal = tools.register(createTerminalTool({ terminals: ctx.get('terminals'), workspaceRoot, workspaceOf }))
   return () => { unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
@@ -556,7 +577,42 @@ function mountExecutionBundle(options: AgentRuntimeOptions, services: DesktopSer
   const sandbox = options.sandbox ?? defaultSandbox(subprocess, workspaceRoot, options.sandboxHelperPaths)
   unregister.push(ctx.set('sandbox', sandbox))
   const fsMutationAuthority = createFsMutationAuthority()
-  unregister.push(ctx.set('fs', createLocalFs({ workspaceRoot, mutationAuthority: fsMutationAuthority })))
+  const fsCache = new Map<string, FsService>()
+  const makeFs = (root: string): FsService => {
+    const base = createLocalFs({ workspaceRoot: root, mutationAuthority: fsMutationAuthority })
+    if (options.fsWorkerSource === undefined) return base
+    return createSandboxedFs({
+      base,
+      sandbox,
+      subprocess,
+      workspaceRoot: root,
+      workerSource: options.fsWorkerSource,
+      mutationAuthority: fsMutationAuthority,
+      mode: () => {
+        try {
+          return knobsOf(ctx.get('permissionPresets').get()).sandboxMode
+        } catch {
+          return 'workspace-write'
+        }
+      },
+      onUnavailable: (reason) => console.warn(`[lcode] fs worker 不可用（${root}），文件工具回退 fs-local：`, reason),
+    })
+  }
+  const fsFor = (workspace: string): FsService => {
+    const key = normalizePath(resolve(workspace))
+    const existing = fsCache.get(key)
+    if (existing !== undefined) return existing
+    const created = makeFs(key)
+    fsCache.set(key, created)
+    return created
+  }
+  unregister.push(ctx.set('fs', fsFor(workspaceRoot)))
+  unregister.push(ctx.set('fsFor', fsFor))
+  unregister.push(() => {
+    for (const service of fsCache.values()) {
+      if ('dispose' in service && typeof service.dispose === 'function') void service.dispose()
+    }
+  })
   unregister.push(registerCompactionPrune({ ctx }))
   unregister.push(registerLocalSpill({ ctx, home: services.home }))
   const jobs = createLocalJobs()

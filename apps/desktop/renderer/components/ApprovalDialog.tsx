@@ -145,6 +145,11 @@ export function ApprovalDialog() {
                 {t('请求地址：')}{request.impact.network.url}
               </div>
             )}
+            {domains.includes('*') ? (
+              <div className="ap-danger-hint">
+                {t('OS 只能整段放行：批准后这条命令或终端可访问任意域名，请确认实际执行的命令内容。')}
+              </div>
+            ) : null}
           </div>
         )}
 

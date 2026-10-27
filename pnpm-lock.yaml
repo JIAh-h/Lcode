@@ -295,9 +295,15 @@ importers:
       '@lcode/credentials-local':
         specifier: workspace:*
         version: link:../../credentials/credentials-local
+      '@lcode/fs':
+        specifier: workspace:^
+        version: link:../../fs/fs
       '@lcode/fs-local':
         specifier: workspace:*
         version: link:../../fs/fs-local
+      '@lcode/fs-sandbox':
+        specifier: workspace:^
+        version: link:../../fs/fs-sandbox
       '@lcode/jobs-local':
         specifier: workspace:*
         version: link:../../jobs/jobs-local
@@ -861,9 +867,19 @@ importers:
       '@lcode/sandbox':
         specifier: workspace:*
         version: link:../../sandbox/sandbox
+      '@lcode/subprocess':
+        specifier: workspace:^
+        version: link:../../subprocess/subprocess
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util
+    devDependencies:
+      '@lcode/fs-local':
+        specifier: workspace:^
+        version: link:../fs-local
+      '@lcode/subprocess-local':
+        specifier: workspace:^
+        version: link:../../subprocess/subprocess-local
 
   packages/fs/tool-fs:
     dependencies:

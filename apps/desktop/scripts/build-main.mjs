@@ -144,6 +144,15 @@ async function copyPluginUtilityRunner() {
   console.log(`  dist\\utility-runner.mjs     ${(await stat(dest)).size} B`)
 }
 
+/** 受控 fs worker：主进程读取源码后通过 `--eval` 注入沙箱子进程，避免子进程读应用目录。 */
+async function copyFsWorker() {
+  const src = join(desktopRoot, '..', '..', 'packages', 'fs', 'fs-sandbox', 'src', 'fs-worker.cjs')
+  const dest = join(desktopRoot, 'dist', 'fs-worker.cjs')
+  await mkdir(join(desktopRoot, 'dist'), { recursive: true })
+  await copyFile(src, dest)
+  console.log(`  dist\\fs-worker.cjs     ${(await stat(dest)).size} B`)
+}
+
 /**
  * 内置技能随应用分发：主进程会从这里读取并保证 `~/.lcode/skills` 至少有一份。
  * 放到 `dist/` 而不是仓库根，portable 打包复制 dist 时自动带上。
@@ -171,6 +180,7 @@ async function copyAppIcon() {
 if (watch) {
   await copyZstdWasm()
   await copyPluginUtilityRunner()
+  await copyFsWorker()
   await copyBuiltinSkills()
   await copyAppIcon()
   const contexts = await Promise.all(
@@ -184,6 +194,7 @@ if (watch) {
   )
   await copyZstdWasm()
   await copyPluginUtilityRunner()
+  await copyFsWorker()
   await copyBuiltinSkills()
   await copyAppIcon()
 }

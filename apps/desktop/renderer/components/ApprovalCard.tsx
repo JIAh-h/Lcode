@@ -70,6 +70,9 @@ export function ApprovalCard({ callId, action, basis, impact, decision }: Approv
             </span>
           ))}
           {networkUrl === undefined ? null : <span className="mono approval-card-url" title={networkUrl}>{t('请求地址：')}{networkUrl}</span>}
+          {domains.includes('*')
+            ? <span className="approval-card-basis">{t('OS 只能整段放行：批准后这条命令或终端可访问任意域名，请确认实际执行的命令内容。')}</span>
+            : null}
         </div>
       ) : null}
       {inside.length > 0 ? <div className="approval-card-meta">{t('工作区内：')}{inside.map((path) => `${path.mode === 'write' ? '写入' : '读取'} ${path.path}`).join('，')}</div> : null}

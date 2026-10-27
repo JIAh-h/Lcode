@@ -849,6 +849,23 @@ async function resolveSystemProxy(target: string): Promise<string | undefined> {
   return undefined;
 }
 
+/** fs worker 源码：打包态在 dist，开发态回退仓库源码；缺失时文件工具继续走 fs-local。 */
+function readFsWorkerSource(): string | undefined {
+  const candidates = [
+    join(__dirname, "fs-worker.cjs"),
+    join(__dirname, "../../../packages/fs/fs-sandbox/src/fs-worker.cjs"),
+  ];
+  for (const candidate of candidates) {
+    try {
+      return readFileSync(candidate, "utf8");
+    } catch {
+      // 继续找下一个候选
+    }
+  }
+  console.warn("[lcode] 未找到 fs-worker.cjs，工作区文件工具将不使用 OS 沙箱 worker");
+  return undefined;
+}
+
 async function agentRuntime(): Promise<AgentRuntime> {
   if (runtime !== null) return runtime;
   if (runtimeInit === null) {
@@ -876,6 +893,7 @@ async function agentRuntime(): Promise<AgentRuntime> {
         services: feature.services,
         approval: createApprovalService({ channel: approvalChannel }),
         builtinSkillsDir: join(__dirname, "skills"),
+        fsWorkerSource: readFsWorkerSource(),
         web: {
           fetch: createWebFetcher(undefined, { resolveProxy: resolveSystemProxy }).fetch,
           search: async (input) => {
@@ -1256,6 +1274,11 @@ ipcMain.handle("lcode:workspace-trust.set", async (_e: IpcMainInvokeEvent, input
     ? await rt.ctx.get("sandbox").releaseWorkspace!(workspace)
     : undefined;
   rt.ctx.get("workspaceTrust").setTrusted(workspace, trusted);
+  /*
+   * 取消信任要同时收回 web 工具的域名授权：否则目录已不可信，之前批准的域名
+   * 仍可静默搜索/抓取。审计历史保留，便于事后复盘。
+   */
+  if (!trusted) rt.ctx.get("webAllowlist").removeWorkspace(workspace);
   if (typeof sessionId === "string" && sessionId !== "") {
     rt.sessions.sessionServiceFor(sessionId).append({ type: "workspace/trust", data: { workspace, trusted } });
     pushToRenderer("lcode:session.changed", { session_id: sessionId });

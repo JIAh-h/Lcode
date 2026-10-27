@@ -24,7 +24,8 @@ import { resolve } from 'node:path'
  */
 
 export interface ToolFsDeps {
-  readonly fs: FsService
+  /** 单例 fs（测试/单工作区）或按会话工作区取 fs 的解析器。 */
+  readonly fs: FsService | ((workspaceRoot: string, sessionId: string | undefined) => FsService)
   /**
    * 工作区根（**新会话的默认**；也给"拿不到会话"时兜底）。
    *
@@ -54,7 +55,6 @@ function absolute(workspaceRoot: string, p: string): string {
 }
 
 export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
-  const { fs } = deps
   const sessionIdOf = deps.sessionIdOf ?? defaultSessionIdOf
 
   /**
@@ -70,6 +70,11 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
       if (fromSession !== undefined && fromSession !== '') return fromSession
     }
     return deps.workspaceRoot
+  }
+
+  const fsFor = (opts: { readonly scope?: unknown }): FsService => {
+    if (typeof deps.fs === 'function') return deps.fs(rootFor(opts), sessionIdOf(opts.scope))
+    return deps.fs
   }
 
   const read: ToolDefinition = {
@@ -123,7 +128,7 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
           truncated: result.truncated,
         } as never
       }
-      return (await fs.read(absolute(rootFor(opts), p.path), {
+      return (await fsFor(opts).read(absolute(rootFor(opts), p.path), {
         ...(p.offset === undefined ? {} : { offset: p.offset }),
         ...(p.limit === undefined ? {} : { limit: p.limit }),
       })) as never
@@ -174,7 +179,7 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
     },
     execute: async (call, opts) => {
       const p = call.parsed as { path: string; content: string }
-      return (await fs.write(absolute(rootFor(opts), p.path), p.content, {
+      return (await fsFor(opts).write(absolute(rootFor(opts), p.path), p.content, {
         createDirs: true,
         ...mutationAccessFor(call.callId, opts.scope, sessionIdOf),
       })) as never
@@ -216,7 +221,7 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
     },
     execute: async (call, opts) => {
       const p = call.parsed as { path: string; old: string; new: string; replaceAll?: boolean }
-      return (await fs.edit({
+      return (await fsFor(opts).edit({
         path: absolute(rootFor(opts), p.path),
         oldText: p.old,
         newText: p.new,
@@ -254,7 +259,7 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
     execute: async (call, opts) => {
       const p = call.parsed as { pattern: string; path?: string; include?: string }
       const root = rootFor(opts)
-      return (await fs.glob(p.pattern, {
+      return (await fsFor(opts).glob(p.pattern, {
         path: p.path === undefined ? root : absolute(root, p.path),
         ...(p.include === undefined ? {} : { include: p.include }),
       })) as never
@@ -288,7 +293,7 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
     execute: async (call, opts) => {
       const p = call.parsed as { pattern: string; path?: string; include?: string }
       const root = rootFor(opts)
-      return (await fs.grep(p.pattern, {
+      return (await fsFor(opts).grep(p.pattern, {
         path: p.path === undefined ? root : absolute(root, p.path),
         ...(p.include === undefined ? {} : { include: p.include }),
       })) as never

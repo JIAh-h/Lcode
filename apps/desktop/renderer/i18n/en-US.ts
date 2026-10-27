@@ -920,6 +920,9 @@ export const EN: Readonly<Record<string, string>> = {
     'The search endpoint is fixed to {host}. The first search still asks for network approval per workspace and remembers the domain after approval. Search results are not added to the fetch allowlist automatically; at most 5 searches per turn.',
   '任意域名（仅本次命令）': 'Any domain (this command only)',
   '任意域名（关闭终端前有效）': 'Any domain (until this terminal is closed)',
+  'OS 只能整段放行：批准后这条命令或终端可访问任意域名，请确认实际执行的命令内容。':
+    'The OS can only allow all-or-nothing network access: after approval this command or terminal can reach any domain. Check the actual command content.',
+
   这条命令需要访问网络: 'This command needs network access',
   '读写与命令工具全开，按当前权限预设执行。':
     'All read/write and command tools are available, subject to the current permission preset.',
