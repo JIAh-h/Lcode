@@ -213,8 +213,75 @@ export interface WorkspaceGitInfo {
   readonly mode: 'local' | 'worktree'
 }
 
+export type GitFileKind = 'modified' | 'added' | 'deleted' | 'renamed' | 'copied' | 'untracked' | 'conflicted'
+
+export interface GitStatusFile {
+  readonly path: string
+  readonly oldPath?: string | undefined
+  readonly index: string
+  readonly worktree: string
+  readonly raw: string
+  readonly kind: GitFileKind
+  readonly staged: boolean
+  readonly unstaged: boolean
+  readonly untracked: boolean
+  readonly conflicted: boolean
+  readonly additions?: number | undefined
+  readonly deletions?: number | undefined
+}
+
+export interface WorkspaceGitStatus extends WorkspaceGitInfo {
+  readonly files: readonly GitStatusFile[]
+  readonly total: number
+  readonly truncated: boolean
+}
+
+export interface GitBranchList {
+  readonly branches: readonly string[]
+  readonly current: string | null
+}
+
+export type GitSwitchResult =
+  | { readonly ok: true; readonly info: WorkspaceGitInfo }
+  | { readonly ok: false; readonly code: 'dirty'; readonly files: readonly GitStatusFile[]; readonly total: number }
+
+export type GitDiffLineKind = 'context' | 'add' | 'delete' | 'meta'
+
+export interface GitDiffLine {
+  readonly kind: GitDiffLineKind
+  readonly oldLine: number | null
+  readonly newLine: number | null
+  readonly text: string
+}
+
+export interface GitDiffPart {
+  readonly staged: boolean
+  readonly binary: boolean
+  readonly lines: readonly GitDiffLine[]
+  readonly truncated: boolean
+}
+
+export interface GitDiffResult {
+  readonly path: string
+  readonly untracked: boolean
+  readonly parts: readonly GitDiffPart[]
+}
+
+export interface GitDiffInput {
+  readonly workspace: string
+  readonly path: string
+  readonly oldPath?: string | undefined
+  readonly staged: boolean
+  readonly unstaged: boolean
+  readonly untracked: boolean
+}
+
 export interface WorkspaceInfoBridge {
   gitInfo(path: string): Promise<WorkspaceGitInfo>
+  gitStatus(path: string): Promise<WorkspaceGitStatus>
+  gitBranches(path: string): Promise<GitBranchList>
+  gitSwitch(input: { readonly workspace: string; readonly branch: string; readonly allowDirty?: boolean | undefined }): Promise<GitSwitchResult>
+  gitDiff(input: GitDiffInput): Promise<GitDiffResult>
 }
 
 export function workspaceInfoBridge(): WorkspaceInfoBridge | undefined {

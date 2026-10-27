@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import type { PlanArtifact, SessionEvent } from '@lcode/session'
 import { ComposerBar, type ComposerSendInput } from '../components/ComposerBar.tsx'
@@ -7,10 +7,11 @@ import { CompactionDialog } from '../components/CompactionDialog.tsx'
 import { PlanReviewDialog } from '../components/PlanReviewDialog.tsx'
 import { SessionStream } from '../components/SessionStream.tsx'
 import { SessionActionsMenu } from '../components/SessionActionsMenu.tsx'
+import { PanelSplitter, useResizablePanel } from '../components/PanelSplitter.tsx'
 import { TaskPanel } from '../components/TaskPanel.tsx'
 import { toast } from '../components/toast.ts'
 import { t } from '../i18n/index.ts'
-import { agentBridge, notifySessionChanged, planBridge, sessionBridge, workspaceInfoBridge, workspaceTrustBridge, type QueuedMessage, type SessionContextUsage, type SessionMeta, type WorkspaceGitInfo } from '../store/sessionBridge.ts'
+import { agentBridge, notifySessionChanged, planBridge, sessionBridge, workspaceInfoBridge, workspaceTrustBridge, type GitDiffResult, type GitStatusFile, type QueuedMessage, type SessionContextUsage, type SessionMeta, type WorkspaceGitInfo, type WorkspaceGitStatus } from '../store/sessionBridge.ts'
 import { agentPresetLabel, getAgentPreset } from '../store/agentPresetSync.ts'
 import type { AgentPresetId } from '../store/agentPresetSync.ts'
 
@@ -108,23 +109,153 @@ function primaryActionFrom(events: readonly SessionEvent[]): 'send' | 'pause' | 
   return 'send'
 }
 
+function gitStatusLabel(file: GitStatusFile): string {
+  switch (file.kind) {
+    case 'untracked': return '?'
+    case 'conflicted': return '!'
+    case 'renamed': return 'R'
+    case 'copied': return 'C'
+    case 'added': return 'A'
+    case 'deleted': return 'D'
+    default: return 'M'
+  }
+}
+
+function gitStateText(file: GitStatusFile): string {
+  if (file.untracked) return t('未跟踪')
+  if (file.conflicted) return t('冲突')
+  if (file.staged && file.unstaged) return t('已暂存 + 未暂存')
+  if (file.staged) return t('已暂存')
+  return t('未暂存')
+}
+
+function GitDiffView({ result }: { readonly result: GitDiffResult }) {
+  if (result.parts.length === 0) return <div className="gdiff"><div className="gdiff-note">{t('没有可显示的文本差异')}</div></div>
+  return (
+    <div className="gdiff">
+      {result.parts.map((part, index) => (
+        <div className="gdiff-part" key={`${part.staged}-${index}`}>
+          {result.untracked ? (
+            <div className="gdiff-parthead">{t('新文件')}</div>
+          ) : result.parts.length > 1 ? (
+            <div className="gdiff-parthead">{part.staged ? t('已暂存') : t('未暂存')}</div>
+          ) : null}
+          {part.binary ? (
+            <div className="gdiff-note">{t('二进制文件，无法显示文本差异')}</div>
+          ) : part.lines.length === 0 ? (
+            <div className="gdiff-note">{t('没有可显示的文本差异')}</div>
+          ) : (
+            <div className="gdiff-body">
+              {part.lines.map((line, lineIndex) => (
+                line.kind === 'meta' ? (
+                  <div className="gline meta" key={lineIndex}>{line.text}</div>
+                ) : (
+                  <div className={`gline ${line.kind}`} key={lineIndex}>
+                    <span className="old">{line.oldLine ?? ''}</span>
+                    <span className="new">{line.newLine ?? ''}</span>
+                    <span className="mark">{line.kind === 'add' ? '+' : line.kind === 'delete' ? '-' : ' '}</span>
+                    <span className="code">{line.text}</span>
+                  </div>
+                )
+              ))}
+              {part.truncated ? <div className="gdiff-note">{t('差异过大，已截断')}</div> : null}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function GitFileRow({ workspace, file }: { readonly workspace: string; readonly file: GitStatusFile }) {
+  const [open, setOpen] = useState(false)
+  const [diff, setDiff] = useState<GitDiffResult | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const toggle = (): void => {
+    const next = !open
+    setOpen(next)
+    if (!next || diff !== null || loading) return
+    const bridge = workspaceInfoBridge()
+    if (bridge === undefined) return
+    setLoading(true)
+    setError(null)
+    void bridge.gitDiff({
+      workspace,
+      path: file.path,
+      ...(file.oldPath === undefined ? {} : { oldPath: file.oldPath }),
+      staged: file.staged,
+      unstaged: file.unstaged,
+      untracked: file.untracked,
+    })
+      .then(setDiff)
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : t('读取文件差异失败')))
+      .finally(() => setLoading(false))
+  }
+
+  return (
+    <div className={'gitfile-wrap' + (open ? ' open' : '')}>
+      <div
+        className="gitfile"
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={toggle}
+        onKeyDown={(event) => {
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            toggle()
+          }
+        }}
+      >
+        <span className={`gitbadge ${file.kind}`}>{gitStatusLabel(file)}</span>
+        <span className="gitpath mono" title={file.oldPath === undefined ? file.path : `${file.oldPath} → ${file.path}`}>
+          {file.oldPath === undefined ? file.path : `${file.oldPath} → ${file.path}`}
+        </span>
+        <span className="gitstate">{gitStateText(file)}</span>
+        {file.additions === undefined && file.deletions === undefined ? null : (
+          <span className="gitnums">
+            <span className="add">+{file.additions ?? 0}</span>{' '}
+            <span className="del">-{file.deletions ?? 0}</span>
+          </span>
+        )}
+        <span className="gitchev" aria-hidden="true">{open ? '▾' : '▸'}</span>
+      </div>
+      {open ? (
+        loading ? <div className="gdiff-note">{t('正在读取差异…')}</div>
+          : error !== null ? <div className="gdiff-note gdiff-error">{error}</div>
+            : diff !== null ? <GitDiffView result={diff} /> : null
+      ) : null}
+    </div>
+  )
+}
+
 function RightPanel({
   tab,
   setTab,
   changes,
   workspace,
   sessionId,
+  gitStatus,
+  gitBusy,
+  onRefreshGit,
+  width,
 }: {
   readonly tab: Tab
   readonly setTab: (tab: Tab) => void
   readonly changes: readonly Change[]
   readonly workspace: string | null
   readonly sessionId: string
+  readonly gitStatus: WorkspaceGitStatus | null
+  readonly gitBusy: boolean
+  readonly onRefreshGit: () => void
+  readonly width: number
 }) {
   const [openFile, setOpenFile] = useState<string | null>(changes[0]?.path ?? null)
   const files = [...new Set(changes.map((change) => change.path))]
   return (
-    <aside className="right">
+    <aside className="right" style={{ width }}>
       <div className="rtabs">
         <button className={tab === 'changes' ? 'on' : ''} onClick={() => setTab('changes')}>
           {t('变更')}
@@ -153,6 +284,32 @@ function RightPanel({
               {openFile === change.path && <pre className="fdiff mono">{JSON.stringify(change, null, 2)}</pre>}
             </div>
           ))}
+
+          <div className="rscope gitscope">
+            <span className="chip">{t('Git 工作区')}</span>
+            <span className="gitsummary">
+              {gitStatus === null
+                ? (workspace === null || workspace === '' ? t('未设置工作区') : t('正在读取 Git 状态…'))
+                : !gitStatus.isRepo
+                  ? t('不是 Git 仓库')
+                  : gitStatus.total === 0
+                    ? t('工作区没有未提交变更')
+                    : t('{branch} · {n} 个未提交文件', { branch: gitStatus.branch ?? t('detached'), n: gitStatus.total })}
+            </span>
+            <button className="mini gitrefresh" disabled={gitBusy || workspace === null || workspace === ''} onClick={onRefreshGit}>
+              {gitBusy ? t('刷新中…') : t('刷新')}
+            </button>
+          </div>
+          {gitStatus !== null && gitStatus.isRepo && gitStatus.files.length > 0 ? (
+            <div className="gitfiles">
+              {gitStatus.files.map((file) => (
+                <GitFileRow key={`${file.path}-${file.raw}`} workspace={workspace ?? ''} file={file} />
+              ))}
+              {gitStatus.truncated ? (
+                <div className="gitmore">{t('只显示前 {shown} / 共 {total} 个文件', { shown: gitStatus.files.length, total: gitStatus.total })}</div>
+              ) : null}
+            </div>
+          ) : null}
         </div>
       ) : (
         <div className="rpanel">
@@ -177,6 +334,17 @@ export function WorkspacePage() {
   const { sessionId } = useParams()
   const navigate = useNavigate()
   const [panelOpen, setPanelOpen] = useState(true)
+  const rightPanel = useResizablePanel({
+    storageKey: 'lcode.layout.rightWidth',
+    defaultWidth: 288,
+    minWidth: 220,
+    side: 'right',
+    label: t('调整右侧栏宽度'),
+    onCollapse: () => {
+      setPanelOpen(false)
+      toast(t('右侧面板已收起'))
+    },
+  })
   const [tab, setTab] = useState<Tab>('changes')
   const [text, setText] = useState('')
   const [events, setEvents] = useState<readonly SessionEvent[]>([])
@@ -188,6 +356,9 @@ export function WorkspacePage() {
   /** 输入框状态栏：上下文占用与 Git 信息 */
   const [usage, setUsage] = useState<SessionContextUsage | null>(null)
   const [gitInfo, setGitInfo] = useState<WorkspaceGitInfo | null>(null)
+  const [gitStatus, setGitStatus] = useState<WorkspaceGitStatus | null>(null)
+  const [gitBusy, setGitBusy] = useState(false)
+  const [gitEpoch, setGitEpoch] = useState(0)
   const [usageEpoch, setUsageEpoch] = useState(0)
   const [compactOpen, setCompactOpen] = useState(false)
   const [contextOpenSignal, setContextOpenSignal] = useState(0)
@@ -209,6 +380,11 @@ export function WorkspacePage() {
       // 轮结束 / 压缩事务 / 屏蔽标记都会改变下一次请求的表面：刷新状态栏
       if (event.type === 'turn/end' || event.type === 'compaction/end' || event.type === 'compaction/undo' || event.type === 'context/turn-marker') {
         setUsageEpoch((n) => n + 1)
+      }
+      if (event.type === 'turn/end') setGitEpoch((n) => n + 1)
+      if (event.type === 'tool/result') {
+        const meta = record(record(event.data)?.['meta'])
+        if (meta?.['card'] === 'diff') setGitEpoch((n) => n + 1)
       }
     })
     void api
@@ -327,6 +503,7 @@ export function WorkspacePage() {
     const workspace = meta?.workspace
     if (workspace === null || workspace === undefined || workspace === '') {
       setGitInfo(null)
+      setGitStatus(null)
       return
     }
     const bridge = workspaceInfoBridge()
@@ -342,6 +519,45 @@ export function WorkspacePage() {
       alive = false
     }
   }, [meta?.workspace, reloadEpoch])
+
+  const refreshGitStatus = useCallback((manual = false): void => {
+    const workspace = meta?.workspace
+    const bridge = workspaceInfoBridge()
+    if (workspace === null || workspace === undefined || workspace === '' || bridge === undefined) {
+      setGitStatus(null)
+      return
+    }
+    setGitBusy(true)
+    void bridge.gitStatus(workspace)
+      .then((status) => {
+        setGitStatus(status)
+        setGitInfo({ isRepo: status.isRepo, branch: status.branch, mode: status.mode })
+      })
+      .catch((error: unknown) => {
+        if (manual) toast(error instanceof Error ? error.message : t('读取 Git 状态失败'))
+      })
+      .finally(() => setGitBusy(false))
+  }, [meta?.workspace])
+
+  useEffect(() => {
+    if (meta?.workspace === null || meta?.workspace === undefined || meta?.workspace === '') {
+      setGitStatus(null)
+      return
+    }
+    refreshGitStatus(false)
+  }, [meta?.workspace, reloadEpoch, gitEpoch, refreshGitStatus])
+
+  useEffect(() => {
+    const refresh = (): void => { refreshGitStatus(false) }
+    window.addEventListener('focus', refresh)
+    return () => window.removeEventListener('focus', refresh)
+  }, [refreshGitStatus])
+
+  useEffect(() => {
+    if (!panelOpen || tab !== 'changes') return
+    const timer = setInterval(() => refreshGitStatus(false), 8_000)
+    return () => clearInterval(timer)
+  }, [panelOpen, tab, refreshGitStatus])
 
   const refreshQueue = (): void => {
     if (sessionId === undefined) return
@@ -618,10 +834,12 @@ export function WorkspacePage() {
                     workspace={meta?.workspace ?? null}
                     branch={gitInfo?.branch ?? null}
                     mode={gitInfo?.mode ?? 'local'}
+                    isRepo={gitInfo?.isRepo ?? false}
                     usage={usage}
                     running={agentRunning}
                     openSignal={contextOpenSignal}
                     onChanged={() => setUsageEpoch((n) => n + 1)}
+                    onGitChanged={() => setGitEpoch((n) => n + 1)}
                     onCompactRequest={() => setCompactOpen(true)}
                     onOpenSettings={() => navigate('/settings', { state: { sec: 'providers' } })}
                   />
@@ -630,7 +848,22 @@ export function WorkspacePage() {
             </div>
           </div>
         </div>
-        {panelOpen && <RightPanel tab={tab} setTab={setTab} changes={changes} workspace={meta?.workspace ?? null} sessionId={sessionId} />}
+        {panelOpen && (
+          <>
+            <PanelSplitter side="right" panel={rightPanel} />
+            <RightPanel
+              tab={tab}
+              setTab={setTab}
+              changes={changes}
+              workspace={meta?.workspace ?? null}
+              sessionId={sessionId}
+              gitStatus={gitStatus}
+              gitBusy={gitBusy}
+              onRefreshGit={() => refreshGitStatus(true)}
+              width={rightPanel.width}
+            />
+          </>
+        )}
         {compactOpen && sessionId !== undefined ? (
           <CompactionDialog
             sessionId={sessionId}

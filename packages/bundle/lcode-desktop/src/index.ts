@@ -36,6 +36,8 @@ export { attachmentRefsOf, gcAttachments, putAttachment, readAttachment } from '
 export { gcSessionAttachments } from './attachment-gc.ts'
 export { importSkill, removeUserSkill, seedBuiltinSkills } from './skill-import.ts'
 export type { ImportedSkill } from './skill-import.ts'
+export { mergeGitNumstat, parseGitNumstatZ, parseGitStatusZ } from './git-status.ts'
+export type { GitFileKind, ParsedGitFile } from './git-status.ts'
 
 export { createDesktopModelFeature, createServices, ensureNativePackageRoot } from './model-feature.ts'
 export type {

@@ -24,6 +24,16 @@
 .msp { flex: 1; }
 
 .body { display: flex; flex: 1; min-height: 0; }
+.splitter { position: relative; width: 6px; flex: none; cursor: col-resize; touch-action: none; z-index: 20; }
+.splitter::before { content: ''; position: absolute; inset: 0 2px; background: transparent; transition: background 0.12s ease; }
+.splitter:hover::before, .splitter.dragging::before, .splitter:focus-visible::before { background: var(--accent); }
+.splitter::after { content: ''; position: absolute; top: 50%; left: 2px; right: 2px; height: 18px; border-radius: 2px; background: var(--border-subtle); opacity: 0; transform: translateY(-50%); transition: opacity 0.12s ease, background 0.12s ease; }
+.splitter:hover::after, .splitter.dragging::after, .splitter:focus-visible::after { opacity: 1; background: var(--accent); }
+.splitter:focus-visible { outline: none; }
+.splitter-tip { position: absolute; top: 8px; left: 9px; z-index: 80; padding: 3px 7px; border: 1px solid var(--border-strong); border-radius: 5px; background: var(--bg-elevated); color: var(--text-secondary); font-size: 10.5px; white-space: nowrap; box-shadow: var(--sh-1); opacity: 0; pointer-events: none; transition: opacity 0.12s ease; }
+.splitter-right .splitter-tip { left: auto; right: 9px; }
+.splitter:hover .splitter-tip, .splitter.dragging .splitter-tip, .splitter:focus-visible .splitter-tip { opacity: 1; }
+body.resizing { cursor: col-resize; user-select: none; }
 
 /* ── 侧栏 ── */
 .side { width: 236px; display: flex; flex-direction: column; min-height: 0; background: var(--bg-panel); border-right: 1px solid var(--border-subtle); flex-shrink: 0; }
@@ -126,6 +136,10 @@
 .cmws { display: inline-flex; align-items: center; gap: 4px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
 .cmmode { color: var(--text-muted); }
 .cmbranch { display: inline-flex; align-items: center; gap: 4px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cmbranchbtn { display: inline-flex; align-items: center; gap: 4px; max-width: 180px; overflow: hidden; padding: 1px 5px; border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; cursor: pointer; text-overflow: ellipsis; white-space: nowrap; }
+.cmbranchbtn:hover, .cmbranchbtn[aria-expanded="true"] { background: var(--bg-inset); color: var(--text-primary); }
+.cmbranchbtn svg { flex: none; }
+.cmbranchbtn .cmchev { flex: none; margin-left: 2px; font-size: 11px; opacity: 0.65; }
 .cmsep { opacity: 0.5; }
 .cmright { position: relative; display: flex; align-items: center; }
 .cmusage { display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 4px; border: 0; border-radius: var(--r1); background: transparent; color: var(--text-muted); font-size: 11.5px; cursor: pointer; }
@@ -396,6 +410,40 @@
 .rpanel { flex: 1; overflow: auto; background: var(--bg-canvas); border-top: 1px solid var(--border-subtle); padding: var(--s3); }
 .rscope { margin: 2px 4px var(--s3); font-size: 11px; color: var(--text-muted); display: flex; align-items: center; gap: 6px; }
 .rscope .chip { background: var(--bg-inset); border-radius: 999px; padding: 1px 8px; color: var(--text-secondary); }
+.rscope.gitscope { margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border-subtle); }
+.gitsummary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gitrefresh { margin-left: auto; flex: none; }
+.gitfiles { display: flex; flex-direction: column; gap: 2px; }
+.gitfile-wrap { border-radius: 5px; }
+.gitfile { display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 5px; font-size: 11.5px; cursor: pointer; }
+.gitfile:hover, .gitfile-wrap.open .gitfile { background: var(--bg-inset); }
+.gitchev { flex: none; width: 12px; color: var(--text-muted); font-size: 11px; text-align: center; }
+.gitbadge { flex: none; width: 16px; height: 16px; display: grid; place-items: center; border-radius: 4px; background: var(--bg-inset); color: var(--text-secondary); font-size: 10px; font-weight: 700; }
+.gitbadge.untracked { color: var(--state-running); }
+.gitbadge.conflicted { color: var(--state-error); }
+.gitbadge.deleted { color: var(--diff-del-fg); }
+.gitbadge.added { color: var(--diff-add-fg); }
+.gitpath { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-secondary); }
+.gitstate { flex: none; color: var(--text-muted); font-size: 10.5px; }
+.gitnums { flex: none; font-family: var(--font-mono); font-size: 10.5px; }
+.gitnums .add { color: var(--diff-add-fg); }
+.gitnums .del { color: var(--diff-del-fg); }
+.gitmore { padding: 4px 8px; color: var(--text-muted); font-size: 10.5px; }
+.gdiff { margin: 2px 6px 8px; border: 1px solid var(--border-subtle); border-radius: 6px; overflow: hidden; background: var(--bg-canvas); }
+.gdiff-part + .gdiff-part { border-top: 1px solid var(--border-subtle); }
+.gdiff-parthead { padding: 3px 8px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel); color: var(--text-muted); font-size: 10.5px; }
+.gdiff-body { overflow-x: auto; font-family: var(--font-mono); font-size: 11px; line-height: 17px; }
+.gline { display: grid; grid-template-columns: 32px 32px 14px minmax(0, 1fr); white-space: pre; }
+.gline .old, .gline .new { padding-right: 4px; color: var(--text-muted); text-align: right; user-select: none; }
+.gline .mark { color: var(--text-muted); text-align: center; }
+.gline .code { padding-right: 6px; }
+.gline.add { background: var(--diff-add-bg); }
+.gline.add .code { color: var(--diff-add-fg); }
+.gline.delete { background: var(--diff-del-bg); }
+.gline.delete .code { color: var(--diff-del-fg); }
+.gline.meta { display: block; padding: 2px 8px; background: var(--bg-panel); color: var(--text-muted); white-space: pre-wrap; word-break: break-all; }
+.gdiff-note { padding: 6px 8px; color: var(--text-muted); font-size: 11px; }
+.gdiff-error { color: var(--state-error); }
 .task-panel { display: flex; flex-direction: column; gap: var(--s4); }
 .task-note { margin: 0 4px; color: var(--text-muted); font-size: 11px; line-height: 1.5; }
 .task-section { display: flex; flex-direction: column; gap: 3px; }

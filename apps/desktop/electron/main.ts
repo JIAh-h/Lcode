@@ -4,7 +4,7 @@ import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
   BUILTIN_AGENT_PRESETS,
@@ -15,11 +15,15 @@ import {
   createDesktopModelFeature,
   gcSessionAttachments,
   importSkill,
+  mergeGitNumstat,
+  parseGitNumstatZ,
+  parseGitStatusZ,
   putAttachment,
   readAttachment,
   removeUserSkill,
   seedBuiltinSkills,
 } from "@lcode/lcode-desktop";
+import type { ParsedGitFile } from "@lcode/lcode-desktop";
 import type { AgentRuntime, DesktopModelFeature } from "@lcode/lcode-desktop";
 import { createApprovalService } from "@lcode/approval";
 import { createWebFetcher } from "@lcode/web-fetch";
@@ -1640,6 +1644,37 @@ function assertSessionIdle(session: { events(): readonly { readonly type: string
   if (boundary?.type === "turn/start") throw new Error("这一轮还在执行，先暂停再调整上下文");
 }
 
+interface GitInfo {
+  readonly isRepo: boolean;
+  readonly branch: string | null;
+  readonly mode: "local" | "worktree";
+}
+
+interface GitStatusResult extends GitInfo {
+  readonly files: readonly ParsedGitFile[];
+  readonly total: number;
+  readonly truncated: boolean;
+}
+
+const GIT_STATUS_LIMIT = 300;
+
+async function gitRun(workspace: string, args: readonly string[], timeoutMs = 4_000): Promise<string> {
+  const { stdout } = await execFileAsync("git", ["-C", workspace, ...args], {
+    timeout: timeoutMs,
+    windowsHide: true,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  return stdout;
+}
+
+function gitErrorMessage(error: unknown, fallback: string): string {
+  const record = typeof error === "object" && error !== null ? (error as Record<string, unknown>) : {};
+  const stderr = typeof record["stderr"] === "string" ? record["stderr"].trim() : "";
+  if (stderr !== "") return stderr.slice(0, 1_000);
+  if (error instanceof Error && error.message !== "") return error.message.slice(0, 1_000);
+  return fallback;
+}
+
 /**
  * 输入框状态栏用：工作区是不是 Git 仓库、当前分支、是否 linked worktree。
  * 只读命令、2s 超时；不是仓库/没装 git 都回 local，不把 UI 卡住。
@@ -1649,29 +1684,257 @@ ipcMain.handle("lcode:workspace.gitInfo", async (_e: IpcMainInvokeEvent, workspa
   return await workspaceGitInfo(workspace);
 });
 
-async function workspaceGitInfo(workspace: string): Promise<{ isRepo: boolean; branch: string | null; mode: "local" | "worktree" }> {
-  const run = async (...args: string[]): Promise<string> => {
-    const { stdout } = await execFileAsync("git", ["-C", workspace, ...args], {
-      timeout: 2_000,
-      windowsHide: true,
-      maxBuffer: 64 * 1024,
-    });
-    return stdout.trim();
-  };
+async function workspaceGitInfo(workspace: string): Promise<GitInfo> {
   try {
-    if ((await run("rev-parse", "--is-inside-work-tree")) !== "true") {
+    if ((await gitRun(workspace, ["rev-parse", "--is-inside-work-tree"], 2_000)).trim() !== "true") {
       return { isRepo: false, branch: null, mode: "local" };
     }
-    let branch = await run("rev-parse", "--abbrev-ref", "HEAD");
-    if (branch === "HEAD") branch = await run("rev-parse", "--short", "HEAD");
-    const gitDir = await run("rev-parse", "--git-dir");
-    const commonDir = await run("rev-parse", "--git-common-dir");
+    let branch = (await gitRun(workspace, ["rev-parse", "--abbrev-ref", "HEAD"], 2_000)).trim();
+    if (branch === "HEAD") branch = (await gitRun(workspace, ["rev-parse", "--short", "HEAD"], 2_000)).trim();
+    const gitDir = (await gitRun(workspace, ["rev-parse", "--git-dir"], 2_000)).trim();
+    const commonDir = (await gitRun(workspace, ["rev-parse", "--git-common-dir"], 2_000)).trim();
     const mode = resolve(workspace, gitDir) === resolve(workspace, commonDir) ? "local" : "worktree";
     return { isRepo: true, branch: branch === "" ? null : branch, mode };
   } catch {
     return { isRepo: false, branch: null, mode: "local" };
   }
 }
+
+async function workspaceGitStatus(workspace: string): Promise<GitStatusResult> {
+  const info = await workspaceGitInfo(workspace);
+  if (!info.isRepo) return { ...info, files: [], total: 0, truncated: false };
+  let statusZ: string;
+  let stagedZ: string;
+  let unstagedZ: string;
+  try {
+    [statusZ, stagedZ, unstagedZ] = await Promise.all([
+      gitRun(workspace, ["-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--untracked-files=all"], 6_000),
+      gitRun(workspace, ["-c", "core.fsmonitor=false", "diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z"], 6_000),
+      gitRun(workspace, ["-c", "core.fsmonitor=false", "diff", "--cached", "--no-ext-diff", "--no-textconv", "--numstat", "-z"], 6_000),
+    ]);
+  } catch (error) {
+    throw new Error(`读取 Git 状态失败：${gitErrorMessage(error, "git status 失败")}`);
+  }
+  const all = mergeGitNumstat(parseGitStatusZ(statusZ), parseGitNumstatZ(stagedZ), parseGitNumstatZ(unstagedZ));
+  return {
+    ...info,
+    files: all.slice(0, GIT_STATUS_LIMIT),
+    total: all.length,
+    truncated: all.length > GIT_STATUS_LIMIT,
+  };
+}
+
+async function workspaceGitBranches(workspace: string): Promise<{ branches: readonly string[]; current: string | null }> {
+  const info = await workspaceGitInfo(workspace);
+  if (!info.isRepo) return { branches: [], current: null };
+  try {
+    const output = await gitRun(workspace, ["for-each-ref", "--format=%(refname:short)", "--sort=refname", "refs/heads"]);
+    const branches = output.split("\n").map((line) => line.trim()).filter((line) => line !== "");
+    return { branches, current: info.branch };
+  } catch (error) {
+    throw new Error(`读取 Git 分支失败：${gitErrorMessage(error, "git for-each-ref 失败")}`);
+  }
+}
+
+async function workspaceGitSwitch(
+  workspace: string,
+  branch: string,
+  allowDirty: boolean,
+): Promise<{ ok: true; info: GitInfo } | { ok: false; code: "dirty"; files: readonly ParsedGitFile[]; total: number }> {
+  const info = await workspaceGitInfo(workspace);
+  if (!info.isRepo) throw new Error("当前工作区不是 Git 仓库");
+  const branches = await workspaceGitBranches(workspace);
+  if (!branches.branches.includes(branch)) throw new Error(`本地没有这个分支：${branch}`);
+  if (info.branch === branch) return { ok: true, info };
+  if (!allowDirty) {
+    const status = await workspaceGitStatus(workspace);
+    if (status.files.length > 0) return { ok: false, code: "dirty", files: status.files, total: status.total };
+  }
+  try {
+    await gitRun(workspace, ["switch", branch], 15_000);
+  } catch (error) {
+    throw new Error(gitErrorMessage(error, "切换分支失败"));
+  }
+  return { ok: true, info: await workspaceGitInfo(workspace) };
+}
+
+const GIT_DIFF_MAX_LINES = 2_000;
+const GIT_UNTRACKED_MAX_BYTES = 512 * 1024;
+
+interface GitDiffLine {
+  readonly kind: "context" | "add" | "delete" | "meta";
+  readonly oldLine: number | null;
+  readonly newLine: number | null;
+  readonly text: string;
+}
+
+interface GitDiffPart {
+  readonly staged: boolean;
+  readonly binary: boolean;
+  readonly lines: readonly GitDiffLine[];
+  readonly truncated: boolean;
+}
+
+interface GitDiffResult {
+  readonly path: string;
+  readonly untracked: boolean;
+  readonly parts: readonly GitDiffPart[];
+}
+
+function parseUnifiedDiff(output: string): Omit<GitDiffPart, "staged"> {
+  const rawLines = output.split(/\r?\n/);
+  const lines: GitDiffLine[] = [];
+  let oldLine = 0;
+  let newLine = 0;
+  let binary = false;
+  let truncated = false;
+  let inHunk = false;
+  for (const raw of rawLines) {
+    if (lines.length >= GIT_DIFF_MAX_LINES) {
+      truncated = true;
+      break;
+    }
+    if (raw.startsWith("diff --git ") || raw.startsWith("index ")) continue;
+    if (!inHunk && (raw.startsWith("--- ") || raw.startsWith("+++ "))) continue;
+    if (raw.startsWith("new file mode ") || raw.startsWith("deleted file mode ") || raw.startsWith("old mode ") || raw.startsWith("new mode ") || raw.startsWith("similarity index ")) continue;
+    if (raw.startsWith("rename from ") || raw.startsWith("rename to ")) continue;
+    if (raw.startsWith("Binary files ") || raw.startsWith("GIT binary patch")) {
+      binary = true;
+      continue;
+    }
+    const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(raw);
+    if (hunk !== null) {
+      inHunk = true;
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      lines.push({ kind: "meta", oldLine: null, newLine: null, text: raw });
+      continue;
+    }
+    if (raw.startsWith("+")) {
+      lines.push({ kind: "add", oldLine: null, newLine: newLine++, text: raw.slice(1) });
+      continue;
+    }
+    if (raw.startsWith("-")) {
+      lines.push({ kind: "delete", oldLine: oldLine++, newLine: null, text: raw.slice(1) });
+      continue;
+    }
+    if (raw.startsWith(" ")) {
+      lines.push({ kind: "context", oldLine: oldLine++, newLine: newLine++, text: raw.slice(1) });
+      continue;
+    }
+    if (raw === "") continue;
+    lines.push({ kind: "meta", oldLine: null, newLine: null, text: raw });
+  }
+  return { binary, lines, truncated };
+}
+
+function untrackedDiff(workspace: string, path: string): Omit<GitDiffPart, "staged"> {
+  const target = resolve(workspace, path);
+  let buffer: Buffer;
+  try {
+    buffer = readFileSync(target);
+  } catch (error) {
+    throw new Error(`读取未跟踪文件失败：${gitErrorMessage(error, path)}`);
+  }
+  const truncatedBytes = buffer.length > GIT_UNTRACKED_MAX_BYTES;
+  const slice = buffer.subarray(0, GIT_UNTRACKED_MAX_BYTES);
+  if (slice.includes(0)) return { binary: true, lines: [], truncated: truncatedBytes };
+  const text = new TextDecoder().decode(slice).replace(/\n$/, "");
+  const lines = text === "" ? [] : text.split(/\r?\n/);
+  const truncatedLines = lines.length > GIT_DIFF_MAX_LINES;
+  return {
+    binary: false,
+    lines: lines.slice(0, GIT_DIFF_MAX_LINES).map((line, index) => ({ kind: "add" as const, oldLine: null, newLine: index + 1, text: line })),
+    truncated: truncatedBytes || truncatedLines,
+  };
+}
+
+async function workspaceGitDiff(
+  workspace: string,
+  input: { readonly path: string; readonly oldPath?: string | undefined; readonly staged: boolean; readonly unstaged: boolean; readonly untracked: boolean },
+): Promise<GitDiffResult> {
+  const info = await workspaceGitInfo(workspace);
+  if (!info.isRepo) throw new Error("当前工作区不是 Git 仓库");
+  const root = resolve(workspace);
+  const target = resolve(root, input.path);
+  const relTarget = relative(root, target);
+  if (relTarget === "" || relTarget.startsWith("..") || isAbsolute(relTarget)) {
+    throw new Error("文件路径必须位于当前工作区内");
+  }
+  const path = relTarget.replace(/\\/g, "/");
+  const paths = [path];
+  if (typeof input.oldPath === "string" && input.oldPath !== "") {
+    const oldTarget = resolve(root, input.oldPath);
+    const oldRelative = relative(root, oldTarget);
+    if (oldRelative !== "" && !oldRelative.startsWith("..") && !isAbsolute(oldRelative)) {
+      paths.unshift(oldRelative.replace(/\\/g, "/"));
+    }
+  }
+
+  if (input.untracked) {
+    return { path, untracked: true, parts: [{ staged: false, ...untrackedDiff(root, path) }] };
+  }
+
+  const parts: GitDiffPart[] = [];
+  const readPart = async (staged: boolean): Promise<void> => {
+    const args = [
+      "-c", "core.fsmonitor=false",
+      "diff",
+      ...(staged ? ["--cached"] : []),
+      "--no-ext-diff", "--no-textconv", "--no-color", "--unified=3",
+      "--", ...paths,
+    ];
+    let output: string;
+    try {
+      output = await gitRun(workspace, args, 8_000);
+    } catch (error) {
+      throw new Error(`读取文件 diff 失败：${gitErrorMessage(error, path)}`);
+    }
+    parts.push({ staged, ...parseUnifiedDiff(output) });
+  };
+  if (input.staged) await readPart(true);
+  if (input.unstaged) await readPart(false);
+  return { path, untracked: false, parts };
+}
+
+ipcMain.handle("lcode:workspace.gitDiff", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const workspace = record["workspace"];
+  const path = record["path"];
+  const oldPath = record["oldPath"];
+  if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必填");
+  if (typeof path !== "string" || path === "") throw new Error("path 必填");
+  return await workspaceGitDiff(workspace, {
+    path,
+    ...(typeof oldPath === "string" && oldPath !== "" ? { oldPath } : {}),
+    staged: record["staged"] === true,
+    unstaged: record["unstaged"] === true,
+    untracked: record["untracked"] === true,
+  });
+});
+
+ipcMain.handle("lcode:workspace.gitStatus", async (_e: IpcMainInvokeEvent, workspace: unknown) => {
+  if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必填");
+  return await workspaceGitStatus(workspace);
+});
+
+ipcMain.handle("lcode:workspace.gitBranches", async (_e: IpcMainInvokeEvent, workspace: unknown) => {
+  if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必填");
+  return await workspaceGitBranches(workspace);
+});
+
+ipcMain.handle("lcode:workspace.gitSwitch", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const workspace = record["workspace"];
+  const branch = record["branch"];
+  if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必填");
+  if (typeof branch !== "string" || branch === "") throw new Error("branch 必填");
+  const rt = await agentRuntime();
+  if (!rt.ctx.get("workspaceTrust").isTrusted(workspace)) {
+    throw new Error("工作区尚未信任，先信任此文件夹再切换分支");
+  }
+  return await workspaceGitSwitch(workspace, branch, record["allowDirty"] === true);
+});
 // ─────────────── 活动任务（P3-04） ───────────────
 //
 // jobs / terminals 是本桌面主进程的内存资源，不是会话日志的一部分。渲染进程只能按

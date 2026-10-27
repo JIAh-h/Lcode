@@ -4,6 +4,7 @@ import type { ReactNode } from 'react'
 import { t } from '../i18n/index.ts'
 import { toast } from './toast.ts'
 import { PopMenu } from './PopMenu.tsx'
+import { PanelSplitter, useResizablePanel } from './PanelSplitter.tsx'
 import { SessionActionsMenu } from './SessionActionsMenu.tsx'
 import { sessionBridge } from '../store/sessionBridge.ts'
 import type { SessionMeta } from '../store/sessionBridge.ts'
@@ -75,6 +76,18 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
   const [loadingMore, setLoadingMore] = useState(false)
   const [sidebar, setSidebar] = useState<SidebarState>(EMPTY_SIDEBAR)
+  const [sideOpen, setSideOpen] = useState(true)
+  const leftPanel = useResizablePanel({
+    storageKey: 'lcode.layout.leftWidth',
+    defaultWidth: 250,
+    minWidth: 180,
+    side: 'left',
+    label: t('调整左侧栏宽度'),
+    onCollapse: () => {
+      setSideOpen(false)
+      toast(t('左侧栏已收起'))
+    },
+  })
   const barRef = useRef<HTMLDivElement | null>(null)
   const zoomRef = useRef(1)
   /** 打开菜单前谁拥有焦点；Edit 菜单的 execCommand 需要作用回这个输入框 */
@@ -189,8 +202,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   })
 
   const toggleSide = act(() => {
-    document.body.classList.toggle('noside')
-    toast(document.body.classList.contains('noside') ? t('侧边栏已隐藏') : t('侧边栏已显示'))
+    setSideOpen((value) => {
+      const next = !value
+      toast(next ? t('侧边栏已显示') : t('侧边栏已隐藏'))
+      return next
+    })
   })
 
   const goSettingsSec = (sec: string) => act(() => navigate('/settings', { state: { sec } }))
@@ -504,8 +520,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         <div className="msp" />
       </div>
       <div className="body">
-        {!isSettings && (
-          <aside className="side">
+        {!isSettings && sideOpen && (
+          <>
+          <aside className="side" style={{ width: leftPanel.width }}>
             <div className="side-head">
               <span className="appname">Lcode</span>
               <span className="appver">v0.1.0</span>
@@ -658,6 +675,8 @@ export function AppShell({ children }: { children: ReactNode }) {
               </button>
             </div>
           </aside>
+          <PanelSplitter side="left" panel={leftPanel} />
+          </>
         )}
         <main className="content">{children}</main>
       </div>

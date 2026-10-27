@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import { t } from '../i18n/index.ts'
-import { sessionBridge, type SessionContextUsage } from '../store/sessionBridge.ts'
+import { sessionBridge, workspaceInfoBridge, type GitStatusFile, type SessionContextUsage } from '../store/sessionBridge.ts'
+import { ConfirmDialog } from './ConfirmDialog.tsx'
+import { PopMenu } from './PopMenu.tsx'
 import { toast } from './toast.ts'
 
 /**
@@ -35,10 +37,12 @@ export function ContextBar({
   workspace,
   branch,
   mode,
+  isRepo,
   usage,
   running,
   openSignal = 0,
   onChanged,
+  onGitChanged,
   onCompactRequest,
   onOpenSettings,
 }: {
@@ -46,18 +50,25 @@ export function ContextBar({
   readonly workspace: string | null
   readonly branch: string | null
   readonly mode: 'local' | 'worktree'
+  readonly isRepo: boolean
   readonly usage: SessionContextUsage | null
   /** 回合执行中：表面正在被写入，压缩切点不安全 */
   readonly running: boolean
   /** 递增时打开明细面板（供 /context 使用） */
   readonly openSignal?: number
   readonly onChanged: () => void
+  /** 分支切换成功后刷新父级的 gitInfo / 工作区状态 */
+  readonly onGitChanged?: (() => void) | undefined
   /** 打开压缩预览框（由父级渲染，输入区预警也能触发同一个入口） */
   readonly onCompactRequest: () => void
   readonly onOpenSettings: () => void
 }) {
   const [open, setOpen] = useState(false)
   const [undoing, setUndoing] = useState(false)
+  const [branches, setBranches] = useState<readonly string[]>([])
+  const [branchLoading, setBranchLoading] = useState(false)
+  const [branchBusy, setBranchBusy] = useState(false)
+  const [confirmSwitch, setConfirmSwitch] = useState<{ readonly branch: string; readonly files: readonly GitStatusFile[]; readonly total: number } | null>(null)
   const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -79,6 +90,62 @@ export function ContextBar({
       document.removeEventListener('keydown', onKey)
     }
   }, [open])
+
+  useEffect(() => {
+    setBranches([])
+    setConfirmSwitch(null)
+  }, [workspace])
+
+  const loadBranches = (): void => {
+    const api = workspaceInfoBridge()
+    if (api === undefined || workspace === null || workspace === '' || !isRepo) return
+    setBranchLoading(true)
+    void api.gitBranches(workspace)
+      .then((result) => setBranches(result.branches))
+      .catch(() => undefined)
+      .finally(() => setBranchLoading(false))
+  }
+
+  const switchBranch = async (target: string, allowDirty = false): Promise<void> => {
+    if (target === branch) return
+    if (running) {
+      toast(t('任务进行中，不能切换分支'))
+      return
+    }
+    const api = workspaceInfoBridge()
+    if (api === undefined || workspace === null || workspace === '' || branchBusy) return
+    setBranchBusy(true)
+    try {
+      const result = await api.gitSwitch({
+        workspace,
+        branch: target,
+        ...(allowDirty ? { allowDirty: true } : {}),
+      })
+      if (!result.ok) {
+        setConfirmSwitch({ branch: target, files: result.files, total: result.total })
+        return
+      }
+      toast(t('已切换到分支 {branch}', { branch: target }))
+      loadBranches()
+      onGitChanged?.()
+    } catch (error) {
+      toast(error instanceof Error ? error.message : t('切换分支失败'))
+    } finally {
+      setBranchBusy(false)
+    }
+  }
+
+  const branchItems = branchLoading
+    ? [{ id: '__loading', label: t('正在读取分支…'), disabled: true }]
+    : branches.length === 0
+      ? [{ id: '__none', label: t('没有可切换的分支'), disabled: true }]
+      : branches.map((name) => ({
+          id: name,
+          label: name,
+          raw: true,
+          checked: name === branch,
+          disabled: running || branchBusy,
+        }))
 
   const workspaceName = workspace === null || workspace === ''
     ? t('未设置工作区')
@@ -128,6 +195,7 @@ export function ContextBar({
   }
 
   return (
+    <>
     <div className="cinmeta" ref={rootRef}>
       <div className="cmleft">
         <span className="cmws" title={workspace ?? undefined}>
@@ -143,15 +211,38 @@ export function ContextBar({
         {branch !== null && branch !== '' ? (
           <>
             <span className="cmsep">·</span>
-            <span className="cmbranch" title={t('当前 Git 分支')}>
-              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <circle cx="4.5" cy="3.5" r="1.5" stroke="currentColor" strokeWidth="1.2" />
-                <circle cx="11.5" cy="3.5" r="1.5" stroke="currentColor" strokeWidth="1.2" />
-                <circle cx="4.5" cy="12.5" r="1.5" stroke="currentColor" strokeWidth="1.2" />
-                <path d="M4.5 5v6M11.5 5v2.5a4 4 0 01-4 4H4.5" stroke="currentColor" strokeWidth="1.2" />
-              </svg>
-              {branch}
-            </span>
+            {isRepo ? (
+              <PopMenu
+                buttonClass="cmbranchbtn"
+                title={running ? t('任务进行中，不能切换分支') : t('切换 Git 分支')}
+                width={240}
+                up
+                header={t('本地分支')}
+                items={branchItems}
+                onOpen={loadBranches}
+                onSelect={(id) => {
+                  if (id === '__loading' || id === '__none') return
+                  void switchBranch(id)
+                }}
+                footer={running
+                  ? t('任务进行中，暂时不能切换分支')
+                  : t('切换不会丢弃未提交改动；冲突时 git 会拒绝。')}
+                trigger={(
+                  <>
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                      <circle cx="4.5" cy="3.5" r="1.5" stroke="currentColor" strokeWidth="1.2" />
+                      <circle cx="11.5" cy="3.5" r="1.5" stroke="currentColor" strokeWidth="1.2" />
+                      <circle cx="4.5" cy="12.5" r="1.5" stroke="currentColor" strokeWidth="1.2" />
+                      <path d="M4.5 5v6M11.5 5v2.5a4 4 0 01-4 4H4.5" stroke="currentColor" strokeWidth="1.2" />
+                    </svg>
+                    {branch}
+                    <span className="cmchev" aria-hidden="true">▾</span>
+                  </>
+                )}
+              />
+            ) : (
+              <span className="cmbranch" title={t('当前 Git 分支')}>{branch}</span>
+            )}
           </>
         ) : null}
       </div>
@@ -232,6 +323,20 @@ export function ContextBar({
         ) : null}
       </div>
     </div>
+    {confirmSwitch !== null ? (
+      <ConfirmDialog
+        title={t('工作区有未提交改动')}
+        message={t('还有 {n} 个未提交文件。切换分支会尝试保留这些改动；冲突时 git 会拒绝切换。', { n: confirmSwitch.total })}
+        confirmLabel={t('仍然切换')}
+        onCancel={() => setConfirmSwitch(null)}
+        onConfirm={() => {
+          const target = confirmSwitch
+          setConfirmSwitch(null)
+          void switchBranch(target.branch, true)
+        }}
+      />
+    ) : null}
+    </>
   )
 }
 

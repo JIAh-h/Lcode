@@ -177,9 +177,13 @@ const api = {
     list: (): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.list'),
     set: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.set', input),
   },
-  /** 输入框状态栏：工作区 Git 信息（只读） */
+  /** 输入框状态栏 / 右侧变更面板：工作区 Git 信息、状态与分支切换 */
   workspace: {
     gitInfo: (path: string): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitInfo', path),
+    gitStatus: (path: string): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitStatus', path),
+    gitBranches: (path: string): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitBranches', path),
+    gitSwitch: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitSwitch', input),
+    gitDiff: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitDiff', input),
   },
   permissions: {
     get: (): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.get'),

@@ -33,6 +33,8 @@ export interface PopMenuItem {
   readonly compact?: boolean
   /** 多选样式（角色为 menuitemcheckbox）；默认是单选/动作 */
   readonly checkbox?: boolean
+  /** 动态值（如分支名）不做 i18n 翻译 */
+  readonly raw?: boolean
 }
 
 const MENU_WIDTH = 260
@@ -203,7 +205,7 @@ export function PopMenu({
                   >
                     <span className="pmk">{item.icon ?? (item.checked ? '✓' : '')}</span>
                     <span className="pml">
-                      {t(item.label)}
+                      {item.raw === true ? item.label : t(item.label)}
                       {item.hint ? <em>{t(item.hint)}</em> : null}
                     </span>
                     {isFlyoutItem ? <span className="pm-chev" aria-hidden="true">›</span> : null}
