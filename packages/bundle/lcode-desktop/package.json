@@ -63,6 +63,7 @@
     "@lcode/tool-lsp": "workspace:*",
     "@lcode/tool-shell": "workspace:*",
     "@lcode/tool-skill": "workspace:*",
+    "@lcode/tool-todo": "workspace:*",
     "@lcode/tool-subagent": "workspace:*",
     "@lcode/tool-terminal": "workspace:*",
     "@lcode/tool-web": "workspace:*",

@@ -467,6 +467,8 @@ export function SessionStream({
   onSendStateChange,
   onPausedStateChange,
   onRewound,
+  onJumpChange,
+  jumpRef,
 }: {
   readonly sessionId: string
   /** 递增时执行一次“重试最后一轮”（供 /retry 使用） */
@@ -476,6 +478,10 @@ export function SessionStream({
   readonly onPausedStateChange?: ((paused: boolean) => void) | undefined
   /** 日志被就地截断后通知父页面重新打开（右栏的变更/计划都来自它自己那份事件副本） */
   readonly onRewound?: (() => void) | undefined
+  /** 「回到底部」是否该显示（父组件把它放进输入框上方的状态条） */
+  readonly onJumpChange?: ((visible: boolean) => void) | undefined
+  /** 父组件通过它触发回到底部 */
+  readonly jumpRef?: { current: (() => void) | null } | undefined
 }) {
   /** 全部事件（open 时的历史 + 事件流推来的增量）——投影的唯一输入 */
   const [events, setEvents] = useState<readonly SessionEvent[]>([])
@@ -531,7 +537,6 @@ export function SessionStream({
   const autoTargetRef = useRef<number | null>(null)
   const [showJump, setShowJump] = useState(false)
   const showJumpRef = useRef(false)
-  const [jumpPos, setJumpPos] = useState<{ left: number; top: number } | null>(null)
   /**
    * 日志里当前是否有开着的轮。chunk 是**批量**到达的（主进程 33ms 合帧），
    * 最后一批可能晚于 `turn/end` 落到渲染层；没有这道闸，它会：
@@ -769,36 +774,10 @@ export function SessionStream({
     scrollToBottomIfFollowing()
   }, [events.length, streamingActive])
 
-  /** 回到底部按钮：固定在正文右侧留白处，不覆盖消息文本 */
+  /** 「回到底部」按钮交给父组件渲染（输入框上方状态条），这里只同步可见性 */
   useEffect(() => {
-    if (!showJump) {
-      setJumpPos(null)
-      return
-    }
-    const update = (): void => {
-      const container = scrollContainer()
-      if (container === null) return
-      const rect = container.getBoundingClientRect()
-      const col = container.querySelector('.col')?.getBoundingClientRect()
-      const size = 28
-      const right = rect.right - size - 10
-      const gutter = col === undefined ? 0 : rect.right - col.right
-      // 放在正文列右侧留白里，完全避开文字；留白不足时才退到滚动区右缘
-      const left = col !== undefined && gutter >= size + 4
-        ? col.right + (gutter - size) / 2
-        : right
-      setJumpPos({ left: Math.round(left), top: Math.round(rect.bottom - size - 12) })
-    }
-    update()
-    window.addEventListener('resize', update)
-    const container = scrollContainer()
-    const observer = container === null ? null : new ResizeObserver(update)
-    if (container !== null) observer?.observe(container)
-    return () => {
-      window.removeEventListener('resize', update)
-      observer?.disconnect()
-    }
-  }, [showJump, sessionId])
+    onJumpChange?.(showJump)
+  }, [showJump, onJumpChange])
 
   const jumpToBottom = (): void => {
     stickRef.current = true
@@ -809,6 +788,11 @@ export function SessionStream({
     autoTargetRef.current = container.scrollHeight
     container.scrollTop = container.scrollHeight
   }
+
+  useEffect(() => {
+    if (jumpRef === undefined) return
+    jumpRef.current = jumpToBottom
+  })
 
   /**
    * **从事件里派生"最后一轮失败了"**（而不是只认那条实时推送）。
@@ -1335,23 +1319,6 @@ export function SessionStream({
       })}
       {/* 流式增量：`assistant/message` 一到就被清掉，避免与权威内容重复显示 */}
       {streamingActive && <StreamingAssistant store={streamStore} onGrow={scrollToBottomIfFollowing} />}
-      {showJump && jumpPos !== null
-        ? createPortal(
-            <button
-              type="button"
-              className="jumpbottom"
-              style={{ left: jumpPos.left, top: jumpPos.top }}
-              title={t('回到底部')}
-              aria-label={t('回到底部')}
-              onClick={jumpToBottom}
-            >
-              <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-                <path d="M8 3v9M4.2 8.2L8 12l3.8-3.8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>,
-            document.body,
-          )
-        : null}
     </div>
   )
 }

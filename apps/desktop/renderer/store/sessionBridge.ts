@@ -135,13 +135,13 @@ export interface AgentBridge {
     readonly skills?: readonly string[]
     readonly images?: readonly { readonly mediaType: string; readonly data: string }[]
   }): Promise<{ readonly accepted: true; readonly queue_id: string }>
-  steer(input: { readonly session_id: string; readonly text: string }): Promise<{ readonly accepted: true; readonly mode: 'steered' | 'queued' }>
+  steer(input: { readonly session_id: string; readonly text: string; readonly mode?: 'soft' | 'interrupt' | undefined }): Promise<{ readonly accepted: true; readonly mode: 'steered' | 'interrupted' | 'queued' }>
   queue: {
     list(input: { readonly session_id: string }): Promise<{ readonly items: readonly QueuedMessage[] }>
     edit(input: { readonly session_id: string; readonly queue_id: string; readonly text: string }): Promise<{ readonly updated: boolean }>
     remove(input: { readonly session_id: string; readonly queue_id: string }): Promise<{ readonly removed: boolean }>
     clear(input: { readonly session_id: string }): Promise<{ readonly removed: number }>
-    guide(input: { readonly session_id: string; readonly queue_id: string }): Promise<{ readonly guided: boolean }>
+    guide(input: { readonly session_id: string; readonly queue_id: string; readonly mode?: 'soft' | 'interrupt' | undefined }): Promise<{ readonly guided: boolean }>
   }
   cancel(sessionId: string): Promise<unknown>
   resume(sessionId: string): Promise<unknown>
@@ -276,12 +276,28 @@ export interface GitDiffInput {
   readonly untracked: boolean
 }
 
+export interface WorkspaceTreeResult {
+  readonly entries: readonly string[]
+  readonly truncated: boolean
+  readonly isRepo: boolean
+}
+
+export interface FilePreviewResult {
+  readonly path: string
+  readonly size: number
+  readonly binary: boolean
+  readonly truncated: boolean
+  readonly text: string
+}
+
 export interface WorkspaceInfoBridge {
   gitInfo(path: string): Promise<WorkspaceGitInfo>
   gitStatus(path: string): Promise<WorkspaceGitStatus>
   gitBranches(path: string): Promise<GitBranchList>
   gitSwitch(input: { readonly workspace: string; readonly branch: string; readonly allowDirty?: boolean | undefined }): Promise<GitSwitchResult>
   gitDiff(input: GitDiffInput): Promise<GitDiffResult>
+  tree(path: string): Promise<WorkspaceTreeResult>
+  readFile(input: { readonly workspace: string; readonly path: string }): Promise<FilePreviewResult>
 }
 
 export function workspaceInfoBridge(): WorkspaceInfoBridge | undefined {

@@ -3,7 +3,7 @@ import { defineConfig } from 'vitest/config'
 // 单元 + 集成测试（文档 23 §10：默认测试必须离线可过）
 export default defineConfig({
   test: {
-    include: ['packages/**/src/**/*.test.ts', 'apps/cli/src/**/*.test.ts', 'apps/desktop/renderer/**/*.test.tsx'],
+    include: ['packages/**/src/**/*.test.ts', 'apps/cli/src/**/*.test.ts', 'apps/desktop/renderer/**/*.test.ts', 'apps/desktop/renderer/**/*.test.tsx'],
     environment: 'node',
     coverage: {
       provider: 'v8',

@@ -184,6 +184,9 @@ const api = {
     gitBranches: (path: string): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitBranches', path),
     gitSwitch: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitSwitch', input),
     gitDiff: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitDiff', input),
+    /** 右侧「文件」面板：工作区文件清单（Git 仓库按 .gitignore 过滤）与只读预览 */
+    tree: (path: string): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.tree', path),
+    readFile: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.readFile', input),
   },
   permissions: {
     get: (): Promise<unknown> => ipcRenderer.invoke('lcode:permissions.get'),

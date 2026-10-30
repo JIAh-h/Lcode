@@ -94,6 +94,15 @@ const DANGEROUS_PATTERNS: readonly RegExp[] = [
   />\s*\/dev\/(sd|nvme)/i,
 ]
 
+/** 审批触发类别：`auto` 策略按它决定哪些触发保留审批 */
+type ReasonKind = 'outside-write' | 'credential' | 'dangerous' | 'new-command' | 'new-domain' | 'network' | 'sandbox-widen'
+
+/**
+ * `auto` 策略下仍保留审批的触发：不可逆破坏 + 数据外发。
+ * 越界写 / 新命令 / 放宽沙箱属于“边界类”，在「完全访问」下自动放行。
+ */
+const AUTO_APPROVAL_KINDS: ReadonlySet<ReasonKind> = new Set(['dangerous', 'credential', 'new-domain', 'network'])
+
 /**
  * 判定一个动作（12 §9.3 的六类高风险动作，逐条对应）。
  *
@@ -117,8 +126,8 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
    */
   const workspaceRoot = canonicalPath(ctx.workspaceRoot)
 
-  // ── 先把"要不要问"算出来（与档位无关，档位只决定 ask 还是 deny）──
-  const reasons: { basis: ApprovalBasis; impact: Impact }[] = []
+  // ── 先把"要不要问"算出来（与档位无关，档位只决定 ask 还是 deny / auto 还是兜底）──
+  const reasons: { kind: ReasonKind; basis: ApprovalBasis; impact: Impact }[] = []
 
   // ① 写工作区**之外**的路径（12 §9.3 ①）
   const pathImpacts: ApprovalPathImpact[] = []
@@ -129,6 +138,7 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   const outsideWrites = pathImpacts.filter((p) => p.mode === 'write' && p.outsideWorkspace)
   if (outsideWrites.length > 0) {
     reasons.push({
+      kind: 'outside-write',
       basis: { source: 'preset', reason: '要改动工作区之外的文件', presetName: ctx.preset },
       // ⚠️ outsideWorkspace 一定带上：UI 必须显著标出（21 §6.2 / EP-OUTSIDE_WORKSPACE）
       impact: { paths: outsideWrites },
@@ -139,6 +149,7 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   const credentialReads = pathImpacts.filter((p) => p.mode === 'read' && matchesAny(p.path, CREDENTIAL_PATTERNS))
   if (credentialReads.length > 0) {
     reasons.push({
+      kind: 'credential',
       basis: { source: 'preset', reason: '要读取疑似存放凭据的文件', presetName: ctx.preset },
       impact: { paths: credentialReads },
     })
@@ -151,11 +162,13 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
     const isDangerous = matchesAny(intent.argv.join(' '), DANGEROUS_PATTERNS)
     if (isDangerous) {
       reasons.push({
+        kind: 'dangerous',
         basis: { source: 'preset', reason: '这是一条破坏性命令', presetName: ctx.preset },
         impact: { processScope: intent.summary },
       })
     } else if (isNew) {
       reasons.push({
+        kind: 'new-command',
         basis: { source: 'preset', reason: '这个命令在项目里还没出现过', presetName: ctx.preset },
         impact: { processScope: intent.summary },
       })
@@ -166,6 +179,7 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   const newDomains = (intent.domains ?? []).filter((d) => ctx.seenDomains === undefined || !ctx.seenDomains.has(d))
   if (newDomains.length > 0) {
     reasons.push({
+      kind: 'new-domain',
       basis: { source: 'preset', reason: '要把数据发到这个站点', presetName: ctx.preset },
       impact: {
         network: {
@@ -178,6 +192,7 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   // shell 显式要求联网：即使没有具体域名也必须在本次调用上问一次。
   if (intent.network === true) {
     reasons.push({
+      kind: 'network',
       basis: { source: 'preset', reason: '这条命令要访问网络', presetName: ctx.preset },
       impact: {
         network: {
@@ -192,6 +207,7 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   const { sandboxMode } = knobsOf(ctx.preset)
   if (intent.requestedSandboxMode !== undefined && rank(intent.requestedSandboxMode) > rank(sandboxMode)) {
     reasons.push({
+      kind: 'sandbox-widen',
       basis: { source: 'preset', reason: '要放宽沙箱限制', presetName: ctx.preset },
       impact: { sandboxChange: { from: sandboxMode, to: intent.requestedSandboxMode } },
     })
@@ -212,10 +228,17 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   }
 
   // ── 没有命中任何高风险动作：放行（工作区内读写不问，这是「标准」的手感）──
-  if (reasons.length === 0) return { kind: 'allow' }
+  // ── `auto` 档（「完全访问」）：边界类动作不问，只留兜底审批 ──
+  //
+  // 这档本来就没有工作区边界可言，越界写/新命令/放宽沙箱再问一次只是在制造噪音；
+  // 但不可逆破坏与数据外发（读凭据、出站新域名、显式联网）仍然要过人类确认。
+  const effective = approvalPolicy === 'auto'
+    ? reasons.filter((reason) => AUTO_APPROVAL_KINDS.has(reason.kind))
+    : reasons
+  if (effective.length === 0) return { kind: 'allow' }
 
   // 合并所有命中理由（一次问清，而不是连着弹三个框）
-  const merged = mergeReasons(reasons)
+  const merged = mergeReasons(effective)
 
   /*
    * 环境变量名是**信息**，不是触发条件（12 §5.4）。

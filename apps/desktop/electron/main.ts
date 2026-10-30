@@ -3,7 +3,8 @@ import type { ImageAttachmentWriter } from "@lcode/lcode-desktop";
 import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import {
@@ -1935,6 +1936,154 @@ ipcMain.handle("lcode:workspace.gitSwitch", async (_e: IpcMainInvokeEvent, input
   }
   return await workspaceGitSwitch(workspace, branch, record["allowDirty"] === true);
 });
+
+// ─────────────── 工作区文件树（右侧「文件」面板） ───────────────
+//
+// Git 仓库用 `git ls-files -co --exclude-standard` 拿「已跟踪 + 未忽略的未跟踪文件」，
+// 由 git 自己解释 .gitignore，避免在主进程重写一套匹配规则；不是仓库（或 git 失败）
+// 时退化为目录遍历，只过滤 .git / node_modules 这类明确不该进的目录。
+const WORKSPACE_TREE_LIMIT = 20_000;
+const WORKSPACE_WALK_LIMIT = 5_000;
+const WORKSPACE_WALK_DEPTH = 16;
+const FILE_PREVIEW_MAX_BYTES = 256 * 1024;
+
+interface WorkspaceTreeResult {
+  readonly entries: readonly string[];
+  readonly truncated: boolean;
+  readonly isRepo: boolean;
+}
+
+interface FilePreviewResult {
+  readonly path: string;
+  readonly size: number;
+  readonly binary: boolean;
+  readonly truncated: boolean;
+  readonly text: string;
+}
+
+function splitNullList(output: string): string[] {
+  return output.split("\0").filter((item) => item !== "");
+}
+
+async function workspaceTree(workspace: string): Promise<WorkspaceTreeResult> {
+  const root = resolve(workspace);
+  let stat: Stats;
+  try {
+    stat = statSync(root);
+  } catch {
+    throw new Error("工作区目录不存在");
+  }
+  if (!stat.isDirectory()) throw new Error("工作区不是目录");
+
+  const info = await workspaceGitInfo(root);
+  if (info.isRepo) {
+    try {
+      const [listed, deleted] = await Promise.all([
+        gitRun(root, ["-c", "core.fsmonitor=false", "ls-files", "-c", "-o", "--exclude-standard", "-z"], 8_000),
+        gitRun(root, ["-c", "core.fsmonitor=false", "ls-files", "--deleted", "-z"], 8_000).catch(() => ""),
+      ]);
+      const gone = new Set(splitNullList(deleted));
+      const seen = new Set<string>();
+      const entries: string[] = [];
+      for (const path of splitNullList(listed)) {
+        if (gone.has(path) || seen.has(path)) continue;
+        seen.add(path);
+        entries.push(path);
+      }
+      entries.sort();
+      return { entries: entries.slice(0, WORKSPACE_TREE_LIMIT), truncated: entries.length > WORKSPACE_TREE_LIMIT, isRepo: true };
+    } catch {
+      // git 不可用（超大仓库、损坏索引）时退化为目录遍历，别让面板直接空掉
+    }
+  }
+
+  const entries: string[] = [];
+  let truncated = false;
+  const walk = (dir: string, prefix: string, depth: number): void => {
+    if (truncated || depth > WORKSPACE_WALK_DEPTH) return;
+    let items: Dirent[];
+    try {
+      items = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    items.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+    for (const item of items) {
+      if (entries.length >= WORKSPACE_WALK_LIMIT) {
+        truncated = true;
+        return;
+      }
+      const rel = prefix === "" ? item.name : `${prefix}/${item.name}`;
+      if (item.isFile()) {
+        entries.push(rel);
+      } else if (item.isDirectory() && item.name !== ".git" && item.name !== "node_modules") {
+        walk(join(dir, item.name), rel, depth + 1);
+      }
+    }
+  };
+  walk(root, "", 0);
+  return { entries, truncated, isRepo: false };
+}
+
+async function workspaceReadFile(workspace: string, inputPath: string): Promise<FilePreviewResult> {
+  const root = resolve(workspace);
+  let rootReal: string;
+  try {
+    rootReal = realpathSync(root);
+  } catch {
+    throw new Error("工作区目录不存在");
+  }
+  const target = resolve(root, inputPath);
+  const rel = relative(root, target);
+  if (rel === "" || rel.startsWith("..") || isAbsolute(rel)) throw new Error("文件路径必须位于当前工作区内");
+  let real: string;
+  try {
+    real = realpathSync(target);
+  } catch {
+    throw new Error("文件不存在或无法读取");
+  }
+  // 符号链接可能指向工作区之外：只读预览也按真实路径再校验一次
+  const relReal = relative(rootReal, real);
+  if (relReal.startsWith("..") || isAbsolute(relReal)) throw new Error("文件路径必须位于当前工作区内");
+
+  let stat: Stats;
+  try {
+    stat = statSync(real);
+  } catch {
+    throw new Error("文件不存在或无法读取");
+  }
+  if (!stat.isFile()) throw new Error("只能预览普通文件");
+
+  const fd = openSync(real, "r");
+  try {
+    const length = Math.min(stat.size, FILE_PREVIEW_MAX_BYTES + 1);
+    const buffer = Buffer.alloc(length);
+    const read = readSync(fd, buffer, 0, length, 0);
+    const slice = buffer.subarray(0, read);
+    const previewPath = rel.replace(/\\/g, "/");
+    if (slice.includes(0)) return { path: previewPath, size: stat.size, binary: true, truncated: false, text: "" };
+    const truncated = stat.size > FILE_PREVIEW_MAX_BYTES;
+    const text = new TextDecoder().decode(truncated ? slice.subarray(0, FILE_PREVIEW_MAX_BYTES) : slice);
+    return { path: previewPath, size: stat.size, binary: false, truncated, text };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+ipcMain.handle("lcode:workspace.tree", async (_e: IpcMainInvokeEvent, workspace: unknown) => {
+  if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必填");
+  return await workspaceTree(workspace);
+});
+
+ipcMain.handle("lcode:workspace.readFile", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const workspace = record["workspace"];
+  const path = record["path"];
+  if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必填");
+  if (typeof path !== "string" || path === "") throw new Error("path 必填");
+  return await workspaceReadFile(workspace, path);
+});
+
 // ─────────────── 活动任务（P3-04） ───────────────
 //
 // jobs / terminals 是本桌面主进程的内存资源，不是会话日志的一部分。渲染进程只能按
@@ -2383,6 +2532,7 @@ ipcMain.handle(
     const record = (input ?? {}) as Record<string, unknown>;
     const sessionId = record["session_id"];
     const text = record["text"];
+    const mode = record["mode"] === "interrupt" ? "interrupt" : "soft";
     if (typeof sessionId !== "string" || sessionId === "") throw new Error("session_id 必填");
     if (typeof text !== "string" || text.trim() === "") throw new Error("text 必填");
 
@@ -2391,9 +2541,9 @@ ipcMain.handle(
     await ensureSessionWatch(sessionId);
     watchTurnFailure(sessionId);
     try {
-      await rt.agents.steer({ agent_id, content: [{ type: "text", text }] });
+      await rt.agents.steer({ agent_id, content: [{ type: "text", text }], mode });
       pushToRenderer("lcode:session.changed", { session_id: sessionId });
-      return { accepted: true as const, mode: "steered" as const };
+      return { accepted: true as const, mode: mode === "interrupt" ? ("interrupted" as const) : ("steered" as const) };
     } catch (err) {
       // 用户点击时当前轮可能恰好已收尾。此时不报“插话失败”，而是按产品承诺
       // 自动降级为下一轮队首消息，保证引导不会丢失。
@@ -2449,11 +2599,12 @@ ipcMain.handle("lcode:agent.queue.guide", async (_e: IpcMainInvokeEvent, input: 
   const record = (input ?? {}) as Record<string, unknown>;
   const sessionId = record["session_id"];
   const queueId = record["queue_id"];
+  const mode = record["mode"] === "interrupt" ? "interrupt" : "soft";
   if (typeof sessionId !== "string" || sessionId === "") throw new Error("session_id 必填");
   if (typeof queueId !== "string" || queueId === "") throw new Error("queue_id 必填");
   const rt = await agentRuntime();
   const { agent_id } = await rt.agents.resume({ session_id: sessionId });
-  const result = await rt.agents.guideQueued({ agent_id, queue_id: queueId });
+  const result = await rt.agents.guideQueued({ agent_id, queue_id: queueId, mode });
   if (result.guided) pushToRenderer("lcode:session.changed", { session_id: sessionId });
   return result;
 });

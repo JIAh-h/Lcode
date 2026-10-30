@@ -37,7 +37,7 @@ export type PermissionPreset = (typeof PERMISSION_PRESETS)[number]
 export const PERMISSION_PRESET_HINT: Readonly<Record<PermissionPreset, string>> = {
   只读: '它只能看，不能改',
   工作区内修改: '能改工作区内的文件；越界或高风险动作前问你',
-  完全访问: '哪里都能碰，但动手前问我',
+  完全访问: '哪里都能碰；只对破坏性操作和数据外发确认',
 }
 
 export interface UiPrefs {

@@ -135,6 +135,13 @@ const SESSION_PLUGINS: readonly SessionPluginDef[] = [
     tools: ['delegate'],
   },
   {
+    id: 'tool-todo',
+    name: '任务清单工具',
+    description: '让 AI 维护本会话的待办清单；被打断或改方向后可据此恢复剩余工作。',
+    fullName: '@lcode/tool-todo',
+    tools: ['todo_write'],
+  },
+  {
     id: 'tool-skill',
     name: '技能工具',
     description: '列出并按需加载本地技能说明。',

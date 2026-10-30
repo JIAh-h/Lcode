@@ -573,7 +573,7 @@ describe('A. 装配的接线正确性', () => {
 
   it('工具已接：注册表含计划提交工具，但正常请求不暴露它', async () => {
     const rt = await makeRuntime([textScript])
-    // 五个文件工具 + shell + terminal + 子代理 + 代码模式 + 两个计划工具
+    // 五个文件工具 + shell + terminal + 子代理 + 代码模式 + 两个计划工具 + 待办清单
     expect(rt.ctx.get('tools').schemas().map((s) => s.name).sort()).toEqual([
       'delegate',
       'edit',
@@ -587,6 +587,7 @@ describe('A. 装配的接线正确性', () => {
       'skill_load',
       'submit_plan',
       'terminal',
+      'todo_write',
       'write',
     ])
     const assembled = await rt.ctx.get('systemPrompt').assemble({})

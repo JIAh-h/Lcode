@@ -17,7 +17,7 @@ export type TurnEndReason = 'completed' | 'cancelled' | 'interrupted' | 'error'
 export type ApprovalResult = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
 /** 工具卡片类型（22 §6.3） */
-export type CardType = 'generic' | 'terminal' | 'diff' | 'search' | 'read' | 'web'
+export type CardType = 'generic' | 'terminal' | 'diff' | 'search' | 'read' | 'web' | 'todo'
 
 /** agent 状态（20 §5.4 AgentHandle） */
 export type AgentStatus = 'idle' | 'running' | 'waiting-approval' | 'cancelled'

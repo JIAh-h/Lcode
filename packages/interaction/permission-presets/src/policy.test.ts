@@ -41,7 +41,7 @@ describe('预设 → 两条轴（12 §3.3 表格逐格对应）', () => {
     expect(PRESET_KNOBS).toEqual({
       只读: { sandboxMode: 'read-only', approvalPolicy: 'ask' },
       工作区内修改: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
-      完全访问: { sandboxMode: 'danger-full-access', approvalPolicy: 'ask' },
+      完全访问: { sandboxMode: 'danger-full-access', approvalPolicy: 'auto' },
     })
   })
 
@@ -94,9 +94,43 @@ describe('工作区外写：一定问（12 §9.3 ①）', () => {
   })
 
 
-  it('`完全访问` 档 → 仍然问（danger-full-access + ask）', () => {
-    // 「完全访问」放宽的是**沙箱可达范围**，不是"不用问"
-    expect(evaluate(outsideWrite, { ...base, preset: '完全访问' }).kind).toBe('ask')
+  it('`完全访问` 档 → 边界类不问（auto 策略）', () => {
+    // 这档本来就没有工作区边界；越界写再问一次只是噪音
+    expect(evaluate(outsideWrite, { ...base, preset: '完全访问' }).kind).toBe('allow')
+  })
+})
+
+describe('完全访问（auto）：兜底审批只留破坏性与数据外发', () => {
+  const full: PolicyContext = { ...base, preset: '完全访问' }
+
+  it('项目里没出现过的命令 → 不问', () => {
+    const v = evaluate({ tool: 'shell', summary: '跑 lint', argv: ['pnpm', 'lint'] }, { ...full, seenCommands: new Set(['git status']) })
+    expect(v.kind).toBe('allow')
+  })
+
+  it('破坏性命令 → 仍然问', () => {
+    const v = evaluate({ tool: 'shell', summary: 'rm -rf node_modules', argv: ['rm', '-rf', 'node_modules'] }, full)
+    expect(v.kind).toBe('ask')
+    if (v.kind !== 'ask') throw new Error('unreachable')
+    expect(v.basis.reason).toContain('破坏性')
+  })
+
+  it('读取疑似凭据 → 仍然问', () => {
+    const v = evaluate(
+      { tool: 'read', summary: '读 .env', paths: [{ path: '.env', mode: 'read' }] },
+      full,
+    )
+    expect(v.kind).toBe('ask')
+  })
+
+  it('出站到项目没见过的域名 → 仍然问', () => {
+    const v = evaluate({ tool: 'web_fetch', summary: '访问', domains: ['evil.example'] }, full)
+    expect(v.kind).toBe('ask')
+  })
+
+  it('shell 显式要求联网 → 仍然问', () => {
+    const v = evaluate({ tool: 'shell', summary: 'curl', argv: ['curl', 'example.com'], network: true }, full)
+    expect(v.kind).toBe('ask')
   })
 })
 

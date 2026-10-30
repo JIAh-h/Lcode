@@ -7,7 +7,7 @@ import { createLocalFileCheckpointService, LocalSessionsApi, readAttachment } fr
 import type { FileCheckpointService, RuntimeSessionsService } from '@lcode/session-api'
 import { InMemoryToolRegistry } from '@lcode/tools'
 import { createSystemPromptService } from '@lcode/system-prompt'
-import type { ContentBlock, SessionService } from '@lcode/session'
+import type { ContentBlock, SessionService, TodoItem } from '@lcode/session'
 import { deriveVisibleSurfaceItems } from '@lcode/session'
 import { estimateTokens } from '@lcode/context-budget'
 import { initZstd } from '@lcode/session-persistence-jsonl'
@@ -95,6 +95,7 @@ import { createLocalSubprocess } from '@lcode/subprocess-local'
 import { createLocalJobs } from '@lcode/jobs-local'
 import { createShellTool } from '@lcode/tool-shell'
 import { createTerminalTool } from '@lcode/tool-terminal'
+import { createTodoWriteTool, renderTodoPrompt } from '@lcode/tool-todo'
 import { createLocalTerminal } from '@lcode/terminal-pty'
 import { createFsTools } from '@lcode/tool-fs'
 import type { SandboxService, ResolvedSandboxPolicy, SandboxWrapResult, SandboxMode } from '@lcode/sandbox'
@@ -389,13 +390,30 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
       .filter((content) => content !== '')
     return notes.length === 0 ? '' : `## 本轮补充上下文\n\n${notes.join('\n\n')}`
   })
+  /*
+   * 任务清单（todo/write，last-write-wins）每轮从会话日志取最近一次快照注入系统提示。
+   * 打断、改方向或压缩之后，模型据此知道还剩哪些未完成项，而不是靠记忆。
+   */
+  systemPrompt.context('session-todo', (assembleCtx) => {
+    const sessionId = assembleCtx.sessionId
+    if (sessionId === undefined) return ''
+    try {
+      const events = sessions.sessionServiceFor(sessionId).events()
+      let latest: readonly TodoItem[] | undefined
+      for (const event of events) if (event.type === 'todo/write') latest = event.data.todos
+      return latest === undefined ? '' : renderTodoPrompt(latest)
+    } catch {
+      return ''
+    }
+  })
   const unregisterPrompt = ctx.set('systemPrompt', systemPrompt)
   const workspaceOf = (sessionId: string) => sessions.workspaceOf(sessionId)
   const fs = ctx.has('fsFor') ? ctx.get('fsFor') : ctx.get('fs')
   for (const tool of createFsTools({ fs, workspaceRoot, workspaceOf, spill: ctx.get('spill') })) tools.register(tool)
   const unregisterShell = tools.register(createShellTool({ shell: ctx.get('shell'), workspaceRoot, workspaceOf }))
   const unregisterTerminal = tools.register(createTerminalTool({ terminals: ctx.get('terminals'), workspaceRoot, workspaceOf }))
-  return () => { unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
+  const unregisterTodo = tools.register(createTodoWriteTool({ getSession: (sessionId: string) => sessions.sessionServiceFor(sessionId) }))
+  return () => { unregisterTodo(); unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
 }
 
 function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServices, sessions: LocalSessionsApi, mutationAuthority: ReturnType<typeof createFsMutationAuthority>, ctx: DesktopServices['ctx'], profile: () => RuntimeCompositionSnapshot): Disposer {
@@ -1027,6 +1045,17 @@ const BASE_SYSTEM_PROMPT = [
   '  （比如 grep 没匹配到会返回 1），请读 stdout/stderr 判断发生了什么。',
   '- 工具失败会以结构化错误返回给你，**带错误码**。看错误码判断原因并自己修正，',
   '  不要重复同一个失败的调用。',
+  '',
+  '## 用户插话与打断',
+  '',
+  '- 用户可能在任务执行中插入新指令（界面上的「引导」）：当前工具或回复会被打断。',
+  '- 被打断或被跳过的工具，结果里会写明“已被用户插话打断/跳过”。**不要原样重试**，先按用户的新意图调整；',
+  '  处理完插话后，默认继续完成原任务，除非用户明确要求停止或改变目标。',
+  '',
+  '## 任务清单',
+  '',
+  '- 多步骤任务（大约 3 步及以上）开始时，用 todo_write 建立清单；每完成一步就更新状态（in-progress / done）。',
+  '- 清单是整表替换。被打断、改变方向或恢复任务前，先确认清单里还有哪些未完成项，再继续。',
   '',
   '## 关于权限',
   '',

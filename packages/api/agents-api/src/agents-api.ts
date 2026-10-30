@@ -90,11 +90,18 @@ export class LocalAgentsApi {
     return { accepted: true, session_id: handle.sessionId, seq, queue_id: queueId, enqueued_at: this.now() }
   }
 
-  /** `agents.steer`：当前轮的下一个步边界生效；未在运行 → EC-NOT_RUNNING */
-  async steer(input: { readonly agent_id: string; readonly content: readonly ContentBlock[] }): Promise<{ readonly accepted: true; readonly seq: number }> {
+  /**
+   * `agents.steer`：当前轮的下一个步边界生效；未在运行 → EC-NOT_RUNNING。
+   * `mode: 'interrupt'` 先打断当前步骤（正在跑的工具 / 流式请求）再交付。
+   */
+  async steer(input: {
+    readonly agent_id: string
+    readonly content: readonly ContentBlock[]
+    readonly mode?: 'soft' | 'interrupt' | undefined
+  }): Promise<{ readonly accepted: true; readonly seq: number }> {
     const handle = this.requireHandle(input.agent_id)
     assertContentBlocks(input.content)
-    await handle.steer({ kind: 'content', content: input.content })
+    await handle.steer({ kind: 'content', content: input.content }, input.mode ?? 'soft')
     return { accepted: true, seq: this.deps.getSession(handle.sessionId).length }
   }
 
@@ -123,8 +130,12 @@ export class LocalAgentsApi {
     return { removed: this.requireHandle(input.agent_id).clearQueued() }
   }
 
-  async guideQueued(input: { readonly agent_id: string; readonly queue_id: string }): Promise<{ readonly guided: boolean }> {
-    return { guided: this.requireHandle(input.agent_id).guideQueued(input.queue_id) }
+  async guideQueued(input: {
+    readonly agent_id: string
+    readonly queue_id: string
+    readonly mode?: 'soft' | 'interrupt' | undefined
+  }): Promise<{ readonly guided: boolean }> {
+    return { guided: this.requireHandle(input.agent_id).guideQueued(input.queue_id, input.mode ?? 'soft') }
   }
 
   /** `agents.inject`：幂等（按 dedupe_key）；不改对话可见内容 */

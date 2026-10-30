@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import type { PlanArtifact, SessionEvent } from '@lcode/session'
+import type { PlanArtifact, SessionEvent, TodoItem } from '@lcode/session'
 import { ComposerBar, type ComposerSendInput } from '../components/ComposerBar.tsx'
 import { ContextBar } from '../components/ContextBar.tsx'
 import { CompactionDialog } from '../components/CompactionDialog.tsx'
 import { PlanReviewDialog } from '../components/PlanReviewDialog.tsx'
 import { SessionStream } from '../components/SessionStream.tsx'
+import { TurnStatusBar } from '../components/TurnStatusBar.tsx'
+import { FileTree, type FileMarker } from '../components/FileTree.tsx'
 import { SessionActionsMenu } from '../components/SessionActionsMenu.tsx'
 import { PanelSplitter, useResizablePanel } from '../components/PanelSplitter.tsx'
 import { TaskPanel } from '../components/TaskPanel.tsx'
@@ -239,6 +241,7 @@ function RightPanel({
   sessionId,
   gitStatus,
   gitBusy,
+  filesEpoch,
   onRefreshGit,
   width,
 }: {
@@ -249,11 +252,17 @@ function RightPanel({
   readonly sessionId: string
   readonly gitStatus: WorkspaceGitStatus | null
   readonly gitBusy: boolean
+  readonly filesEpoch: number
   readonly onRefreshGit: () => void
   readonly width: number
 }) {
   const [openFile, setOpenFile] = useState<string | null>(changes[0]?.path ?? null)
-  const files = [...new Set(changes.map((change) => change.path))]
+  const changedFileCount = useMemo(() => new Set(changes.map((change) => change.path)).size, [changes])
+  const markers = useMemo(() => {
+    const map = new Map<string, FileMarker>()
+    for (const file of gitStatus?.files ?? []) map.set(file.path, { kind: file.kind, label: gitStatusLabel(file) })
+    return map
+  }, [gitStatus])
   return (
     <aside className="right" style={{ width }}>
       <div className="rtabs">
@@ -270,7 +279,7 @@ function RightPanel({
       {tab === 'tasks' ? <TaskPanel sessionId={sessionId} /> : tab === 'changes' ? (
         <div className="rpanel">
           <div className="rscope">
-            <span className="chip">{t('事件投影')}</span> {t('{n} 个文件改动', { n: files.length })}
+            <span className="chip">{t('事件投影')}</span> {t('{n} 个文件改动', { n: changedFileCount })}
           </div>
           {changes.length === 0 && <div className="pickhint">{t('当前会话还没有记录文件变更')}</div>}
           {changes.map((change) => (
@@ -313,17 +322,11 @@ function RightPanel({
         </div>
       ) : (
         <div className="rpanel">
-          <div className="rscope">
-            <span className="chip">{t('工作区')}</span> {workspace ?? t('未设置')}
-          </div>
-          {files.length === 0 && <div className="pickhint">{t('当前会话还没有文件记录')}</div>}
-          {files.map((file) => (
-            <div className="fitem" key={file}>
-              <div className="frow">
-                <span className="fn">{file}</span>
-              </div>
-            </div>
-          ))}
+          {workspace === null || workspace === '' ? (
+            <div className="pickhint">{t('未设置工作区')}</div>
+          ) : (
+            <FileTree workspace={workspace} markers={markers} epoch={filesEpoch} />
+          )}
         </div>
       )}
     </aside>
@@ -350,6 +353,9 @@ export function WorkspacePage() {
   const [events, setEvents] = useState<readonly SessionEvent[]>([])
   const [meta, setMeta] = useState<SessionMeta | null>(null)
   const [queued, setQueued] = useState<readonly QueuedMessage[]>([])
+  /** 会话是否处于"上翻离开底部"状态（「回到底部」按钮放进输入框上方的状态条） */
+  const [jumpVisible, setJumpVisible] = useState(false)
+  const jumpRef = useRef<(() => void) | null>(null)
   const [readOnlyConfirmedFor, setReadOnlyConfirmedFor] = useState<string | null>(null)
   /** 回退重发会就地截断日志：本页那份事件副本必须整体重读，否则右栏还挂着已撤回的变更 */
   const [reloadEpoch, setReloadEpoch] = useState(0)
@@ -446,6 +452,12 @@ export function WorkspacePage() {
   }, [sessionId, reloadEpoch])
 
   const changes = useMemo(() => changesFrom(events), [events])
+  /** 最近一次 todo_write 的整表快照（last-write-wins）：输入框上方的任务清单条 */
+  const todos = useMemo(() => {
+    let latest: readonly TodoItem[] = []
+    for (const event of events) if (event.type === 'todo/write') latest = event.data.todos
+    return latest
+  }, [events])
   const planActive = useMemo(() => planActiveFrom(events), [events])
   const planReady = useMemo(() => planReadyFrom(events), [events])
   const pendingPlan = useMemo(() => pendingPlanFrom(events), [events])
@@ -666,15 +678,15 @@ export function WorkspacePage() {
     planAction()
   }
 
-  const guideQueued = (queueId: string): void => {
+  const guideQueued = (queueId: string, mode: 'soft' | 'interrupt' = 'soft'): void => {
     if (sessionId === undefined) return
     const api = agentBridge()
     if (api === undefined) {
       toast(t('当前环境没有主进程桥，无法引导任务'))
       return
     }
-    void api.queue.guide({ session_id: sessionId, queue_id: queueId }).then(({ guided }) => {
-      if (guided) toast(t('已加入当前任务，将在下一步生效'))
+    void api.queue.guide({ session_id: sessionId, queue_id: queueId, mode }).then(({ guided }) => {
+      if (guided) toast(mode === 'interrupt' ? t('已打断当前步骤，消息立即生效') : t('已加入当前任务，将在下一步生效'))
       else toast(t('该消息已开始处理，无法再转为引导'))
       refreshQueue()
       notifySessionChanged()
@@ -772,8 +784,27 @@ export function WorkspacePage() {
                 sessionId={sessionId}
                 onRewound={() => setReloadEpoch((n) => n + 1)}
                 retrySignal={retrySignal}
+                onJumpChange={setJumpVisible}
+                jumpRef={jumpRef}
               />
             </div>
+          </div>
+          {/* 会话区与输入框之间的常驻状态条：本轮芯片 + 回到底部 */}
+          <div className="turnstrip">
+            <TurnStatusBar todos={todos} changes={changes} />
+            {jumpVisible ? (
+              <button
+                type="button"
+                className="jumpbottom"
+                title={t('回到底部')}
+                aria-label={t('回到底部')}
+                onClick={() => jumpRef.current?.()}
+              >
+                <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                  <path d="M8 3v9M4.2 8.2L8 12l3.8-3.8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            ) : null}
           </div>
           <div className="cinput">
             <div className="cin">
@@ -859,6 +890,7 @@ export function WorkspacePage() {
               sessionId={sessionId}
               gitStatus={gitStatus}
               gitBusy={gitBusy}
+              filesEpoch={gitEpoch}
               onRefreshGit={() => refreshGitStatus(true)}
               width={rightPanel.width}
             />

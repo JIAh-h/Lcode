@@ -16,10 +16,13 @@ import { dirname, resolve } from 'node:path'
  * |---|---|---|---|
  * | 只读 | `read-only` | `ask` | 它只能看，不能改 |
  * | **工作区内修改**（默认） | `workspace-write` | `ask` | 能改工作区内的文件，动手前问我 |
- * | 完全访问 | `danger-full-access` | `ask` | 哪里都能碰，但动手前问我 |
+ * | 完全访问 | `danger-full-access` | `auto` | 哪里都能碰；只对破坏性操作和数据外发确认 |
  *
- * 2026-10-26 收敛为三档：移除「自动审批 / 无人值守」。产品上不再提供“不问人”
- * 的权限档；`never` 策略保留在底层（审批通道缺席时仍 fail-closed），只是没有预设映射。
+ * 2026-10-26 收敛为三档：移除「自动审批 / 无人值守」这个**独立预设**。
+ * 2026-10-28 起「完全访问」的审批策略降为 `auto`：越界写、新命令、放宽沙箱这类
+ * 边界动作自动放行（这档本来就没有边界可言），只保留破坏性命令、读凭据、
+ * 出站新域名与显式联网的兜底审批。`never` 仍保留在底层（审批通道缺席时 fail-closed），
+ * 只是没有预设映射。
  *
  * ## `never` **不等于**"默认允许"
  *
@@ -31,8 +34,8 @@ import { dirname, resolve } from 'node:path'
 export const PERMISSION_PRESETS = ['只读', '工作区内修改', '完全访问'] as const
 export type PermissionPreset = (typeof PERMISSION_PRESETS)[number]
 
-/** `approval/policy` 的两个取值 */
-export type ApprovalPolicy = 'ask' | 'never'
+/** `approval/policy` 的取值：`auto` 只保留兜底审批（见 policy.ts 的 AUTO_APPROVAL_KINDS） */
+export type ApprovalPolicy = 'ask' | 'auto' | 'never'
 
 export interface PresetKnobs {
   readonly sandboxMode: SandboxMode
@@ -43,7 +46,7 @@ export interface PresetKnobs {
 export const PRESET_KNOBS: Readonly<Record<PermissionPreset, PresetKnobs>> = {
   只读: { sandboxMode: 'read-only', approvalPolicy: 'ask' },
   工作区内修改: { sandboxMode: 'workspace-write', approvalPolicy: 'ask' },
-  完全访问: { sandboxMode: 'danger-full-access', approvalPolicy: 'ask' },
+  完全访问: { sandboxMode: 'danger-full-access', approvalPolicy: 'auto' },
 }
 
 export const DEFAULT_PRESET: PermissionPreset = '工作区内修改'
@@ -52,7 +55,7 @@ export const DEFAULT_PRESET: PermissionPreset = '工作区内修改'
 export const PRESET_HINT: Readonly<Record<PermissionPreset, string>> = {
   只读: '它只能看，不能改',
   工作区内修改: '能改工作区内的文件；越界或高风险动作前问你',
-  完全访问: '哪里都能碰，但动手前问我',
+  完全访问: '哪里都能碰；只对破坏性操作和数据外发确认',
 }
 
 export function isPermissionPreset(value: unknown): value is PermissionPreset {

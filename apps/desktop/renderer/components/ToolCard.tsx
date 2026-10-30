@@ -50,7 +50,7 @@ function jsonRecord(text: string): JsonRecord | null {
 }
 
 function knownCard(value: unknown): CardType | undefined {
-  return value === 'generic' || value === 'terminal' || value === 'diff' || value === 'search' || value === 'read' || value === 'web'
+  return value === 'generic' || value === 'terminal' || value === 'diff' || value === 'search' || value === 'read' || value === 'web' || value === 'todo'
     ? value
     : undefined
 }
@@ -80,7 +80,9 @@ function cardLabel(card: CardType): string {
             ? '读取文件'
             : card === 'web'
               ? '打开网页'
-              : '执行操作',
+              : card === 'todo'
+                ? '任务清单'
+                : '执行操作',
   )
 }
 
@@ -103,6 +105,11 @@ function summary(call: ToolCardCall, result: ToolCardResult | undefined, card: C
   if (card === 'diff') return String(data?.['path'] ?? args?.['path'] ?? t('文件变更'))
   if (card === 'search') return String(args?.['pattern'] ?? args?.['path'] ?? t('匹配文件'))
   if (card === 'web') return String(args?.['url'] ?? t('网页内容'))
+  if (card === 'todo') {
+    const items = Array.isArray(data?.['items']) ? (data['items'] as unknown[]) : Array.isArray(args?.['items']) ? (args['items'] as unknown[]) : []
+    const done = items.filter((item) => record(item)?.['status'] === 'done').length
+    return t('{done}/{total} 项已完成', { done, total: items.length })
+  }
   return String(data?.['summary'] ?? args?.['description'] ?? t('操作已完成'))
 }
 
@@ -184,6 +191,25 @@ function SearchBody({ data }: { readonly data: JsonRecord }): ReactNode {
   return <pre className="toolcard-pre mono">{JSON.stringify(data, null, 2)}</pre>
 }
 
+function TodoBody({ data }: { readonly data: JsonRecord }): ReactNode {
+  const items = Array.isArray(data['items']) ? data['items'] : []
+  if (items.length === 0) return <div className="toolcard-status">{t('（清单已清空）')}</div>
+  return (
+    <div className="tool-todo-body">
+      {items.map((item, index) => {
+        const todo = record(item)
+        const status = String(todo?.['status'] ?? 'pending')
+        return (
+          <div className={`tool-todo-item tool-todo-${status}`} key={String(todo?.['id'] ?? index)}>
+            <span className="tool-todo-mark">{status === 'done' ? '✓' : status === 'in-progress' ? '▸' : '○'}</span>
+            <span className="tool-todo-text">{String(todo?.['text'] ?? '')}</span>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function ResultBody({ card, result }: { readonly card: CardType; readonly result: ToolCardResult }): ReactNode {
   const data = resultData(result)
   if (result.message.isError) {
@@ -194,6 +220,7 @@ function ResultBody({ card, result }: { readonly card: CardType; readonly result
   if (card === 'terminal') return <TerminalBody data={data} />
   if (card === 'diff') return <DiffBody data={data} />
   if (card === 'search') return <SearchBody data={data} />
+  if (card === 'todo') return <TodoBody data={data} />
   return <pre className="toolcard-pre mono">{JSON.stringify(data, null, 2)}</pre>
 }
 

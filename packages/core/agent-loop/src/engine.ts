@@ -93,6 +93,9 @@ export interface QueuedInput {
   readonly input: UserInput;
 }
 
+/** 插话模式：`soft` 在步边界交付；`interrupt` 打断当前步骤（工具/流式请求）后立即交付 */
+export type SteerMode = 'soft' | 'interrupt';
+
 /** 循环驱动的句柄：AgentHandle 行为 + 同步入队（agents.* API 的 followup 用） */
 export type LoopHandle = AgentHandle & {
   readonly enqueue: (input: UserInput) => EnqueueResult;
@@ -102,8 +105,9 @@ export type LoopHandle = AgentHandle & {
   editQueued(queueId: string, input: UserInput): boolean;
   removeQueued(queueId: string): boolean;
   clearQueued(): number;
-  /** 原子地把一条待发送消息转为当前回合的引导。 */
-  guideQueued(queueId: string): boolean;
+  /** 原子地把一条待发送消息转为当前回合的引导；`interrupt` 会先打断当前步骤。 */
+  guideQueued(queueId: string, mode?: SteerMode): boolean;
+  readonly steer: (input: UserInput, mode?: SteerMode) => Promise<void>;
 };
 
 /** 一次请求的结局：取消，或一条完整的 assistant 消息 */
@@ -119,6 +123,13 @@ type StreamOutcome =
 /** 每轮最多做几次"压缩后重试"，防止压缩空间不足时无限循环 */
 const MAX_CONTEXT_RECOVERIES = 2;
 
+/**
+ * 插话打断的工具结果必须让模型看出“是用户叫停”，而不是环境故障——
+ * 否则它会把中断当成报错，盲目重试或错误地放弃（与主流产品的中断语义对齐）。
+ */
+const INTERRUPTED_TOOL_TEXT = '工具调用已被用户插话打断（未完成）。如仍需要请重新调用；不要假设它已成功。';
+const SKIPPED_TOOL_TEXT = '该工具调用因用户插话被跳过，未执行。如仍需要请重新调用；不要假设它已完成。';
+
 export class TurnEngine {
   private readonly queue: QueueItem[] = [];
   private nextQueueId = 0;
@@ -128,6 +139,8 @@ export class TurnEngine {
   private disposed = false;
   private pauseAfterCurrent = false;
   private controller: AbortController | null = null;
+  /** 当前步骤的插话中断信号；`interrupt` 模式的 steer 会 abort 它 */
+  private activeStepAbort: AbortController | null = null;
   /** 当前在跑的轮的收尾通知 */
   private inflight: Promise<TurnEndReason> | null = null;
   private cancellation: Promise<void> | null = null;
@@ -155,7 +168,7 @@ export class TurnEngine {
         return engine.status;
       },
       followup: (input: UserInput) => engine.followup(input),
-      steer: (input: UserInput) => engine.steer(input),
+      steer: (input: UserInput, mode?: SteerMode) => engine.steer(input, mode),
       inject: (input: InjectedContext) => engine.inject(input),
       cancel: (reason: CancelReason) => engine.cancel(reason),
       dispose: () => engine.dispose(),
@@ -165,7 +178,7 @@ export class TurnEngine {
       editQueued: (queueId, input) => engine.editQueued(queueId, input),
       removeQueued: (queueId) => engine.removeQueued(queueId),
       clearQueued: () => engine.clearQueued(),
-      guideQueued: (queueId) => engine.guideQueued(queueId),
+      guideQueued: (queueId, mode) => engine.guideQueued(queueId, mode),
     };
   }
 
@@ -240,13 +253,16 @@ export class TurnEngine {
     return removed.length;
   }
 
-  guideQueued(queueId: string): boolean {
+  guideQueued(queueId: string, mode: SteerMode = "soft"): boolean {
     if (!this.drainRunning) return false;
     const index = this.queue.findIndex((item, offset) => offset > 0 && item.id === queueId);
     if (index < 0) return false;
     const [item] = this.queue.splice(index, 1);
     if (item === undefined) return false;
     this.steerQueue.push(item.input);
+    // 立即引导：先打断当前步骤（正在跑的工具 / 正在流式生成的请求），
+    // 剩余工具会在本步内补成“未执行”结果，插话在全部结果落盘后交付。
+    if (mode === "interrupt") this.activeStepAbort?.abort();
     this.settleItem(item);
     void this.deps.ctx.emit("agent/inbox", { agentId: this.inner.id, kind: "steer" });
     return true;
@@ -257,8 +273,8 @@ export class TurnEngine {
     return this.queue.find((item, offset) => offset >= start && item.id === queueId);
   }
 
-  /** 在当前轮的下一个步边界生效（插话） */
-  async steer(input: UserInput): Promise<void> {
+  /** 在当前轮的下一个步边界生效（插话）；`interrupt` 会先打断当前步骤 */
+  async steer(input: UserInput, mode: SteerMode = "soft"): Promise<void> {
     this.assertInteractive();
     if (!this.drainRunning) {
       throw new LcodeErrorImpl({
@@ -266,9 +282,10 @@ export class TurnEngine {
         message: "agent 未在运行，无法插话",
         userMessage: "它现在没在干活，插话没地方放。",
         retryable: false,
-      });
+      })
     }
     this.steerQueue.push(input);
+    if (mode === "interrupt") this.activeStepAbort?.abort();
     await this.deps.ctx.emit("agent/inbox", {
       agentId: this.inner.id,
       kind: "steer",
@@ -492,6 +509,10 @@ export class TurnEngine {
 
         step += 1;
         stepOpened = true;
+        // 每步一个可被「立即引导」打断的子信号；整轮取消仍然只看 turn 级 signal
+        const stepAbort = new AbortController();
+        const stepSignal = AbortSignal.any([signal, stepAbort.signal]);
+        this.activeStepAbort = stepAbort;
         session.append({ type: "step/start", data: { turn, step } });
 
         // ── 构建请求（I1：一切从日志派生） ──
@@ -523,7 +544,7 @@ export class TurnEngine {
               injectedVars,
               // 技能指令只在本轮生效：本轮之前的 skill 块不再进入后续请求
               activeFromSeq: turnStart.seq,
-              signal,
+              signal: stepSignal,
             });
             break;
           } catch (err) {
@@ -541,6 +562,14 @@ export class TurnEngine {
           }
         }
         if (outcome.kind === "cancelled") {
+          // 「立即引导」打断的是当前步骤，不是整轮：闭合本步，下一步边界交付插话
+          if (!signal.aborted && stepAbort.signal.aborted) {
+            if (stepOpened) {
+              session.append({ type: "step/end", data: { turn, step } });
+              stepOpened = false;
+            }
+            continue;
+          }
           reason = "cancelled";
           break;
         }
@@ -564,7 +593,9 @@ export class TurnEngine {
         );
         if (toolUses.length === 0) break;
 
-        for (const block of toolUses) {
+        for (let index = 0; index < toolUses.length; index += 1) {
+          const block = toolUses[index];
+          if (block === undefined) continue;
           const raw =
             outcome.rawArgs.get(block.id) ?? JSON.stringify(block.input);
           const call: ToolCall = {
@@ -591,10 +622,19 @@ export class TurnEngine {
            * ② 知道工作区根在哪（路径边界判定的输入）。少了它，审批就只能落到"某个
            * 全局通道"上，而那个通道没法回答"这是哪个会话在问"。
            */
-          const result = await this.executeTool(call, signal, {
+          const result = await this.executeTool(call, stepSignal, {
             sessionId: this.inner.sessionId,
             agentId: this.inner.id,
           });
+          // 「立即引导」打断本步：被中止的工具结果标记“用户打断”（整轮取消不走这里）
+          const interruptedNow = stepAbort.signal.aborted && !signal.aborted;
+          const baseMeta = result.meta;
+          const meta = interruptedNow && !result.ok
+            ? {
+                ...(typeof baseMeta === "object" && baseMeta !== null && !Array.isArray(baseMeta) ? baseMeta : {}),
+                interruptedByUser: true,
+              }
+            : baseMeta;
           const toolResultEvent = session.append({
             type: "tool/result",
             data: {
@@ -603,11 +643,11 @@ export class TurnEngine {
               message: {
                 role: "user",
                 toolCallId: call.callId,
-                content: toolResultContent(result),
+                content: interruptedNow && !result.ok ? INTERRUPTED_TOOL_TEXT : toolResultContent(result),
                 isError: !result.ok,
               },
               ...(result.error !== undefined ? { error: result.error } : {}),
-              ...(result.meta !== undefined ? { meta: result.meta } : {}),
+              ...(meta !== undefined ? { meta } : {}),
             },
           });
           await this.deps.ctx.emit('agent/tool-result-appended', {
@@ -622,6 +662,59 @@ export class TurnEngine {
             reason = "cancelled";
             break;
           }
+          if (!interruptedNow) continue;
+          /*
+           * 剩余工具不再执行，但必须为每个 tool_use 补一条配对结果
+           * （消息结构要求 tool_use 后紧跟全部 tool_result），插话才能安全交付。
+           */
+          for (let rest = index + 1; rest < toolUses.length; rest += 1) {
+            const skipped = toolUses[rest];
+            if (skipped === undefined) continue;
+            const skippedRaw = outcome.rawArgs.get(skipped.id) ?? JSON.stringify(skipped.input);
+            const skippedCard = this.deps.ctx.get("tools").card?.(skipped.name);
+            session.append({
+              type: "tool/call",
+              data: {
+                turn,
+                step,
+                callId: skipped.id,
+                name: skipped.name,
+                arguments: skippedRaw,
+                ...(skippedCard === undefined ? {} : { card: skippedCard }),
+              },
+            });
+            const skippedResult: ToolResult = {
+              callId: skipped.id,
+              name: skipped.name,
+              ok: false,
+              error: { name: "LcodeError", code: ERROR_CODES.ET_ABORTED },
+              meta: freezeLossless({ interruptedByUser: true }),
+            };
+            const skippedEvent = session.append({
+              type: "tool/result",
+              data: {
+                turn,
+                step,
+                message: {
+                  role: "user",
+                  toolCallId: skipped.id,
+                  content: SKIPPED_TOOL_TEXT,
+                  isError: true,
+                },
+                ...(skippedResult.error !== undefined ? { error: skippedResult.error } : {}),
+                ...(skippedResult.meta !== undefined ? { meta: skippedResult.meta } : {}),
+              },
+            });
+            await this.deps.ctx.emit('agent/tool-result-appended', {
+              agentId: this.inner.id,
+              sessionId: this.inner.sessionId,
+              session,
+              sourceEventSeq: skippedEvent.seq,
+              tool: { callId: skipped.id, name: skipped.name },
+              message: skippedEvent.data.message,
+            });
+          }
+          break;
         }
         if (reason === "cancelled") break;
       }
@@ -638,11 +731,13 @@ export class TurnEngine {
           endSeq: end.seq,
         });
         stepOpened = false;
+        this.activeStepAbort = null;
         throw err;
       }
       reason = "cancelled";
     }
 
+    this.activeStepAbort = null;
     // 取消收尾：闭合打开的步，再闭合轮（带血缘，A2）
     if (stepOpened) session.append({ type: "step/end", data: { turn, step } });
     const end = reason === "cancelled"
@@ -679,6 +774,8 @@ export class TurnEngine {
     activeFromSeq: number;
     signal: AbortSignal;
   }): Promise<StreamOutcome> {
+    // 步骤在组装请求前就被「立即引导」打断：直接按打断收尾，不去发一个注定被中止的请求
+    if (input.signal.aborted) return { kind: "cancelled" };
     const adapter = this.requireAdapter(input.selection);
     const assembled = await this.deps.ctx.get("systemPrompt").assemble({
       sessionId: this.inner.sessionId,

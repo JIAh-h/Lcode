@@ -212,7 +212,7 @@ export function ComposerBar({
   onPlanCancel?: (() => void) | undefined
   /** 当前任务完成后才发送的运行时消息队列。 */
   queued?: readonly QueuedMessage[]
-  onGuideQueued?: ((queueId: string) => void) | undefined
+  onGuideQueued?: ((queueId: string, mode?: 'soft' | 'interrupt') => void) | undefined
   onEditQueued?: ((queueId: string, text: string) => void) | undefined
   onRemoveQueued?: ((queueId: string) => void) | undefined
   onClearQueued?: (() => void) | undefined
@@ -715,7 +715,11 @@ export function ComposerBar({
                     </>
                   ) : (
                     <>
-                      <button className="queued-guide" title={t('不打断当前任务，在下一步调整方向')} onClick={() => onGuideQueued?.(item.queue_id)}>
+                      <button
+                        className="queued-guide"
+                        title={t('打断正在执行的工具，立即把这条消息交给模型')}
+                        onClick={() => onGuideQueued?.(item.queue_id, 'interrupt')}
+                      >
                         {t('引导')}
                       </button>
                       <button className="queued-action" title={t('移除待发送消息')} onClick={() => onRemoveQueued?.(item.queue_id)}>⌫</button>

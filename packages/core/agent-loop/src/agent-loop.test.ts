@@ -713,6 +713,145 @@ describe("批次③ · 无密钥跑通一次循环", () => {
     expect(h.session.events().filter((event) => event.type === "turn/start")).toHaveLength(2);
   });
 
+  it("立即引导：打断正在执行的工具，剩余工具补“未执行”，插话在全部结果后交付", async () => {
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
+    const slowTool: ToolDefinition<{ text: string }, never> = {
+      name: "slow",
+      description: "一直等待直到被中止",
+      inputSchema: {
+        type: "object",
+        properties: { text: { type: "string", description: "任意" } },
+        required: ["text"],
+      },
+      execute: (_call, opts) =>
+        new Promise<never>((_resolve, reject) => {
+          markStarted();
+          opts.signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+        }),
+    };
+    let echoRuns = 0;
+    const countingEcho: ToolDefinition<{ text: string }, { echoed: string }> = {
+      ...echoTool,
+      execute: (call) => {
+        echoRuns += 1;
+        return { echoed: call.parsed.text };
+      },
+    };
+    const twoToolsScript: ReplayScript = {
+      provider: "replay",
+      chunks: [
+        { type: "tool-call-delta", callId: "call-1", name: "slow", argsDelta: '{"text":"a"}' },
+        { type: "tool-call-delta", callId: "call-2", name: "echo", argsDelta: '{"text":"b"}' },
+        {
+          type: "done",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "tool_use", id: "call-1", name: "slow", input: { text: "a" } },
+              { type: "tool_use", id: "call-2", name: "echo", input: { text: "b" } },
+            ],
+          },
+        },
+      ],
+    };
+    const h = await makeHarness([twoToolsScript, textScript("收到插话")]);
+    h.registry.register(slowTool);
+    h.registry.register(countingEcho);
+    const handle = await h.loop.create({
+      sessionId: asSessionId("s1"),
+      id: asAgentId("a1"),
+    });
+
+    const run = handle.followup({ kind: "text", text: "执行两步" });
+    await started;
+    await handle.steer({ kind: "text", text: "先回答我" }, "interrupt");
+    await run;
+
+    const events = h.session.events();
+    const result1 = events.find((e) => e.type === "tool/result" && e.data.message.toolCallId === "call-1");
+    expect(result1).toMatchObject({
+      type: "tool/result",
+      data: { message: { isError: true }, meta: { interruptedByUser: true } },
+    });
+    const result2 = events.find((e) => e.type === "tool/result" && e.data.message.toolCallId === "call-2");
+    expect(result2).toMatchObject({
+      type: "tool/result",
+      data: { message: { isError: true }, error: { code: ERROR_CODES.ET_ABORTED }, meta: { interruptedByUser: true } },
+    });
+    // 打断语义要写进给模型的结果文本：不要误判为环境故障
+    expect((result1 as { data: { message: { content: string } } }).data.message.content).toContain("用户插话打断");
+    expect((result2 as { data: { message: { content: string } } }).data.message.content).toContain("用户插话被跳过");
+    // 剩余工具没有被执行
+    expect(echoRuns).toBe(0);
+    // 插话必须在全部工具结果落盘之后、下一步开始之前
+    const lastResultIdx = events.map((e) => e.type).lastIndexOf("tool/result");
+    expect(events[lastResultIdx + 1]).toMatchObject({
+      type: "user/message",
+      data: { content: "先回答我" },
+    });
+    expect(events[lastResultIdx + 2]).toMatchObject({
+      type: "step/start",
+      data: { step: 2 },
+    });
+    // 打断的是步骤而不是整轮：回合正常完成，插话进入下一次请求
+    expect(events.at(-1)).toMatchObject({ type: "turn/end", data: { reason: "completed" } });
+    expect(
+      deriveMessages(events).some((m) => m.role === "user" && m.content === "先回答我"),
+    ).toBe(true);
+  });
+
+  it("立即引导：流式生成期间打断，闭合本步后带插话重新请求", async () => {
+    const inner = new ReplayLlmAdapter(textScript("收到插话"));
+    let calls = 0;
+    let markStreaming!: () => void;
+    const streaming = new Promise<void>((resolve) => {
+      markStreaming = resolve;
+    });
+    const adapter: LlmAdapter = {
+      providerInfo: () => inner.providerInfo(),
+      listModels: (signal) => inner.listModels(signal),
+      resolveModel: (selection) => inner.resolveModel(selection),
+      prepareCall: (selection, opts) => inner.prepareCall(selection, opts),
+      providerRetryPolicy: () => inner.providerRetryPolicy(),
+      stream: (call, signal) => {
+        calls += 1;
+        if (calls > 1) return inner.stream(call, signal);
+        return (async function* () {
+          yield { type: "text-delta" as const, text: "正在思考" };
+          markStreaming();
+          await new Promise<void>((resolve) => {
+            signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+          throw new Error("aborted");
+        })();
+      },
+    };
+    const h = await makeHarness([], { adapter });
+    const handle = await h.loop.create({
+      sessionId: asSessionId("s1"),
+      id: asAgentId("a1"),
+    });
+
+    const run = handle.followup({ kind: "text", text: "开始任务" });
+    await streaming;
+    await handle.steer({ kind: "text", text: "换个方向" }, "interrupt");
+    await run;
+
+    const events = h.session.events();
+    // 被打断的步骤以 interrupted 消息收尾，且有 step/end（不留悬空步）
+    const interrupted = events.find((e) => e.type === "assistant/message" && e.data.interrupted === true);
+    expect(interrupted).toBeDefined();
+    const step1End = events.findIndex((e) => e.type === "step/end");
+    expect(step1End).toBeGreaterThan(events.findIndex((e) => e.type === "step/start"));
+    // 插话与第二步在被打断的步骤之后
+    expect(events[step1End + 1]).toMatchObject({ type: "user/message", data: { content: "换个方向" } });
+    expect(events.at(-1)).toMatchObject({ type: "turn/end", data: { reason: "completed" } });
+    expect(calls).toBe(2);
+  });
+
   it("边界：状态 getter、暂停后保持可继续对话", async () => {
     let release: (() => void) | undefined;
     let started!: () => void;
