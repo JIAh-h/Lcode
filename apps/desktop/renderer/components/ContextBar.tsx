@@ -8,7 +8,7 @@ import { toast } from './toast.ts'
 /**
  * 手动压缩的准入线：窗口占用必须超过 20%，否则视为上下文较短。
  * 摘要本身要花一次模型调用，刚压缩过或本来就没多少历史时压不出收益。
- * 压缩只由用户显式触发，没有任何自动触发路径。
+ * 自动压缩不经过这个按钮：回合内达到窗口 90% 时会在下一个步边界自行触发。
  */
 const MIN_COMPACT_PERCENT = 20
 
@@ -307,7 +307,7 @@ export function ContextBar({
               </>
             )}
             <div className="cmpop-note">
-              {usageSourceNote(usageSource)} {t('压缩会摘要较早历史并消耗一次模型调用，原始记录仍保留。')}
+              {usageSourceNote(usageSource)} {t('占用达到窗口 90% 时会在步边界自动压缩；手动压缩会先预览再提交。原始记录始终保留。')}
             </div>
             <div className="cmcompact-wrap">
               <button className="btn primary cmcompact" disabled={blocked !== null} onClick={onCompactRequest}>

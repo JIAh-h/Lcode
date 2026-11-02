@@ -3,6 +3,8 @@ import { createContext } from '@lcode/context'
 import type { Context } from '@lcode/context'
 import { LocalCredentialsService } from '@lcode/credentials-local'
 import { InMemoryLlmRegistry } from '@lcode/llm'
+import type { LlmAdapter } from '@lcode/llm'
+import { AnthropicCompatibleAdapter } from '@lcode/llm-anthropic'
 import { OpenAiCompatibleAdapter } from '@lcode/llm-openai-compatible'
 import { LocalModelApi, toProbeFailure } from '@lcode/model-api'
 import type { CustomModelInfo, ProbeFailure } from '@lcode/model-api'
@@ -102,6 +104,12 @@ export function createServices(options: CreateServicesOptions = {}): DesktopServ
   // 必须先注册命名空间：`settings.update()` 对未注册的 key 会抛"未知设置项"
   settings.registerNamespace(MODEL_FIELD_DESCRIPTORS)
   settings.registerNamespace(WEB_SEARCH_FIELD_DESCRIPTORS)
+  // 代码索引只存两个非敏感项；embedding 的接口与 Key 复用模型服务商配置
+  settings.registerNamespace([
+    { namespace: 'codeIndex', key: 'provider', type: 'string' },
+    { namespace: 'codeIndex', key: 'model', type: 'string' },
+    { namespace: 'codeIndex', key: 'base_url', type: 'string' },
+  ])
   settings.open()
 
   const credentials = new LocalCredentialsService({ home })
@@ -155,11 +163,17 @@ export function createServices(options: CreateServicesOptions = {}): DesktopServ
  */
 export function registerProviderAdapter(
   services: DesktopServices,
-  config: { readonly name: string; readonly label: string; readonly base_url: string; readonly api_key_ref: string },
+  config: {
+    readonly name: string
+    readonly label: string
+    readonly base_url: string
+    readonly api_key_ref: string
+    readonly protocol?: 'openai' | 'anthropic' | undefined
+  },
   fetchImpl?: typeof globalThis.fetch,
 ): () => void {
   const { ctx, credentials, readSetting } = services
-  const adapter = new OpenAiCompatibleAdapter({
+  const common = {
     id: config.name,
     name: config.label,
     baseUrl: config.base_url,
@@ -182,7 +196,10 @@ export function registerProviderAdapter(
       // 配置被删掉时回退到注册时那份（而不是变成空端点）
       return { baseUrl: config.base_url, apiKeyRef: config.api_key_ref }
     },
-  })
+  }
+  const adapter = config.protocol === 'anthropic'
+    ? new AnthropicCompatibleAdapter(common)
+    : new OpenAiCompatibleAdapter(common)
   return ctx.get('llm').register(adapter)
 }
 
@@ -217,6 +234,7 @@ export interface DesktopModelFeature {
   discover(input: {
     readonly base_url: string
     readonly api_key?: string
+    readonly protocol?: 'openai' | 'anthropic'
     /** 编辑模式留空 Key 时用已保存的凭据引用（值只在主进程解析） */
     readonly credential_ref?: string
   }): Promise<DiscoverResult>
@@ -230,6 +248,7 @@ export interface DesktopModelFeature {
     readonly base_url: string
     readonly model: string
     readonly api_key?: string
+    readonly protocol?: 'openai' | 'anthropic'
     readonly credential_ref?: string
   }): Promise<{ readonly context_window?: number; readonly max_output_tokens?: number }>
   saveCustom(input: Parameters<LocalModelApi['saveCustom']>[0]): Promise<{
@@ -369,26 +388,30 @@ export async function createDesktopModelFeature(
     baseUrl: string,
     typedKey: string,
     credentialRef?: string,
-  ): Promise<OpenAiCompatibleAdapter> => {
+    protocol?: 'openai' | 'anthropic',
+  ): Promise<LlmAdapter> => {
     const key = typedKey.trim()
     const savedKey = key === '' && credentialRef !== undefined && credentialRef !== ''
       ? (await credentials.resolve(credentialRef))?.value ?? ''
       : ''
     const apiKey = key === '' ? savedKey : key
-    return new OpenAiCompatibleAdapter({
+    const common = {
       id: 'model-discover',
       name: 'model-discover',
       baseUrl,
       apiKeyRef: apiKey === '' ? '' : 'MODEL_DISCOVER_KEY',
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
       credentials: {
-        resolve: async (ref) =>
+        resolve: async (ref: string) =>
           ref === 'MODEL_DISCOVER_KEY' && apiKey !== ''
-            ? { refName: ref, value: apiKey, source: 'env' }
+            ? { refName: ref, value: apiKey, source: 'env' as const }
             : undefined,
         describeSource: async () => undefined,
       },
-    })
+    }
+    return protocol === 'anthropic'
+      ? new AnthropicCompatibleAdapter(common)
+      : new OpenAiCompatibleAdapter(common)
   }
 
   return {
@@ -398,7 +421,7 @@ export async function createDesktopModelFeature(
     providers: () => [...disposers.keys()],
     async discover(input) {
       const baseUrl = input.base_url.trim()
-      const adapter = await buildTempAdapter(baseUrl, input.api_key ?? '', input.credential_ref)
+      const adapter = await buildTempAdapter(baseUrl, input.api_key ?? '', input.credential_ref, input.protocol)
       try {
         const models = await adapter.listModels(AbortSignal.timeout(10_000))
         return {
@@ -416,7 +439,7 @@ export async function createDesktopModelFeature(
     async limitsUnsaved(input) {
       const model = input.model.trim()
       if (model === '') return {}
-      const adapter = await buildTempAdapter(input.base_url.trim(), input.api_key ?? '', input.credential_ref)
+      const adapter = await buildTempAdapter(input.base_url.trim(), input.api_key ?? '', input.credential_ref, input.protocol)
       const describe = adapter.describeModel?.bind(adapter)
       if (describe !== undefined) {
         try {

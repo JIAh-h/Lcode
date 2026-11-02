@@ -13,7 +13,7 @@ function compact(input: {
   readonly summary: string
   readonly start?: number | undefined
   readonly end?: number | undefined
-  readonly trigger?: 'manual' | 'threshold' | undefined
+  readonly trigger?: 'manual' | 'threshold' | 'overflow' | undefined
 }): CompactionResult {
   const log = input.session.events()
   if (hasActiveTransaction(log)) return rejected('active-transaction')

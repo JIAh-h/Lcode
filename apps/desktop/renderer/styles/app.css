@@ -219,6 +219,8 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pickmenu a svg { color: var(--text-muted); flex: none; }
 .pickmenu hr { border: none; border-top: 1px solid var(--border-subtle); margin: 5px 4px; }
 .pickmenu .picklab { font-size: 11px; color: var(--text-muted); padding: 4px 10px 2px; }
+.pickmenu .picklab.group { margin-top: 4px; }
+.pickmenu .picklab.group:first-child { margin-top: 0; }
 .pickmenu .pickhint { font-size: 11px; color: var(--text-muted); padding: 6px 10px 4px; }
 
 /* ── 通用下拉（公共组件 PopMenu）── */
@@ -934,12 +936,12 @@ body.noside .side { display: none; }
   display: flex;
   flex-direction: column;
   gap: 0;
-  max-height: min(340px, 38vh);
+  max-height: 154px; /* 5 × 30px 行：超出即在条内滚动，生成中自动跟随最新一步 */
   padding: 2px 0;
   overflow-y: auto;
   overscroll-behavior: contain;
-  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
-  mask-image: linear-gradient(to bottom, transparent 0, #000 14px, #000 calc(100% - 14px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 10px, #000 calc(100% - 10px), transparent 100%);
 }
 .turn-process-scroll > * { flex: none; }
 .turn-process .toolcard { border: 0; border-radius: 6px; background: transparent; }

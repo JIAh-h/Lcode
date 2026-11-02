@@ -25,6 +25,7 @@
     "test:coverage": "vitest run --coverage && node scripts/check-coverage.mjs",
     "test:replay": "vitest run --config vitest.replay.config.ts",
     "test:e2e": "vitest run --config vitest.e2e.config.ts",
+    "eval:coding": "pnpm --filter @lcode/cli eval:coding",
     "check:invariants": "node scripts/check-invariants.mjs",
     "check:invariants:test": "node scripts/check-invariants.test.mjs",
     "check:index-size": "node scripts/check-index-size.mjs",

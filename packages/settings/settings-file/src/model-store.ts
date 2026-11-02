@@ -28,6 +28,9 @@ import { SETTINGS_NAMESPACE, providerSettingKeys } from './namespace.ts'
  *
  * `model` 可缺省：省略 = "显示名就是服务端模型名"，这是最常见的形态，不该逼所有人多填一遍。
  */
+export type ModelProtocol = 'openai' | 'anthropic'
+export type ModelBillingType = 'token-plan' | 'coding-plan' | 'pay-as-you-go'
+
 export interface CustomModelInput {
   /** 供应商 id（`ctx.llm` 里的 key，也是 `ModelSelection.provider`） */
   readonly name: string
@@ -35,8 +38,14 @@ export interface CustomModelInput {
   readonly label: string
   /** 真正发给服务端的模型 id（如 `deepseek-chat`）；省略则回落 `label` */
   readonly model?: string | undefined
-  /** 接口地址（OpenAI 兼容协议的 base url） */
+  /** 接口地址（协议 base url） */
   readonly base_url: string
+  /** 协议格式；老配置缺省视为 OpenAI 兼容 */
+  readonly protocol?: ModelProtocol | undefined
+  /** 计费模式（推荐供应商用；自定义协议不填） */
+  readonly billing_type?: ModelBillingType | undefined
+  /** 推荐供应商预设 id（用于编辑时还原类型选项）；自定义协议也记录 preset id */
+  readonly provider_preset?: string | undefined
   /**
    * 凭据**引用名**（不是值）。空串表示这个端点不需要密钥（本地模型）。
    * 值本身在 `credentials` 里，settings 只有引用。
@@ -161,6 +170,11 @@ function validate(config: CustomModelInput): CustomModelConfig {
     )
   }
   const label = config.label.trim() === '' ? name : config.label.trim()
+  const protocol: ModelProtocol = config.protocol === 'anthropic' ? 'anthropic' : 'openai'
+  const billing = config.billing_type === 'token-plan' || config.billing_type === 'coding-plan' || config.billing_type === 'pay-as-you-go'
+    ? config.billing_type
+    : undefined
+  const preset = (config.provider_preset ?? '').trim()
   // 省略 = "显示名就是服务端模型名"（最常见形态）→ 回落 label。
   // 真正为空的是**显式传了空串**那种，同样回落而不是报错——空串与省略在这里是同一件事。
   const model = (config.model ?? '').trim() === '' ? label : config.model!.trim()
@@ -169,6 +183,9 @@ function validate(config: CustomModelInput): CustomModelConfig {
     label,
     model,
     base_url: baseUrl.replace(/\/+$/, ''),
+    protocol,
+    ...(billing === undefined ? {} : { billing_type: billing }),
+    ...(preset === '' ? {} : { provider_preset: preset }),
     api_key_ref: config.api_key_ref.trim(),
     ...(config.models === undefined ? {} : { models: [...config.models] }),
     ...(config.context_window_in === undefined ? {} : { context_window_in: config.context_window_in }),
@@ -186,6 +203,9 @@ function toConfig(value: unknown): CustomModelConfig | null {
   if (typeof name !== 'string' || typeof baseUrl !== 'string') return null
   const models = record['models']
   const label = typeof record['label'] === 'string' ? record['label'] : name
+  const protocol: ModelProtocol = record['protocol'] === 'anthropic' ? 'anthropic' : 'openai'
+  const billing = record['billing_type']
+  const preset = record['provider_preset']
   return {
     name,
     label,
@@ -193,6 +213,9 @@ function toConfig(value: unknown): CustomModelConfig | null {
     // 缺失时把这条**当无效项跳过**会让用户升级后模型凭空消失，那比回落到 label 糟得多。
     model: typeof record['model'] === 'string' && record['model'].trim() !== '' ? record['model'].trim() : label,
     base_url: baseUrl,
+    protocol,
+    ...(billing === 'token-plan' || billing === 'coding-plan' || billing === 'pay-as-you-go' ? { billing_type: billing } : {}),
+    ...(typeof preset === 'string' && preset.trim() !== '' ? { provider_preset: preset.trim() } : {}),
     api_key_ref: typeof record['api_key_ref'] === 'string' ? record['api_key_ref'] : '',
     ...(Array.isArray(models) ? { models: models.filter((m): m is string => typeof m === 'string') } : {}),
     ...(typeof record['context_window_in'] === 'number' ? { context_window_in: record['context_window_in'] } : {}),

@@ -1,0 +1,7 @@
+{
+  "id": "slugify-unicode",
+  "title": "实现 Unicode slugify",
+  "prompt": "仓库里 src/slugify.mjs 的 slugify(input) 只做了转小写和把空白换成连字符。请按 README 的约定补全：去首尾空白、转小写；把连续空白折叠成单个 -；移除除字母、数字、空白和 - 之外的字符（中文等 Unicode 字母要保留）；最后把连续 - 折叠成一个。不要改函数签名或新增依赖。",
+  "test": { "command": "node", "args": ["verify.mjs"], "timeoutMs": 30000 },
+  "agentTimeoutMs": 180000
+}

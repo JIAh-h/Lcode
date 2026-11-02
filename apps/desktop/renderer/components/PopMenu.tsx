@@ -35,6 +35,8 @@ export interface PopMenuItem {
   readonly checkbox?: boolean
   /** 动态值（如分支名）不做 i18n 翻译 */
   readonly raw?: boolean
+  /** 分组标题；相邻同组只渲染一次（下拉里分「推荐 / 自定义」） */
+  readonly group?: string
 }
 
 const MENU_WIDTH = 260
@@ -177,8 +179,11 @@ export function PopMenu({
               }}
             >
               {header ? <div className="picklab">{t(header)}</div> : null}
-              {items.map((item) => {
+              {items.map((item, index) => {
                 const isFlyoutItem = flyout?.itemId === item.id
+                const groupLabel = item.group !== undefined && items[index - 1]?.group !== item.group
+                  ? <div className="picklab group">{t(item.group)}</div>
+                  : null
                 const content = (
                   <a
                     role={item.checkbox === true ? 'menuitemcheckbox' : 'menuitemradio'}
@@ -213,6 +218,7 @@ export function PopMenu({
                 )
                 return (
                   <Fragment key={item.id}>
+                    {groupLabel}
                     {item.separator === true ? <div className="pmsep" role="separator" /> : null}
                     {isFlyoutItem ? (
                       <div

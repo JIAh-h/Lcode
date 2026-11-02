@@ -64,11 +64,20 @@ export interface AgentRuntimeOptions {
   readonly webSearch?: boolean | undefined
   /** 显式注入的语言服务 Provider；省略时默认 Profile 不启动语言服务进程。 */
   readonly lsp?: LspService | undefined
+  /**
+   * 语言服务器配置（language → command/args/env）。提供后默认 Profile 自动装配
+   * `lsp_query` 工具；`lsp` 显式注入时以它为准。
+   */
+  readonly lspServers?: Readonly<Record<string, LspServerDef>> | undefined
+  /** MCP 服务（stdio）；工具以 `mcp__<server>__<tool>` 注册进工具注册表 */
+  readonly mcpServers?: Readonly<Record<string, McpServerConfig>> | undefined
+  /** 仓库语义索引；提供后注册 `code_search` 工具 */
+  readonly codeSearch?: ((input: CodeSearchInput) => Promise<CodeSearchResult>) | undefined
   /** 可替换的模型路由策略；省略时仍挂载空规则 provider，保持整轮冻结语义。 */
   readonly modelRouting?: ModelRoutingService | undefined
   /** 可替换的代码运行器；默认 provider 仅在真实只读沙箱下运行。 */
   readonly codeRuntime?: CodeRuntime | undefined
-  /** 显式摘要器；只在用户手动压缩时调用，不参与自动触发。 */
+  /** 显式摘要器；自动压缩与手动压缩共用，缺省时走默认模型。 */
   readonly compactionSummarizer?: CompactionSummarizer | undefined
   /**
    * Windows 沙箱 helper 的精确路径。桌面主进程按“打包/开发”给出唯一候选，
@@ -96,6 +105,7 @@ import { createLocalJobs } from '@lcode/jobs-local'
 import { createShellTool } from '@lcode/tool-shell'
 import { createTerminalTool } from '@lcode/tool-terminal'
 import { createTodoWriteTool, renderTodoPrompt } from '@lcode/tool-todo'
+import { createCodeSearchTool, type CodeSearchInput, type CodeSearchResult } from '@lcode/code-index-local'
 import { createLocalTerminal } from '@lcode/terminal-pty'
 import { createFsTools } from '@lcode/tool-fs'
 import type { SandboxService, ResolvedSandboxPolicy, SandboxWrapResult, SandboxMode } from '@lcode/sandbox'
@@ -124,6 +134,8 @@ import { createSubagentTool } from '@lcode/tool-subagent'
 import type { WebService } from '@lcode/web'
 import { createWebTools } from '@lcode/tool-web'
 import type { LspService } from '@lcode/lsp'
+import { createLocalLsp, type LocalLspService, type LspServerDef } from '@lcode/lsp-local'
+import { createMcpManager, type McpServerConfig } from '@lcode/mcp-local'
 import { createLspTools } from '@lcode/tool-lsp'
 import { createModelRouter, registerModelRouter, type ModelRoutingService } from '@lcode/model-router'
 import type { CodeRuntime } from '@lcode/code-runtime'
@@ -134,6 +146,7 @@ import { normalizePath } from '@lcode/fs'
 import type { FsService } from '@lcode/fs'
 import { createBuiltinRuntimeProfile, type BuiltinRuntimeProfileId } from './runtime-profile.ts'
 import { chooseCompactionRange, createModelCompactionSummarizer, type CompactionRangePlan, type CompactionSummarizer } from './compaction-summarizer.ts'
+import { registerContextRecovery } from './auto-compaction.ts'
 
 declare module '@lcode/context' {
   interface Services {
@@ -287,7 +300,7 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
   let extensionFacade: ExtensionFacade | undefined
   let compositionSnapshot: RuntimeCompositionSnapshot | undefined
   const profileId = options.profile ?? 'desktop-default'
-  const profileExtras = createOptionalCapabilityEntries(options)
+  const profileExtras = createOptionalCapabilityEntries(options, () => sessions)
   const profile = createBuiltinRuntimeProfile(
     profileId,
     (ctx) => {
@@ -413,7 +426,14 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
   const unregisterShell = tools.register(createShellTool({ shell: ctx.get('shell'), workspaceRoot, workspaceOf }))
   const unregisterTerminal = tools.register(createTerminalTool({ terminals: ctx.get('terminals'), workspaceRoot, workspaceOf }))
   const unregisterTodo = tools.register(createTodoWriteTool({ getSession: (sessionId: string) => sessions.sessionServiceFor(sessionId) }))
-  return () => { unregisterTodo(); unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
+  const unregisterCodeSearch = options.codeSearch === undefined
+    ? undefined
+    : tools.register(createCodeSearchTool({
+        search: options.codeSearch,
+        workspaceOf,
+        fallbackWorkspace: workspaceRoot,
+      }))
+  return () => { unregisterCodeSearch?.(); unregisterTodo(); unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
 }
 
 function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServices, sessions: LocalSessionsApi, mutationAuthority: ReturnType<typeof createFsMutationAuthority>, ctx: DesktopServices['ctx'], profile: () => RuntimeCompositionSnapshot): Disposer {
@@ -451,7 +471,10 @@ function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServic
  * Web 与 LSP 只能由已配置的可信 Provider 显式加入 Profile。默认 desktop/cli
  * 组合保持离线，也不会为了“可用”而暗中启动语言服务进程。
  */
-function createOptionalCapabilityEntries(options: AgentRuntimeOptions): readonly InternalBundleEntry[] {
+function createOptionalCapabilityEntries(
+  options: AgentRuntimeOptions,
+  getSessions: () => LocalSessionsApi | undefined,
+): readonly InternalBundleEntry[] {
   const entries: InternalBundleEntry[] = []
   if (options.web !== undefined) {
     const web = options.web
@@ -469,22 +492,67 @@ function createOptionalCapabilityEntries(options: AgentRuntimeOptions): readonly
       },
     })
   }
-  if (options.lsp !== undefined) {
-    const lsp = options.lsp
+  if (options.lsp !== undefined || options.lspServers !== undefined) {    const injected = options.lsp
     entries.push({
       id: 'lsp-provider',
       requires: ['tools', 'subprocess', 'sandbox'],
       provides: ['lsp'],
       mount: (ctx) => {
+        const lsp: LspService = injected ?? createLocalLsp({
+          servers: options.lspServers ?? {},
+          subprocess: ctx.get('subprocess'),
+          defaultWorkspace: options.workspaceRoot ?? process.cwd(),
+          readFile: async (path) => {
+            // 能力层不直接读文件：经 fs Provider 取全文（read 默认 2000 行，按需补读）
+            let result = await ctx.get('fs').read(path, { offset: 1, limit: 2_000 })
+            if (result.truncated) result = await ctx.get('fs').read(path, { offset: 1, limit: result.totalLines })
+            return result.lines.map((line) => line.text).join('\n')
+          },
+        })
         const unregisterLsp = ctx.set('lsp', lsp)
-        const unregisterTools = createLspTools(lsp).map((tool) => ctx.get('tools').register(tool))
+        const fallbackWorkspace = options.workspaceRoot ?? process.cwd()
+        const unregisterTools = createLspTools(lsp, {
+          workspaceOf: (sessionId) => {
+            try {
+              return getSessions()?.workspaceOf(sessionId)
+            } catch {
+              return undefined
+            }
+          },
+          fallbackWorkspace,
+        }).map((tool) => ctx.get('tools').register(tool))
         return () => {
           for (const unregister of unregisterTools.reverse()) unregister()
           unregisterLsp()
+          if (injected === undefined) void (lsp as LocalLspService).dispose()
         }
       },
     })
   }
+  /*
+   * MCP 常驻挂载（即使当前没有配置服务）：设置页保存配置后可以在运行时重连，
+   * 不需要重启应用。只读预设下工具本身仍注册，但执行时拒绝（服务器无法被 OS 沙箱约束）。
+   */
+  entries.push({
+    id: 'mcp-provider',
+    requires: ['tools', 'subprocess', 'permissionPresets'],
+    provides: ['mcp'],
+    mount: async (ctx) => {
+      const manager = createMcpManager({
+        servers: options.mcpServers ?? {},
+        subprocess: ctx.get('subprocess'),
+        workspaceRoot: options.workspaceRoot ?? process.cwd(),
+        tools: ctx.get('tools'),
+        isReadOnly: () => ctx.get('permissionPresets').get() === '只读',
+      })
+      await manager.connect()
+      const unregister = ctx.set('mcp', manager)
+      return async () => {
+        unregister()
+        await manager.close()
+      }
+    },
+  })
   return entries
 }
 
@@ -756,6 +824,12 @@ function mountAgentBundle(
   const unregisterContextBudget = registerContextBudget({ ctx })
   const compaction = createLocalCompactionSummary()
   unregisterServices.push(ctx.set('compaction', compaction))
+  const unregisterContextRecovery = registerContextRecovery({
+    ctx,
+    sessionOf: getSession,
+    contextWindowOf: () => activeContextWindow(services),
+    ...(options.compactionSummarizer === undefined ? {} : { summarize: options.compactionSummarizer }),
+  })
   // 发布中的后台作业归属到 agent。对话回合取消不碰它；只有 agent 被销毁时才清理。
   const uninstallJobOwnerCleanup = ctx.on('agent/disposed', async ({ agentId }) => {
     await jobs.disposeOwner(agentId)
@@ -763,6 +837,7 @@ function mountAgentBundle(
   })
   return () => {
     uninstallJobOwnerCleanup()
+    unregisterContextRecovery()
     unregisterContextBudget()
     unregisterContextSources()
     uninstallCheckpoints()

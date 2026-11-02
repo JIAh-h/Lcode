@@ -30,4 +30,4 @@ export {
   webSearchSettingKeys,
 } from './namespace.ts'
 export { CustomModelStore } from './model-store.ts'
-export type { CustomModelConfig, CustomModelInput, CustomModelStoreDeps } from './model-store.ts'
+export type { CustomModelConfig, CustomModelInput, CustomModelStoreDeps, ModelBillingType, ModelProtocol } from './model-store.ts'

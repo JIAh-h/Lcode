@@ -11,7 +11,25 @@
 
 export { createAgentRuntime } from './agent-runtime.ts'
 export type { AgentRuntime, AgentRuntimeOptions } from './agent-runtime.ts'
+export type { LspServerDef } from '@lcode/lsp-local'
+export type { McpServerConfig, McpServerStatus } from '@lcode/mcp-local'
+export {
+  createCodeIndex,
+  createCodeSearchTool,
+  workspaceKey,
+} from '@lcode/code-index-local'
+export type {
+  CodeIndexOptions,
+  CodeIndexService,
+  CodeIndexStatus,
+  CodeIndexWorkspaceStatus,
+  CodeSearchHit,
+  CodeSearchInput,
+  CodeSearchResult,
+  RebuildReport,
+} from '@lcode/code-index-local'
 export { buildBuiltinPluginCatalog } from './builtin-plugins.ts'
+export { discoverAutoLspServers, findExecutable } from './lsp-discovery.ts'
 export { BUILTIN_AGENT_PRESETS } from './builtin-presets.ts'
 export {
   createLocalAgentPresetSetting,

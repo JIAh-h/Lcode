@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/code-index-local",
+  "version": "0.1.0",
+  "description": "仓库语义索引：分块、embedding、SQLite 向量存储与 code_search 工具",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/session-persistence-sqlite": "workspace:*",
+    "@lcode/tools": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

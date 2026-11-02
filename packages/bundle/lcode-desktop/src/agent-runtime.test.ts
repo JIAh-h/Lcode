@@ -3,6 +3,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ReplayLlmAdapter } from '@lcode/llm-replay'
 import type { ReplayScript } from '@lcode/llm-replay'
+import type { LlmAdapter } from '@lcode/llm'
+import { ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 import type { SandboxService } from '@lcode/sandbox'
 import type { LspService } from '@lcode/lsp'
 import type { WebService } from '@lcode/web'
@@ -351,6 +353,12 @@ describe('A. 装配的接线正确性', () => {
           requires: ['sessions', 'agentLoop', 'agents', 'contextSources', 'contextBudget', 'compaction', 'skills', 'presets', 'plugins'],
           provides: [],
         },
+        {
+          id: 'mcp-provider',
+          adopts: [],
+          requires: ['tools', 'subprocess', 'permissionPresets'],
+          provides: ['mcp'],
+        },
       ],
     })
     expect(rt.ctx.get('sessions')).toBe(rt.sessions)
@@ -482,6 +490,94 @@ describe('A. 装配的接线正确性', () => {
 
     session.append({ type: 'turn/start', data: { turn: 2 } })
     await expect(rt.compactSession({ sessionId: session_id })).rejects.toThrow('这一轮还在执行')
+  })
+
+  it('自动压缩：用量达到窗口 90% 时在步前压缩一次', async () => {
+    writeFileSync(join(home, 'settings.json'), JSON.stringify({
+      model: {
+        providers: [{
+          name: 'custom',
+          label: 'custom',
+          model: 'test-model',
+          base_url: 'http://127.0.0.1:1',
+          api_key_ref: '',
+          context_window_in: 2_000,
+        }],
+      },
+    }, null, 2))
+    const rt = await createAgentRuntime({ home, compactionSummarizer: () => '自动压缩摘要' })
+    runtime = rt
+    rt.ctx.get('llm').register(new ReplayLlmAdapter([textScript]))
+    await rt.ctx.get('agentDefaultModel').set({ provider: 'custom', model: 'test-model' })
+    const { session_id } = await rt.sessions.create({ cwd: '/repo/web' })
+    const session = rt.sessions.sessionServiceFor(session_id)
+    session.append({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: `旧目标：${'改代码'.repeat(400)}` }] },
+    })
+    session.append({
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: `旧结果：${'完成了'.repeat(200)}` }] } },
+    })
+    const { agent_id } = await rt.agents.create({ session_id })
+    await sendAndWait(rt, agent_id, '接着做')
+
+    const starts = session.events().filter((event) => event.type === 'compaction/start')
+    expect(starts).toHaveLength(1)
+    expect(starts[0]?.data).toMatchObject({ trigger: 'threshold' })
+    const derived = await rt.sessions.derive({ session_id })
+    expect(JSON.stringify(derived.messages[0])).toContain('自动压缩摘要')
+    expect(JSON.stringify(derived.messages.at(-1))).toContain('改完了，测试也过了。')
+  })
+
+  it('溢出恢复：EL-CONTEXT_OVERFLOW 压缩推进表面后重试', async () => {
+    const inner = new ReplayLlmAdapter([textScript])
+    let calls = 0
+    const adapter: LlmAdapter = {
+      providerInfo: () => inner.providerInfo(),
+      listModels: (signal) => inner.listModels(signal),
+      resolveModel: (selection) => inner.resolveModel(selection),
+      prepareCall: (selection, opts) => inner.prepareCall(selection, opts),
+      providerRetryPolicy: () => inner.providerRetryPolicy(),
+      stream: (call, signal) => {
+        calls += 1
+        if (calls === 1) {
+          return (async function* () {
+            throw new LcodeErrorImpl({
+              code: ERROR_CODES.EL_CONTEXT_OVERFLOW,
+              message: 'maximum context length exceeded',
+              userMessage: '上下文超限',
+              retryable: false,
+            })
+          })()
+        }
+        return inner.stream(call, signal)
+      },
+    }
+    const rt = await createAgentRuntime({ home, compactionSummarizer: () => '溢出恢复摘要' })
+    runtime = rt
+    rt.ctx.get('llm').register(adapter)
+    await rt.ctx.get('agentDefaultModel').set({ provider: 'custom', model: 'test-model' })
+    const { session_id } = await rt.sessions.create({ cwd: '/repo/web' })
+    const session = rt.sessions.sessionServiceFor(session_id)
+    session.append({
+      type: 'user/message',
+      data: { role: 'user', content: [{ type: 'text', text: `旧目标：${'改代码'.repeat(400)}` }] },
+    })
+    session.append({
+      type: 'assistant/message',
+      data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: `旧结果：${'完成了'.repeat(200)}` }] } },
+    })
+    const { agent_id } = await rt.agents.create({ session_id })
+    await sendAndWait(rt, agent_id, '继续')
+
+    expect(calls).toBe(2)
+    const starts = session.events().filter((event) => event.type === 'compaction/start')
+    expect(starts).toHaveLength(1)
+    expect(starts[0]?.data).toMatchObject({ trigger: 'overflow' })
+    const derived = await rt.sessions.derive({ session_id })
+    expect(JSON.stringify(derived.messages[0])).toContain('溢出恢复摘要')
+    expect(session.events().find((event) => event.type === 'turn/end')).toMatchObject({ data: { reason: 'completed' } })
   })
 
   it('agents.inject 进入本轮系统提示，但不会污染下一轮', async () => {

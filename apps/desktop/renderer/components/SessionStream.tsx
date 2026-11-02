@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { PointerEvent as ReactPointerEvent } from 'react'
+import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import { deriveVisibleSurfaceItems } from '@lcode/session'
@@ -459,6 +459,45 @@ function blocksToText(content: string | readonly ContentBlock[]): string {
     .map((block) => (block.type === 'text' ? block.text : ''))
     .filter((s) => s !== '')
     .join('')
+}
+
+/**
+ * 执行过程列表（固定 5 行高）。
+ * 生成中新步骤超过可视行数时自动滚到最新；用户在列表内上翻即暂停跟随，回到底部恢复。
+ */
+function TurnProcessList({
+  events,
+  running,
+  renderEvent,
+}: {
+  readonly events: readonly SessionEvent[]
+  readonly running: boolean
+  readonly renderEvent: (event: SessionEvent) => ReactNode
+}) {
+  const scrollRef = useRef<HTMLDivElement | null>(null)
+  const stickRef = useRef(true)
+  const count = events.length
+
+  useEffect(() => {
+    if (!running || !stickRef.current) return
+    const el = scrollRef.current
+    if (el === null) return
+    el.scrollTop = el.scrollHeight
+  }, [count, running])
+
+  const onScroll = (): void => {
+    const el = scrollRef.current
+    if (el === null) return
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 24
+  }
+
+  return (
+    <div className="turn-process">
+      <div className="turn-process-scroll" ref={scrollRef} onScroll={onScroll}>
+        {events.map(renderEvent)}
+      </div>
+    </div>
+  )
 }
 
 export function SessionStream({
@@ -1309,9 +1348,7 @@ export function SessionStream({
               </button>
             )}
             {!editingTurn && process.length > 0 && open && (
-              <div className="turn-process">
-                <div className="turn-process-scroll">{process.map(renderProcessEvent)}</div>
-              </div>
+              <TurnProcessList events={process} running={blockRunning} renderEvent={renderProcessEvent} />
             )}
             {!editingTurn && final !== null ? renderMessage(final) : null}
           </div>

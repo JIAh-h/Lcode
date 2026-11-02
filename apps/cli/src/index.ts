@@ -6,6 +6,7 @@
  * `--storage` 存储维护）。`migrate`、`--dump-config` 的真实装配随批次 ⑦ 落地。
  */
 import { runDoctor, type DoctorMode } from './doctor.ts'
+import { runEvalCommand } from './eval.ts'
 import { runIndexCommand, runSessionsCommand } from './sessions.ts'
 import { runTaskCommand } from './run.ts'
 import { runJobsCommand } from './jobs.ts'
@@ -32,6 +33,8 @@ export interface CliOptions {
   jobsArgv?: string[] | undefined
   /** 本地插件管理；真实生命周期仍由共享 Runtime 承担。 */
   pluginsArgv?: string[] | undefined
+  /** 编码评测集（真实模型；不属于 CI） */
+  evalArgv?: string[] | undefined
 }
 
 /** 走 `sessions` 实现的顶层命令（第一条参数即命令名） */
@@ -63,6 +66,10 @@ export function parseArgs(argv: readonly string[]): CliOptions {
   }
   if (first === 'plugins') {
     opts.pluginsArgv = [...argv.slice(1)]
+    return opts
+  }
+  if (first === 'eval') {
+    opts.evalArgv = [...argv.slice(1)]
     return opts
   }
 
@@ -125,6 +132,11 @@ const USAGE = `Lcode CLI — 可用命令：
   lcode plugins install <目录>
   lcode plugins activate|deactivate|uninstall <id> <version>
 
+评测（真实模型；不属于 CI）
+  lcode eval                     跑 evals/coding/tasks 全部任务
+  lcode eval --dry-run           用 solution 验证题目与 hidden 测试
+  lcode eval --task <id> --verbose --out <file>
+
 自检
   lcode doctor                     环境自检
   lcode doctor --index             索引体检（比对 log_revision 与真实日志）
@@ -155,6 +167,10 @@ async function main(): Promise<void> {
   }
   if (opts.pluginsArgv !== undefined) {
     process.exitCode = await runPluginsCommand(opts.pluginsArgv)
+    return
+  }
+  if (opts.evalArgv !== undefined) {
+    process.exitCode = await runEvalCommand(opts.evalArgv)
     return
   }
   if (opts.doctor !== undefined) {

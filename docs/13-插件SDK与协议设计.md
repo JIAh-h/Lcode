@@ -565,6 +565,8 @@ flowchart LR
 - 发现（discover）到的工具在注册时**按内置工具同等对待**：参数校验、规范值投影、卡片渲染走同一套（08）。
 - server 断开 → 该 plugin 的 disposer 撤销其全部工具注册。
 
+**当前实现（2026-11-02）**：`@lcode/mcp-local` 提供 stdio 客户端（按行分隔 JSON-RPC，初始化 → `tools/list` 分页 → `tools/call`）。配置在 `~/.lcode/mcp.json`，设置 → MCP 服务可编辑并重连；工具名 `mcp__<server>__<tool>`。server 是用户配置的本机进程，**不在工作区 OS 沙箱内**；只读预设下拒绝执行其工具。尚未实现"每个 server 一个插件实例"的进程隔离与 manifest 权限声明，也尚未实现 §6.2 的 MCP 服务端。
+
 ### 6.2 作为 MCP 服务端
 
 > **把 Lcode 的能力（工具、会话、子代理）暴露给别的 agent。**

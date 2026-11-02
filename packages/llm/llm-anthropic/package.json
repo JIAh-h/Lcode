@@ -11,7 +11,9 @@
     }
   },
   "dependencies": {
+    "@lcode/agent-default-model": "workspace:*",
     "@lcode/llm": "workspace:*",
+    "@lcode/session": "workspace:*",
     "@lcode/settings": "workspace:*",
     "@lcode/credentials": "workspace:*",
     "@lcode/context": "workspace:*",

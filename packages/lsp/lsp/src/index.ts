@@ -1,1 +1,1 @@
-export type { LspService } from './lsp.ts'
+export type { LspService, LspQueryInput } from './lsp.ts'

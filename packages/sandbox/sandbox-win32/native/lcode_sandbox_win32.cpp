@@ -39,11 +39,13 @@ struct Probe {
   bool networkPolicy = false;
   bool jobObject = false;
   std::wstring reason;
+  std::wstring warning;
 };
 
 struct Release {
   bool released = false;
   std::wstring reason;
+  std::wstring warning;
 };
 
 struct JobCheck {
@@ -113,12 +115,16 @@ void printProbe(const Probe& probe) {
             << ",\"workspaceAcl\":" << (probe.workspaceAcl ? "true" : "false")
             << ",\"networkPolicy\":" << (probe.networkPolicy ? "true" : "false")
             << ",\"jobObject\":" << (probe.jobObject ? "true" : "false")
-            << ",\"reason\":\"" << utf8(jsonEscape(probe.reason)) << "\"}" << std::endl;
+            << ",\"reason\":\"" << utf8(jsonEscape(probe.reason)) << "\"";
+  if (!probe.warning.empty()) std::cout << ",\"warning\":\"" << utf8(jsonEscape(probe.warning)) << "\"";
+  std::cout << "}" << std::endl;
 }
 
 void printRelease(const Release& release) {
   std::cout << "{\"released\":" << (release.released ? "true" : "false")
-            << ",\"reason\":\"" << utf8(jsonEscape(release.reason)) << "\"}" << std::endl;
+            << ",\"reason\":\"" << utf8(jsonEscape(release.reason)) << "\"";
+  if (!release.warning.empty()) std::cout << ",\"warning\":\"" << utf8(jsonEscape(release.warning)) << "\"";
+  std::cout << "}" << std::endl;
 }
 
 void printJobCheck(const JobCheck& check) {
@@ -165,10 +171,25 @@ bool canConfigureNetworkCapability(std::wstring* reason) {
   return addInternetClientCapability(&capability, reason);
 }
 
+/**
+ * Win32 安全 API 与 std::filesystem 默认受 MAX_PATH(260) 限制；pnpm 的
+ * node_modules 嵌套路径很容易超过它。统一加 `\\?\` 前缀走长路径分支。
+ */
+std::wstring longPath(const std::wstring& input) {
+  // `\\?\` 前缀会跳过路径规范化：必须先把正斜杠统一成反斜杠，否则会被当成非法路径
+  std::wstring path = input;
+  for (auto& ch : path) if (ch == L'/') ch = L'\\';
+  if (path.size() >= 4 && path.compare(0, 4, L"\\\\?\\") == 0) return path;
+  if (path.size() >= 2 && path[0] == L'\\' && path[1] == L'\\') return L"\\\\?\\UNC\\" + path.substr(2);
+  if (path.size() >= 2 && path[1] == L':') return L"\\\\?\\" + path;
+  return path;
+}
+
 bool accessMaskForSid(const std::wstring& path, PSID wanted, DWORD* foundMask) {
   PACL dacl = nullptr;
   PSECURITY_DESCRIPTOR descriptor = nullptr;
-  const DWORD status = GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+  const std::wstring target = longPath(path);
+  const DWORD status = GetNamedSecurityInfoW(target.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
                                               nullptr, nullptr, &dacl, nullptr, &descriptor);
   if (status != ERROR_SUCCESS || dacl == nullptr) {
     if (descriptor != nullptr) LocalFree(descriptor);
@@ -204,7 +225,8 @@ bool grantAccess(const std::wstring& path, PSID sid, bool directory, DWORD mask,
   if (has && (current & mask) == mask && (!tightenReadOnly || (current & FILE_GENERIC_WRITE) == 0)) return true;
   PACL oldDacl = nullptr;
   PSECURITY_DESCRIPTOR descriptor = nullptr;
-  DWORD status = GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+  const std::wstring target = longPath(path);
+  DWORD status = GetNamedSecurityInfoW(target.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
                                        nullptr, nullptr, &oldDacl, nullptr, &descriptor);
   if (status != ERROR_SUCCESS) {
     *reason = L"无法读取工作区 ACL: " + path + L" (" + lastError(status) + L")";
@@ -224,7 +246,7 @@ bool grantAccess(const std::wstring& path, PSID sid, bool directory, DWORD mask,
   PACL updatedDacl = nullptr;
   status = SetEntriesInAclW(1, &access, oldDacl, &updatedDacl);
   if (status == ERROR_SUCCESS) {
-    status = SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+    status = SetNamedSecurityInfoW(const_cast<LPWSTR>(target.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
                                    nullptr, nullptr, updatedDacl, nullptr);
   }
   if (updatedDacl != nullptr) LocalFree(updatedDacl);
@@ -236,12 +258,12 @@ bool grantAccess(const std::wstring& path, PSID sid, bool directory, DWORD mask,
   return true;
 }
 
-bool grantWorkspace(const std::wstring& root, PSID sid, SandboxMode mode, std::wstring* reason) {
+bool grantWorkspace(const std::wstring& root, PSID sid, SandboxMode mode, std::wstring* reason, std::wstring* warning = nullptr) {
   if (mode == SandboxMode::FullAccess) return true; // 完全访问不设文件边界
   const DWORD mask = modeAccessMask(mode);
   const bool tightenReadOnly = mode == SandboxMode::ReadOnly;
   std::error_code error;
-  const std::filesystem::path base(root);
+  const std::filesystem::path base(longPath(root));
   if (!std::filesystem::is_directory(base, error) || error) {
     *reason = L"工作区目录不存在或不可访问: " + root;
     return false;
@@ -250,16 +272,64 @@ bool grantWorkspace(const std::wstring& root, PSID sid, SandboxMode mode, std::w
 
   std::filesystem::recursive_directory_iterator it(base, std::filesystem::directory_options::skip_permission_denied, error);
   const std::filesystem::recursive_directory_iterator end;
+  std::wstring firstSkipped;
+  size_t skipped = 0;
   while (!error && it != end) {
     const std::filesystem::path item = it->path();
-    const bool directory = it->is_directory(error);
-    if (error || !grantAccess(item.wstring(), sid, directory, mask, tightenReadOnly, reason)) return false;
+    bool directory = it->is_directory(error);
+    if (error) {
+      /*
+       * 悬空的重解析点（pnpm 删包后留下的 symlink/junction）读不到目标：
+       * 它没有可写的实体，任何档位都直接跳过。其它读不出类型的项仍按原语义处理：
+       * workspace-write 尽力而为，只读档 fail-closed。
+       */
+      const std::wstring attributesPath = longPath(item.wstring());
+      const DWORD attributes = GetFileAttributesW(attributesPath.c_str());
+      const bool danglingReparse = attributes != INVALID_FILE_ATTRIBUTES
+        && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+      error.clear();
+      if (!danglingReparse && tightenReadOnly) {
+        *reason = L"无法读取工作区项: " + item.wstring();
+        return false;
+      }
+      if (danglingReparse) {
+        if (skipped == 0) firstSkipped = L"悬空重解析点: " + item.wstring();
+        ++skipped;
+        it.increment(error);
+        continue;
+      }
+      directory = false;
+    }
+    std::wstring itemReason;
+    if (!grantAccess(item.wstring(), sid, directory, mask, tightenReadOnly, &itemReason)) {
+      /*
+       * workspace-write 下个别对象无法授予（属主是别的沙箱账号、没有改 DACL 的权限）
+       * 不该拖垮整个工作区：跳过并降级为警告，该子树在沙箱内保持不可写。
+       * 只读档相反——收紧不彻底就是安全漏洞，必须 fail-closed。
+       */
+      if (tightenReadOnly) {
+        *reason = itemReason;
+        return false;
+      }
+      if (skipped == 0) firstSkipped = itemReason;
+      ++skipped;
+    }
     it.increment(error);
   }
   if (error) {
     const std::string message = error.message();
-    *reason = L"遍历工作区 ACL 时失败: " + std::wstring(message.begin(), message.end());
-    return false;
+    const std::wstring traversed = L"遍历工作区 ACL 时中断: " + std::wstring(message.begin(), message.end());
+    if (tightenReadOnly) {
+      *reason = traversed;
+      return false;
+    }
+    // 部分授予只会少给权限（更严格），不阻断启动
+    if (skipped == 0) firstSkipped = traversed;
+    ++skipped;
+    error.clear();
+  }
+  if (skipped > 0 && warning != nullptr) {
+    *warning = L"有 " + std::to_wstring(skipped) + L" 个对象无法授予 ACL，已跳过（该部分在沙箱内不可写）：" + firstSkipped;
   }
   return true;
 }
@@ -267,7 +337,8 @@ bool grantWorkspace(const std::wstring& root, PSID sid, SandboxMode mode, std::w
 bool revokeAccess(const std::wstring& path, PSID sid, std::wstring* reason) {
   PACL oldDacl = nullptr;
   PSECURITY_DESCRIPTOR descriptor = nullptr;
-  DWORD status = GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+  const std::wstring target = longPath(path);
+  DWORD status = GetNamedSecurityInfoW(target.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
                                        nullptr, nullptr, &oldDacl, nullptr, &descriptor);
   if (status != ERROR_SUCCESS) {
     *reason = L"无法读取工作区 ACL: " + path + L" (" + lastError(status) + L")";
@@ -283,7 +354,7 @@ bool revokeAccess(const std::wstring& path, PSID sid, std::wstring* reason) {
   PACL updatedDacl = nullptr;
   status = SetEntriesInAclW(1, &access, oldDacl, &updatedDacl);
   if (status == ERROR_SUCCESS) {
-    status = SetNamedSecurityInfoW(const_cast<LPWSTR>(path.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+    status = SetNamedSecurityInfoW(const_cast<LPWSTR>(target.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
                                    nullptr, nullptr, updatedDacl, nullptr);
   }
   if (updatedDacl != nullptr) LocalFree(updatedDacl);
@@ -300,7 +371,7 @@ Release revokeWorkspace(const std::wstring& root) {
   PSID sid = nullptr;
   if (!getAppContainerSid(&sid, &result.reason)) return result;
   std::error_code error;
-  const std::filesystem::path base(root);
+  const std::filesystem::path base(longPath(root));
   if (!std::filesystem::is_directory(base, error) || error) {
     result.reason = L"工作区目录不存在或不可访问: " + root;
     FreeSid(sid);
@@ -312,21 +383,29 @@ Release revokeWorkspace(const std::wstring& root) {
   }
   std::filesystem::recursive_directory_iterator it(base, std::filesystem::directory_options::skip_permission_denied, error);
   const std::filesystem::recursive_directory_iterator end;
+  std::wstring firstSkipped;
+  size_t skipped = 0;
   while (!error && it != end) {
     const std::filesystem::path item = it->path();
-    if (!revokeAccess(item.wstring(), sid, &result.reason)) {
-      FreeSid(sid);
-      return result;
+    std::wstring itemReason;
+    if (!revokeAccess(item.wstring(), sid, &itemReason)) {
+      // 撤销同样是尽力而为：个别对象失败不能掩盖“根已撤销”的事实，但要如实报告。
+      if (skipped == 0) firstSkipped = itemReason;
+      ++skipped;
     }
     it.increment(error);
   }
   if (error) {
     const std::string message = error.message();
-    result.reason = L"遍历工作区 ACL 时失败: " + std::wstring(message.begin(), message.end());
-    FreeSid(sid);
-    return result;
+    const std::wstring traversed = L"遍历工作区 ACL 时中断: " + std::wstring(message.begin(), message.end());
+    if (skipped == 0) firstSkipped = traversed;
+    ++skipped;
+    error.clear();
   }
   FreeSid(sid);
+  if (skipped > 0) {
+    result.warning = L"有 " + std::to_wstring(skipped) + L" 个对象无法撤销 ACL：" + firstSkipped;
+  }
   result.released = true;
   return result;
 }
@@ -434,7 +513,7 @@ Probe prepare(const std::wstring& workspace, bool allowNetwork, SandboxMode mode
   PSID sid = nullptr;
   if (!getAppContainerSid(&sid, &result.reason)) return result;
   result.appContainer = true;
-  if (!grantWorkspace(workspace, sid, mode, &result.reason)) {
+  if (!grantWorkspace(workspace, sid, mode, &result.reason, &result.warning)) {
     FreeSid(sid);
     return result;
   }

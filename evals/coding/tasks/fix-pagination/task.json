@@ -1,0 +1,7 @@
+{
+  "id": "fix-pagination",
+  "title": "修复分页边界",
+  "prompt": "仓库里 src/paginate.mjs 的 paginate(items, page, pageSize) 文档约定 page 从 1 开始，但当前实现按 0 开始计算：第 1 页拿到的是第二页内容，最后一页之后还会返回空数组。请修复实现，保持函数签名与返回数组的语义不变；不要修改测试或新增依赖。",
+  "test": { "command": "node", "args": ["verify.mjs"], "timeoutMs": 30000 },
+  "agentTimeoutMs": 180000
+}

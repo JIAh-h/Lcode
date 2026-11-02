@@ -111,6 +111,12 @@ importers:
       react-router-dom:
         specifier: ^6.28.0
         version: 6.30.6(react-dom@18.3.1(react@18.3.1))(react@18.3.1)
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
+      typescript-language-server:
+        specifier: ^6.0.2
+        version: 6.0.2
     devDependencies:
       concurrently:
         specifier: ^9.1.0
@@ -265,6 +271,9 @@ importers:
       '@lcode/approval':
         specifier: workspace:*
         version: link:../../interaction/approval
+      '@lcode/code-index-local':
+        specifier: workspace:*
+        version: link:../../context/code-index-local
       '@lcode/code-runtime':
         specifier: workspace:*
         version: link:../../code/code-runtime
@@ -310,12 +319,21 @@ importers:
       '@lcode/llm':
         specifier: workspace:*
         version: link:../../llm/llm
+      '@lcode/llm-anthropic':
+        specifier: workspace:*
+        version: link:../../llm/llm-anthropic
       '@lcode/llm-openai-compatible':
         specifier: workspace:*
         version: link:../../llm/llm-openai-compatible
       '@lcode/lsp':
         specifier: workspace:*
         version: link:../../lsp/lsp
+      '@lcode/lsp-local':
+        specifier: workspace:*
+        version: link:../../lsp/lsp-local
+      '@lcode/mcp-local':
+        specifier: workspace:*
+        version: link:../../extension/mcp-local
       '@lcode/model-api':
         specifier: workspace:*
         version: link:../../api/model-api
@@ -536,6 +554,18 @@ importers:
         specifier: workspace:*
         version: link:../../util
 
+  packages/context/code-index-local:
+    dependencies:
+      '@lcode/session-persistence-sqlite':
+        specifier: workspace:*
+        version: link:../../session-persistence/session-persistence-sqlite
+      '@lcode/tools':
+        specifier: workspace:*
+        version: link:../../core/tools
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
   packages/context/context-budget:
     dependencies:
       '@lcode/context':
@@ -741,18 +771,6 @@ importers:
         specifier: workspace:*
         version: link:../../util
 
-  packages/core/tool-todo:
-    dependencies:
-      '@lcode/session':
-        specifier: workspace:*
-        version: link:../session
-      '@lcode/tools':
-        specifier: workspace:*
-        version: link:../tools
-      '@lcode/util':
-        specifier: workspace:*
-        version: link:../../util
-
   packages/core/tools:
     dependencies:
       '@lcode/context':
@@ -791,6 +809,18 @@ importers:
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util
+
+  packages/extension/mcp-local:
+    dependencies:
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../../core/context
+      '@lcode/subprocess':
+        specifier: workspace:*
+        version: link:../../subprocess/subprocess
+      '@lcode/tools':
+        specifier: workspace:*
+        version: link:../../core/tools
 
   packages/extension/plugin-host:
     dependencies:
@@ -1070,6 +1100,9 @@ importers:
 
   packages/llm/llm-anthropic:
     dependencies:
+      '@lcode/agent-default-model':
+        specifier: workspace:*
+        version: link:../../core/agent-default-model
       '@lcode/context':
         specifier: workspace:*
         version: link:../../core/context
@@ -1079,6 +1112,9 @@ importers:
       '@lcode/llm':
         specifier: workspace:*
         version: link:../llm
+      '@lcode/session':
+        specifier: workspace:*
+        version: link:../../core/session
       '@lcode/settings':
         specifier: workspace:*
         version: link:../../settings/settings
@@ -1196,6 +1232,18 @@ importers:
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util
+
+  packages/lsp/lsp-local:
+    dependencies:
+      '@lcode/lsp':
+        specifier: workspace:*
+        version: link:../lsp
+      '@lcode/lsp-stdio':
+        specifier: workspace:*
+        version: link:../lsp-stdio
+      '@lcode/subprocess':
+        specifier: workspace:*
+        version: link:../../subprocess/subprocess
 
   packages/lsp/lsp-stdio:
     dependencies:
@@ -3793,6 +3841,11 @@ packages:
       eslint: ^8.57.0 || ^9.0.0 || ^10.0.0
       typescript: '>=4.8.4 <6.1.0'
 
+  typescript-language-server@6.0.2:
+    resolution: {integrity: sha512-Ph7Ql+xkUJvMamnkh1h+aKP6HxLR7lrWIYkPn9/LZBkJdJZgtIj7OoVhkDYtQ7zFPTPmqZHOVXaUKGyz9M2q1Q==}
+    engines: {node: '>=22.22.2'}
+    hasBin: true
+
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
     engines: {node: '>=14.17'}
@@ -3921,6 +3974,20 @@ packages:
         optional: true
       jsdom:
         optional: true
+
+  vscode-jsonrpc@10.0.0:
+    resolution: {integrity: sha512-USSfxg0vDIpTQqlQBGxF3mBARyoS8cU7LHLpbYNh6dOJt32dlskxPWB0Irrh5TllTmyf7oNLAvqDqzklbwwnpA==}
+    engines: {node: '>=14.17.0'}
+
+  vscode-jsonrpc@5.0.1:
+    resolution: {integrity: sha512-JvONPptw3GAQGXlVV2utDcHx0BiY34FupW/kI6mZ5x06ER5DdPG/tXWMVHjTNULF5uKPOUUD0SaXg5QaubJL0A==}
+    engines: {node: '>=8.0.0 || >=10.0.0'}
+
+  vscode-languageserver-protocol@3.18.5:
+    resolution: {integrity: sha512-FW4fBMzZ99N8xeob4py0l050wgCoRgTpEq5Xcsb9lM1bc29UKGR/wSV+4knaqFxssFHajy7OzNiKP/m3U1ZEuA==}
+
+  vscode-languageserver-types@3.18.5:
+    resolution: {integrity: sha512-kPd6+JQNz3HMJvjKlqUxERSlZHAntl/aGpsk7ImwIh0ewDKDcjgAEyVSYciPiOJD3ftbK9IrfiqUeTZLSbCizw==}
 
   wait-on@8.0.5:
     resolution: {integrity: sha512-J3WlS0txVHkhLRb2FsmRg3dkMTCV1+M6Xra3Ho7HzZDHpE7DCOnoSoCJsZotrmW3uRMhvIJGSKUKrh/MeF4iag==}
@@ -6012,6 +6079,11 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
+  typescript-language-server@6.0.2:
+    dependencies:
+      vscode-jsonrpc: 5.0.1
+      vscode-languageserver-protocol: 3.18.5
+
   typescript@5.9.3: {}
 
   undici-types@6.21.0: {}
@@ -6106,6 +6178,17 @@ snapshots:
       - sugarss
       - supports-color
       - terser
+
+  vscode-jsonrpc@10.0.0: {}
+
+  vscode-jsonrpc@5.0.1: {}
+
+  vscode-languageserver-protocol@3.18.5:
+    dependencies:
+      vscode-jsonrpc: 10.0.0
+      vscode-languageserver-types: 3.18.5
+
+  vscode-languageserver-types@3.18.5: {}
 
   wait-on@8.0.5:
     dependencies:

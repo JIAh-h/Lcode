@@ -65,6 +65,9 @@ export interface CustomModelStoreLike {
     /** 省略 = 显示名就是服务端模型名（回落 label） */
     readonly model?: string | undefined
     readonly base_url: string
+    readonly protocol?: 'openai' | 'anthropic' | undefined
+    readonly billing_type?: 'token-plan' | 'coding-plan' | 'pay-as-you-go' | undefined
+    readonly provider_preset?: string | undefined
     readonly api_key_ref: string
     readonly models?: readonly string[] | undefined
     readonly context_window_in?: number | undefined
@@ -87,6 +90,9 @@ export interface CustomModelInfo {
   /** 真正发给服务端的模型 id（如 `deepseek-chat`）；默认模型选择用它 */
   readonly model: string
   readonly base_url: string
+  readonly protocol?: 'openai' | 'anthropic' | undefined
+  readonly billing_type?: 'token-plan' | 'coding-plan' | 'pay-as-you-go' | undefined
+  readonly provider_preset?: string | undefined
   readonly api_key_ref: string
   readonly models?: readonly string[] | undefined
   /** 输入上下文窗口（tokens）；缺省表示使用供应商返回的上限 */
@@ -102,6 +108,9 @@ function toCustomInfo(config: {
   readonly label: string
   readonly model: string
   readonly base_url: string
+  readonly protocol?: 'openai' | 'anthropic' | undefined
+  readonly billing_type?: 'token-plan' | 'coding-plan' | 'pay-as-you-go' | undefined
+  readonly provider_preset?: string | undefined
   readonly api_key_ref: string
   readonly models?: readonly string[] | undefined
   readonly context_window_in?: number | undefined
@@ -113,6 +122,9 @@ function toCustomInfo(config: {
     label: config.label,
     model: config.model,
     base_url: config.base_url,
+    ...(config.protocol === undefined ? {} : { protocol: config.protocol }),
+    ...(config.billing_type === undefined ? {} : { billing_type: config.billing_type }),
+    ...(config.provider_preset === undefined ? {} : { provider_preset: config.provider_preset }),
     api_key_ref: config.api_key_ref,
     ...(config.models === undefined ? {} : { models: config.models }),
     ...(config.context_window_in === undefined ? {} : { context_window_in: config.context_window_in }),
@@ -294,6 +306,9 @@ export class LocalModelApi {
     readonly label?: string
     readonly model?: string
     readonly base_url: string
+    readonly protocol?: 'openai' | 'anthropic'
+    readonly billing_type?: 'token-plan' | 'coding-plan' | 'pay-as-you-go'
+    readonly provider_preset?: string
     readonly api_key?: string
     readonly api_key_ref?: string
     readonly models?: readonly string[]
@@ -318,6 +333,9 @@ export class LocalModelApi {
       // 不该逼所有人多填一遍。校验（非空）在 store 里，是权威那一处。
       model: input.model ?? label,
       base_url: input.base_url,
+      ...(input.protocol === undefined ? {} : { protocol: input.protocol }),
+      ...(input.billing_type === undefined ? {} : { billing_type: input.billing_type }),
+      ...(input.provider_preset === undefined ? {} : { provider_preset: input.provider_preset }),
       api_key_ref: refName,
       ...(input.models === undefined ? {} : { models: input.models }),
       ...(input.context_window_in === undefined ? {} : { context_window_in: input.context_window_in }),

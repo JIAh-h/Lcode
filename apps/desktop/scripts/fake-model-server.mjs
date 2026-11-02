@@ -38,6 +38,25 @@ const delayMs = Number(process.env.FAKE_DELAY_MS ?? 0)
 const port = Number(process.env.FAKE_PORT ?? 8898)
 
 createServer((req, res) => {
+  if (req.url !== null && req.url.includes('/embeddings')) {
+    let body = ''
+    req.on('data', (chunk) => {
+      body += chunk
+    })
+    req.on('end', () => {
+      const parsed = JSON.parse(body === '' ? '{}' : body)
+      const inputs = Array.isArray(parsed.input) ? parsed.input : [parsed.input]
+      // 确定性的伪向量：语义无关，只用于验证索引/检索链路
+      const vector = (text) => {
+        const out = new Array(8).fill(0)
+        for (const char of String(text)) out[(char.codePointAt(0) ?? 0) % 8] += 1
+        return out
+      }
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ data: inputs.map((text, index) => ({ index, embedding: vector(text) })) }))
+    })
+    return
+  }
   if (req.url !== null && req.url.includes('/models')) {
     res.writeHead(200, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ data: [{ id: 'deepseek-flash' }] }))
@@ -52,9 +71,13 @@ createServer((req, res) => {
     const parsed = JSON.parse(body === '' ? '{}' : body)
     const messages = parsed.messages ?? []
     const hasToolResult = messages.some((m) => m.role === 'tool')
+    /** FAKE_STEPS > 1 时，同一回合连续调多次工具（验证执行过程列表的滚动/跟随） */
+    const steps = Number(process.env.FAKE_STEPS ?? 1)
+    const toolResultCount = messages.filter((m) => m.role === 'tool').length
 
     res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' })
     const send = (payload) => res.write(`data: ${JSON.stringify(payload)}\n\n`)
+    if (delayMs > 0) await delay(delayMs)
 
     if (mode === 'text') {
       // 逐字发，这样流式渲染与 chunk 合帧也一并被验到
@@ -69,6 +92,23 @@ createServer((req, res) => {
           {
             delta: {
               tool_calls: [{ index: 0, id: 'call_1', function: { name: toolName, arguments: toolArgs } }],
+            },
+          },
+        ],
+        usage: null,
+      })
+      send({
+        choices: [{ delta: {}, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1 },
+      })
+    } else if (toolResultCount < steps) {
+      // 多步模式：每步用不同的 callId；参数保持不变，便于验证成功/失败两类行
+      const index = toolResultCount + 1
+      send({
+        choices: [
+          {
+            delta: {
+              tool_calls: [{ index: 0, id: `call_${index}`, function: { name: toolName, arguments: toolArgs } }],
             },
           },
         ],

@@ -317,30 +317,202 @@ const EYE_OPEN = (
 /** 长度快捷 chips：单选；再点已选项取消 → 回到「默认」 */
 /**
  * 供应商预设（对应文档 18 §2 的 L5「适配器组合基座」）：
- * 内置供应商的 baseUrl 来自适配器默认值，**用户不需要填**；
- * 只有「自定义」没有默认值，才需要用户提供地址。
+ * - 「推荐」是官方直连：地址由预设给出，用户只选计费类型；
+ * - 「自定义」要用户填接口地址，并选择 OpenAI / Anthropic 协议。
  *
- * 端点取值来源（不自己编）：
- * - OpenAI `https://api.openai.com/v1` —— 文档 18 §5 解析链路示例
- * - Ollama `http://127.0.0.1:11434` —— 文档 18 §9.1
- * - DeepSeek `https://api.deepseek.com` —— DeepSeek 官方 API 文档（OpenAI 兼容 base_url）
+ * 推荐供应商的计费类型来自各厂公开计费方式（2026-11）：
+ * - 阿里云百炼：Token Plan / Coding Plan / 按量付费
+ * - DeepSeek：仅按量付费（无订阅套餐）
+ * - 智谱：GLM Coding Plan / 按量付费
+ * - Kimi：Kimi Code 会员（Coding Plan）/ 按量付费
+ * - MiniMax：Coding Plan / 按量付费
+ * - OpenAI API：按量付费（预充值 credits），ChatGPT 订阅不能用于 API
  */
+type BillingType = 'token-plan' | 'coding-plan' | 'pay-as-you-go'
+type ModelProtocol = 'openai' | 'anthropic'
+
+interface BillingOption {
+  readonly id: BillingType
+  readonly label: string
+}
+
 interface ProviderPreset {
   readonly id: string
-  /** 适配器默认 baseUrl；`null` = 必须用户填写（自定义） */
+  readonly label: string
+  readonly group: '推荐' | '自定义'
+  readonly protocol: ModelProtocol
+  /** 没有计费类型差异时的固定地址 */
   readonly baseUrl: string | null
-  /** 是否需要凭据。本地模型不需要，见文档 18 §9.1 */
+  /** 推荐供应商按计费类型切换地址；自定义协议为空 */
+  readonly baseUrlByBilling?: Readonly<Partial<Record<BillingType, string>>> | undefined
+  /** 可选计费类型；自定义协议为空数组 */
+  readonly billing: readonly BillingOption[]
+  readonly defaultBilling?: BillingType | undefined
   readonly needsKey: boolean
   /** 模型名示例，用于占位提示 */
   readonly modelHint: string
 }
 
+const BILLING_LABELS: Readonly<Record<BillingType, string>> = {
+  'token-plan': 'Token Plan',
+  'coding-plan': 'Coding Plan',
+  'pay-as-you-go': '按量付费',
+}
+
+const BILLING_OPTIONS: Readonly<Record<BillingType, BillingOption>> = {
+  'token-plan': { id: 'token-plan', label: BILLING_LABELS['token-plan'] },
+  'coding-plan': { id: 'coding-plan', label: BILLING_LABELS['coding-plan'] },
+  'pay-as-you-go': { id: 'pay-as-you-go', label: BILLING_LABELS['pay-as-you-go'] },
+}
+
 const PROVIDER_PRESETS: readonly ProviderPreset[] = [
-  { id: '自定义', baseUrl: null, needsKey: true, modelHint: '例如 gpt-4o 或 openai/gpt-4o' },
-  { id: 'DeepSeek', baseUrl: 'https://api.deepseek.com', needsKey: true, modelHint: '例如 deepseek-flash 或 deepseek-v4-pro' },
-  { id: 'OpenAI', baseUrl: 'https://api.openai.com/v1', needsKey: true, modelHint: '例如 gpt-4o' },
-  { id: 'Ollama（本地）', baseUrl: 'http://127.0.0.1:11434', needsKey: false, modelHint: '例如 qwen3-coder' },
+  {
+    id: 'bailian',
+    label: '阿里云百炼',
+    group: '推荐',
+    protocol: 'openai',
+    baseUrl: null,
+    baseUrlByBilling: {
+      'token-plan': 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      'coding-plan': 'https://coding.dashscope.aliyuncs.com/v1',
+      'pay-as-you-go': 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    },
+    billing: [BILLING_OPTIONS['token-plan'], BILLING_OPTIONS['coding-plan'], BILLING_OPTIONS['pay-as-you-go']],
+    defaultBilling: 'pay-as-you-go',
+    needsKey: true,
+    modelHint: '例如 qwen3.7-plus',
+  },
+  {
+    id: 'deepseek',
+    label: 'DeepSeek',
+    group: '推荐',
+    protocol: 'openai',
+    baseUrl: 'https://api.deepseek.com/v1',
+    billing: [BILLING_OPTIONS['pay-as-you-go']],
+    defaultBilling: 'pay-as-you-go',
+    needsKey: true,
+    modelHint: '例如 deepseek-chat',
+  },
+  {
+    id: 'zhipu',
+    label: '智谱',
+    group: '推荐',
+    protocol: 'openai',
+    baseUrl: null,
+    baseUrlByBilling: {
+      'coding-plan': 'https://open.bigmodel.cn/api/coding/paas/v4',
+      'pay-as-you-go': 'https://open.bigmodel.cn/api/paas/v4',
+    },
+    billing: [BILLING_OPTIONS['coding-plan'], BILLING_OPTIONS['pay-as-you-go']],
+    defaultBilling: 'pay-as-you-go',
+    needsKey: true,
+    modelHint: '例如 glm-5',
+  },
+  {
+    id: 'kimi',
+    label: 'Kimi',
+    group: '推荐',
+    protocol: 'openai',
+    baseUrl: null,
+    baseUrlByBilling: {
+      'coding-plan': 'https://api.kimi.com/coding/v1',
+      'pay-as-you-go': 'https://api.moonshot.cn/v1',
+    },
+    billing: [BILLING_OPTIONS['coding-plan'], BILLING_OPTIONS['pay-as-you-go']],
+    defaultBilling: 'pay-as-you-go',
+    needsKey: true,
+    modelHint: '例如 kimi-k2.5',
+  },
+  {
+    id: 'minimax',
+    label: 'MiniMax',
+    group: '推荐',
+    protocol: 'openai',
+    baseUrl: 'https://api.minimaxi.com/v1',
+    billing: [BILLING_OPTIONS['coding-plan'], BILLING_OPTIONS['pay-as-you-go']],
+    defaultBilling: 'pay-as-you-go',
+    needsKey: true,
+    modelHint: '例如 MiniMax-M2.5',
+  },
+  {
+    id: 'openai',
+    label: 'OpenAI',
+    group: '推荐',
+    protocol: 'openai',
+    baseUrl: 'https://api.openai.com/v1',
+    billing: [BILLING_OPTIONS['pay-as-you-go']],
+    defaultBilling: 'pay-as-you-go',
+    needsKey: true,
+    modelHint: '例如 gpt-5',
+  },
+  {
+    id: 'custom-openai',
+    label: 'OpenAI Compatible',
+    group: '自定义',
+    protocol: 'openai',
+    baseUrl: null,
+    billing: [],
+    needsKey: true,
+    modelHint: '例如 gpt-4o 或 openai/gpt-4o',
+  },
+  {
+    id: 'custom-anthropic',
+    label: 'Anthropic Compatible',
+    group: '自定义',
+    protocol: 'anthropic',
+    baseUrl: null,
+    billing: [],
+    needsKey: true,
+    modelHint: '例如 claude-sonnet-4-5',
+  },
 ]
+
+function presetBaseUrl(preset: ProviderPreset, billing: BillingType | ''): string | null {
+  if (preset.baseUrlByBilling !== undefined && billing !== '') return preset.baseUrlByBilling[billing] ?? null
+  return preset.baseUrl
+}
+
+function inferBilling(preset: ProviderPreset, baseUrl: string): BillingType | undefined {
+  const normalized = baseUrl.trim().replace(/\/+$/, '').toLowerCase()
+  if (preset.baseUrlByBilling !== undefined) {
+    for (const [billing, url] of Object.entries(preset.baseUrlByBilling) as [BillingType, string][]) {
+      if (url.trim().replace(/\/+$/, '').toLowerCase() === normalized) return billing
+    }
+  }
+  return undefined
+}
+
+function presetForEditing(editing: CustomModelInfo): ProviderPreset {
+  const byId = PROVIDER_PRESETS.find((preset) => preset.id === editing.provider_preset)
+  if (byId !== undefined) return byId
+  const normalized = editing.base_url.trim().replace(/\/+$/, '').toLowerCase()
+  /*
+   * 百炼的业务空间会给出 `\*.maas.aliyuncs.com/compatible-mode/v1` 这类专属域名，
+   * 它不在固定预设表里；按域名特征仍归到百炼，编辑时保留地址覆盖与计费类型。
+   */
+  try {
+    const url = new URL(editing.base_url)
+    const host = url.hostname.toLowerCase()
+    if (
+      host === 'dashscope.aliyuncs.com' ||
+      host === 'coding.dashscope.aliyuncs.com' ||
+      host === 'token-plan.cn-beijing.maas.aliyuncs.com' ||
+      (host.endsWith('.maas.aliyuncs.com') && url.pathname.toLowerCase().includes('/compatible-mode'))
+    ) {
+      return PROVIDER_PRESETS.find((preset) => preset.id === 'bailian')!
+    }
+  } catch {
+    // URL 不合法时继续走精确匹配/自定义
+  }
+  const matched = PROVIDER_PRESETS.find((preset) => {
+    if (preset.group !== '推荐') return false
+    if (preset.baseUrl !== null && preset.baseUrl.trim().replace(/\/+$/, '').toLowerCase() === normalized) return true
+    return preset.baseUrlByBilling !== undefined &&
+      Object.values(preset.baseUrlByBilling).some((url) => url.trim().replace(/\/+$/, '').toLowerCase() === normalized)
+  })
+  if (matched !== undefined) return matched
+  return PROVIDER_PRESETS.find((preset) => preset.id === (editing.protocol === 'anthropic' ? 'custom-anthropic' : 'custom-openai'))!
+}
 
 /** `AddModelModal` 提交的完整内容（**含 API Key**——它由主进程写进凭据存储，不进 settings） */
 interface ModelDraft {
@@ -350,6 +522,9 @@ interface ModelDraft {
   readonly model?: string
   readonly base_url: string
   readonly api_key: string
+  readonly protocol: ModelProtocol
+  readonly billing_type?: BillingType
+  readonly provider_preset: string
   /** 输入上下文窗口（tokens）；缺省 = 使用供应商返回的模型上限 */
   readonly context_window_in?: number
   /** 供应商返回的窗口上限（探测缓存） */
@@ -387,7 +562,14 @@ function AddModelModal({
   editing?: CustomModelInfo | undefined
 }) {
   const isEdit = editing !== undefined
-  const [provider, setProvider] = useState(PROVIDER_PRESETS[0]!.id)
+  const initialPreset = editing === undefined ? PROVIDER_PRESETS[0]! : presetForEditing(editing)
+  const initialBilling = editing?.billing_type ??
+    (editing === undefined ? undefined : inferBilling(initialPreset, editing.base_url)) ??
+    initialPreset.defaultBilling ??
+    initialPreset.billing[0]?.id ??
+    ''
+  const [provider, setProvider] = useState(initialPreset.id)
+  const [billing, setBilling] = useState<BillingType | ''>(initialBilling)
   const [base, setBase] = useState(editing?.base_url ?? '')
   const [key, setKey] = useState('')
   const [name, setName] = useState(editing?.label ?? '')
@@ -476,8 +658,11 @@ function AddModelModal({
 
   /* 当前供应商的预设：决定要不要填地址、要不要填密钥、模型名怎么举例 */
   const preset = PROVIDER_PRESETS.find((p) => p.id === provider) ?? PROVIDER_PRESETS[0]!
-  /** 最终生效的接口地址：内置供应商用适配器默认值，自定义用用户输入 */
-  const effectiveBase = preset.baseUrl ?? base.trim()
+  const isRecommended = preset.group === '推荐'
+  /** 只有自定义和百炼需要地址覆盖：百炼新版业务空间会给出专属域名 */
+  const canOverrideBase = !isRecommended || preset.id === 'bailian'
+  /** 最终生效的接口地址：显式覆盖优先，否则用推荐供应商按计费类型给出的地址 */
+  const effectiveBase = canOverrideBase && base.trim() !== '' ? base.trim() : (presetBaseUrl(preset, billing) ?? '')
 
   /*
    * 上下文窗口滑块：max 取**供应商返回的模型上限**（`/models/{id}` 的 max_input_tokens、
@@ -523,6 +708,7 @@ function AddModelModal({
         base_url: effectiveBase,
         model: id,
         api_key: typedKey,
+        protocol: preset.protocol,
         ...(credentialRef === undefined ? {} : { credential_ref: credentialRef }),
       })
       .then((limits) => {
@@ -547,12 +733,23 @@ function AddModelModal({
 
   /* 供应商一换，地址/密钥/模型名都是**该供应商专属**的，留着会串味（比如把 gpt-4o 存成 DeepSeek 的模型） */
   const changeProvider = (next: string): void => {
+    const nextPreset = PROVIDER_PRESETS.find((item) => item.id === next) ?? PROVIDER_PRESETS[0]!
     setProvider(next)
+    setBilling(nextPreset.defaultBilling ?? nextPreset.billing[0]?.id ?? '')
     setBase('')
     setKey('')
     setName('')
     setModelId('')
     setCtxWindow(null)
+    setProviderLimit(null)
+    resetDiscovered()
+  }
+
+  /* 计费类型切换通常对应不同套餐的 Key：清掉已输入的 Key、地址覆盖和已发现模型 */
+  const changeBilling = (next: BillingType): void => {
+    setBilling(next)
+    setBase('')
+    setKey('')
     setProviderLimit(null)
     resetDiscovered()
   }
@@ -564,8 +761,12 @@ function AddModelModal({
       nameRef.current?.focus()
       return null
     }
-    if (preset.baseUrl === null && !base.trim()) {
+    if (!isRecommended && !base.trim()) {
       toast(t('自定义供应商需要填写接口地址'))
+      return null
+    }
+    if (effectiveBase === '') {
+      toast(t('这个供应商缺少接口地址'))
       return null
     }
     // 编辑模式：密钥**留空表示不改**（值不在 UI 里，也不该逼用户重填一遍）
@@ -581,6 +782,9 @@ function AddModelModal({
       model: modelId.trim(),
       base_url: effectiveBase,
       api_key: key.trim(),
+      protocol: preset.protocol,
+      provider_preset: preset.id,
+      ...(isRecommended && billing !== '' ? { billing_type: billing } : {}),
       ...(configuredWindow === undefined ? {} : { context_window_in: configuredWindow }),
       ...(providerMax === null ? {} : { context_window_max: providerMax }),
       ...(isEdit ? { id: editing.name } : {}),
@@ -606,8 +810,12 @@ function AddModelModal({
    * ——少一次"测试通过但保存后不通"的意外。
    */
   const testConnection = async (): Promise<void> => {
-    if (preset.baseUrl === null && !base.trim()) {
+    if (!isRecommended && !base.trim()) {
       toast(t('自定义供应商需要填写接口地址'))
+      return
+    }
+    if (effectiveBase === '') {
+      toast(t('这个供应商缺少接口地址'))
       return
     }
     const canReuseSavedKey = isEdit && editing.api_key_ref !== ''
@@ -627,6 +835,7 @@ function AddModelModal({
       const result = await bridge.discover({
         base_url: effectiveBase,
         api_key: key.trim(),
+        protocol: preset.protocol,
         ...(credentialRef === undefined ? {} : { credential_ref: credentialRef }),
       })
       if (!result.ok) {
@@ -662,32 +871,92 @@ function AddModelModal({
         <div className="mb" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div className="mmfield">
             <span className="mmlab">
-              {t('供应商')} <em>{t('（仅支持 OpenAI 兼容协议）')}</em>
+              {t('供应商')}
+              <em>{isRecommended ? t('（官方推荐）') : t('（自定义协议）')}</em>
             </span>
             {/* 编辑模式**不允许改供应商**：配置是按供应商 id 存的，改 id 等于新开一条，
                 而用户想要的是'改这个模型的地址/密钥'。要换供应商就删了重加。 */}
             {isEdit ? (
               <div className="mmreadonly">
-                <span className="mmfrom">{editing.name}</span>
+                <span className="mmfrom">{preset.label} · {preset.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI'} 兼容</span>
               </div>
             ) : (
-              <Select value={provider} onChange={changeProvider} options={PROVIDER_PRESETS.map((p) => p.id)} />
+              <PopMenu
+                block
+                width={320}
+                buttonClass="selectbtn"
+                items={PROVIDER_PRESETS.map((item) => ({
+                  id: item.id,
+                  label: item.label,
+                  group: item.group,
+                  checked: item.id === provider,
+                }))}
+                onSelect={(id) => changeProvider(id)}
+                trigger={(
+                  <>
+                    <span className="selval">{preset.label}</span>
+                    <i className="chev">▾</i>
+                  </>
+                )}
+              />
             )}
           </div>
 
-          {/* 接口地址：**只有「自定义」才出现**——内置供应商的地址由适配器默认值决定（文档 18 §2 L5
-              「适配器组合基座」），不需要用户关心，也就不占弹窗版面 */}
-          {preset.baseUrl === null && (
+          {/* 推荐供应商：多一个「类型」= 计费模式。地址随计费类型切换，用户不用手填 */}
+          {isRecommended && (
+            <div className="mmfield">
+              <span className="mmlab">
+                {t('类型')} <em>{t('（计费模式）')}</em>
+              </span>
+              {preset.billing.length > 1 ? (
+                <PopMenu
+                  block
+                  width={260}
+                  buttonClass="selectbtn"
+                  items={preset.billing.map((item) => ({
+                    id: item.id,
+                    label: item.label,
+                    checked: item.id === billing,
+                  }))}
+                  onSelect={(id) => changeBilling(id as BillingType)}
+                  trigger={(
+                    <>
+                      <span className="selval">{preset.billing.find((item) => item.id === billing)?.label ?? preset.billing[0]?.label ?? ''}</span>
+                      <i className="chev">▾</i>
+                    </>
+                  )}
+                />
+              ) : (
+                <div className="mmreadonly">
+                  <span className="mmfrom">{preset.billing[0]?.label ?? t('按量付费')}</span>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 接口地址：自定义必填；百炼可选覆盖（业务空间专属域名）；其余推荐供应商用固定地址 */}
+          {canOverrideBase && (
             <label className="mmfield">
-              <span className="mmlab">{t('接口地址')}</span>
+              <span className="mmlab">
+                {t('接口地址')}
+                <em>{!isRecommended ? t('（{protocol} 兼容协议）', { protocol: preset.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI' }) : t('（可选覆盖）')}</em>
+              </span>
               <TextInput
                 value={base}
                 onChange={(value) => {
                   setBase(value)
                   resetDiscovered()
                 }}
-                placeholder="https://api.example.com/v1"
+                placeholder={isRecommended
+                  ? (presetBaseUrl(preset, billing) ?? 'https://api.example.com/v1')
+                  : preset.protocol === 'anthropic' ? 'https://api.anthropic.com' : 'https://api.example.com/v1'}
               />
+              {isRecommended ? (
+                <span className="src" style={{ whiteSpace: 'normal' }}>
+                  {t('留空使用推荐地址：{url}', { url: presetBaseUrl(preset, billing) ?? '—' })}
+                  {t('。百炼也可以直接粘贴控制台 API Key 页面给出的业务空间专属 OpenAI 兼容地址。')}
+                </span>
+              ) : null}
             </label>
           )}
 
@@ -749,7 +1018,7 @@ function AddModelModal({
           <div className="mmfield" ref={modelFieldRef}>
             <span className="mmlab">
               {t('模型名称')}
-              <em>{t('（接口文档里那个，例如 deepseek-chat）')}</em>
+              <em>{t('（接口文档里那个模型 id）')}</em>
             </span>
             <div
               className="modelpick"
@@ -896,6 +1165,9 @@ interface ModelBridge {
     model?: string
     base_url: string
     api_key: string
+    protocol?: ModelProtocol
+    billing_type?: BillingType
+    provider_preset?: string
     context_window_in?: number
     context_window_max?: number
     context_window_out?: number
@@ -907,9 +1179,9 @@ interface ModelBridge {
   /** 供应商对单个模型给出的资源上限；拿不到返回空对象 */
   limits(input: { provider: string; model: string }): Promise<{ context_window?: number; max_output_tokens?: number }>
   /** 用未保存的 URL/Key 探测可用模型（测试连接） */
-  discover(input: { base_url: string; api_key: string; credential_ref?: string }): Promise<DiscoverResult>
+  discover(input: { base_url: string; api_key: string; protocol?: ModelProtocol; credential_ref?: string }): Promise<DiscoverResult>
   /** 用未保存的 URL/Key 查单个模型的窗口上限（下拉选中/手填模型 id 后） */
-  limitsUnsaved(input: { base_url: string; model: string; api_key: string; credential_ref?: string }): Promise<{ context_window?: number; max_output_tokens?: number }>
+  limitsUnsaved(input: { base_url: string; model: string; api_key: string; protocol?: ModelProtocol; credential_ref?: string }): Promise<{ context_window?: number; max_output_tokens?: number }>
   remove(name: string): Promise<{ removed: boolean }>
   probe(input: { provider: string; model?: string }): Promise<ProbeResult>
   /** 某个凭据引用**有没有值**（只问在不在，不问是什么——I7） */
@@ -924,6 +1196,9 @@ interface CustomModelInfo {
   /** 真正发给服务端的模型 id（如 `deepseek-chat`），与 label 是两件事 */
   readonly model: string
   readonly base_url: string
+  readonly protocol?: ModelProtocol | undefined
+  readonly billing_type?: BillingType | undefined
+  readonly provider_preset?: string | undefined
   readonly api_key_ref: string
   readonly context_window_in?: number | undefined
   readonly context_window_max?: number | undefined
@@ -1078,7 +1353,7 @@ function ModelSection() {
           </button>
         </div>
         <div className="mnote">
-          {t('配置一份 OpenAI 兼容的接口即可。配置存在本地 ')}
+          {t('配置一份 OpenAI / Anthropic 兼容的接口即可。配置存在本地 ')}
           <code className="mono">~/.lcode/settings.json</code>
           {t('，API Key 存在凭据存储里（两者都只在本机，不会上传）。')}
         </div>
@@ -1140,6 +1415,10 @@ function ModelSection() {
           </div>
         )}
       </div>
+      <div className="mnote" style={{ marginTop: 20 }}>
+        {t('代码语义索引（code_search）使用独立的 Embedding 模型；可以复用上面的模型服务商，也可以自定义接口地址、API Key 与模型名。')}
+      </div>
+      <CodeIndexSection />
       {modalOpen && (
         <AddModelModal
           editing={editing}
@@ -1867,6 +2146,568 @@ function WebSearchSection() {
   )
 }
 
+/* ───────── 分区：MCP 服务 ───────── */
+
+interface McpStatusView {
+  readonly name: string
+  readonly command: string
+  readonly enabled: boolean
+  readonly connected: boolean
+  readonly tools: number
+  readonly error?: string
+}
+
+function toMcpStatuses(value: unknown): McpStatusView[] | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const list = Array.isArray(record['status']) ? record['status'] : undefined
+  if (list === undefined) return undefined
+  const statuses: McpStatusView[] = []
+  for (const item of list) {
+    if (typeof item !== 'object' || item === null) continue
+    const entry = item as Record<string, unknown>
+    if (typeof entry['name'] !== 'string') continue
+    statuses.push({
+      name: entry['name'],
+      command: typeof entry['command'] === 'string' ? entry['command'] : '',
+      enabled: entry['enabled'] !== false,
+      connected: entry['connected'] === true,
+      tools: typeof entry['tools'] === 'number' ? entry['tools'] : 0,
+      ...(typeof entry['error'] === 'string' ? { error: entry['error'] } : {}),
+    })
+  }
+  return statuses
+}
+
+function mcpServers(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  const servers = record['servers']
+  return typeof servers === 'object' && servers !== null && !Array.isArray(servers)
+    ? servers as Record<string, unknown>
+    : record
+}
+
+function McpSection() {
+  const [statuses, setStatuses] = useState<readonly McpStatusView[]>([])
+  const [path, setPath] = useState('')
+  const [text, setText] = useState('{\n  "version": 1,\n  "servers": {}\n}')
+  const [busy, setBusy] = useState<'save' | 'reload' | undefined>()
+  const [parseError, setParseError] = useState<string | null>(null)
+
+  const apply = (value: unknown): void => {
+    const record = typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}
+    if (typeof record['path'] === 'string') setPath(record['path'])
+    const next = toMcpStatuses(value)
+    if (next !== undefined) setStatuses(next)
+    const servers = mcpServers(record['servers'])
+    if (servers !== undefined) setText(JSON.stringify({ version: 1, servers }, null, 2))
+  }
+
+  useEffect(() => {
+    void Promise.all([window.lcode.mcp.config(), window.lcode.mcp.status()])
+      .then(([config, status]) => {
+        apply(config)
+        apply(status)
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('读取 MCP 配置失败')))
+  }, [])
+
+  const validate = (input: unknown): Record<string, unknown> | string => {
+    const servers = mcpServers(input)
+    if (servers === undefined) return t('顶层必须是包含 servers 的对象')
+    for (const [name, value] of Object.entries(servers)) {
+      if (typeof value !== 'object' || value === null || Array.isArray(value)) return t('服务「{name}」必须是对象', { name })
+      const command = (value as Record<string, unknown>)['command']
+      if (typeof command !== 'string' || command.trim() === '') return t('服务「{name}」缺少 command', { name })
+    }
+    return servers
+  }
+
+  const save = (): void => {
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(text)
+    } catch (error) {
+      setParseError(error instanceof Error ? error.message : t('JSON 格式错误'))
+      return
+    }
+    const servers = validate(parsed)
+    if (typeof servers === 'string') {
+      setParseError(servers)
+      return
+    }
+    setParseError(null)
+    setBusy('save')
+    void window.lcode.mcp.save({ servers })
+      .then((value) => {
+        apply(value)
+        toast(t('已保存并重新连接'))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('保存 MCP 配置失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  const reload = (): void => {
+    setBusy('reload')
+    void window.lcode.mcp.reload()
+      .then((value) => {
+        apply(value)
+        toast(t('已重新连接'))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('重连 MCP 服务失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  return (
+    <>
+      <h2>{t('MCP 服务')}</h2>
+      <div className="sub">{t('通过 stdio 连接本地 MCP 服务器，工具会以 mcp__服务器__工具 的名字提供给模型。')}</div>
+      <div className="sect">
+        <div className="sh2">
+          {t('连接状态')}
+          <span className="src" style={{ marginLeft: 'auto' }}>
+            {statuses.length === 0 ? t('未配置') : t('{n} 个服务', { n: statuses.length })}
+          </span>
+        </div>
+        {statuses.length === 0 ? (
+          <div className="srow">
+            <div className="sr"><span className="src">{t('还没有配置服务。在下方添加后保存即可连接。')}</span></div>
+          </div>
+        ) : statuses.map((status) => (
+          <div className="srow" key={status.name}>
+            <div className="sl mono" title={status.name}>{status.name}</div>
+            <div className="sr">
+              <div style={{ display: 'flex', gap: 8, alignItems: 'baseline', minWidth: 0 }}>
+                <span
+                  className="src"
+                  style={{
+                    flex: 'none',
+                    color: !status.enabled ? 'var(--text-muted)' : status.connected ? 'var(--accent)' : 'var(--state-error)',
+                  }}
+                >
+                  {!status.enabled ? t('已停用') : status.connected ? t('已连接') : t('连接失败')}
+                </span>
+                <span className="mono src" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={status.command}>
+                  {status.command}
+                </span>
+              </div>
+              <span className="src" style={status.error === undefined ? undefined : { color: 'var(--state-error)', whiteSpace: 'normal' }}>
+                {status.error ?? (status.connected ? t('{n} 个工具', { n: status.tools }) : '')}
+              </span>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="sect" style={{ marginTop: 16 }}>
+        <div className="sh2">
+          {t('配置')}
+          <span className="src mono" style={{ marginLeft: 'auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={path}>
+            {path}
+          </span>
+        </div>
+        <div className="srow">
+          <div className="sr">
+            <div className="field" style={{ maxWidth: 'none' }}>
+              <TextArea
+                value={text}
+                onChange={(value) => {
+                  setText(value)
+                  setParseError(null)
+                }}
+                rows={12}
+                placeholder={'{\n  "version": 1,\n  "servers": {\n    "demo": { "command": "node", "args": ["server.mjs"] }\n  }\n}'}
+              />
+            </div>
+            {parseError === null ? null : (
+              <span className="src" style={{ color: 'var(--state-error)', whiteSpace: 'normal' }}>{parseError}</span>
+            )}
+            <span className="src">{t('每个服务支持 command、args、env 与 enabled；命令行逐项传入，不经过 shell。')}</span>
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn primary" disabled={busy !== undefined} onClick={save}>{t('保存并重连')}</button>
+              <button className="btn" disabled={busy !== undefined} onClick={reload}>{t('重新读取文件')}</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div className="warnrow" style={{ marginTop: 16 }}>
+        <span className="wt">{t('安全')}</span>
+        <span>{t('MCP 服务器是本机进程，不受工作区 OS 沙箱约束；只读预设下不会调用其工具。首次保存后会立即启动这些进程。')}</span>
+      </div>
+    </>
+  )
+}
+
+/* ───────── 模型页内嵌：Embedding 模型与代码索引 ───────── */
+
+interface CodeIndexWorkspaceView {
+  readonly workspace: string
+  readonly model: string
+  readonly dim: number
+  readonly files: number
+  readonly chunks: number
+  readonly updatedAt: number
+}
+
+interface CodeIndexStatusView {
+  readonly configured: boolean
+  readonly provider: string | null
+  readonly model: string | null
+  readonly workspaces: readonly CodeIndexWorkspaceView[]
+  readonly totalFiles: number
+  readonly totalChunks: number
+}
+
+interface CodeIndexProviderView {
+  readonly name: string
+  readonly label: string
+  readonly base_url: string
+  readonly preset: string | null
+}
+
+interface CodeIndexConfigView {
+  readonly provider: string | null
+  readonly model: string | null
+  readonly base_url: string | null
+  readonly has_api_key: boolean
+  readonly providers: readonly CodeIndexProviderView[]
+}
+
+function toCodeIndexStatus(value: unknown): CodeIndexStatusView | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const list = Array.isArray(record['workspaces']) ? record['workspaces'] : []
+  const workspaces: CodeIndexWorkspaceView[] = []
+  for (const item of list) {
+    if (typeof item !== 'object' || item === null) continue
+    const row = item as Record<string, unknown>
+    if (typeof row['workspace'] !== 'string' || typeof row['model'] !== 'string') continue
+    workspaces.push({
+      workspace: row['workspace'],
+      model: row['model'],
+      dim: typeof row['dim'] === 'number' ? row['dim'] : 0,
+      files: typeof row['files'] === 'number' ? row['files'] : 0,
+      chunks: typeof row['chunks'] === 'number' ? row['chunks'] : 0,
+      updatedAt: typeof row['updatedAt'] === 'number' ? row['updatedAt'] : 0,
+    })
+  }
+  return {
+    configured: record['configured'] === true,
+    provider: typeof record['provider'] === 'string' ? record['provider'] : null,
+    model: typeof record['model'] === 'string' ? record['model'] : null,
+    workspaces,
+    totalFiles: typeof record['totalFiles'] === 'number' ? record['totalFiles'] : 0,
+    totalChunks: typeof record['totalChunks'] === 'number' ? record['totalChunks'] : 0,
+  }
+}
+
+function toCodeIndexConfig(value: unknown): CodeIndexConfigView | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  const record = value as Record<string, unknown>
+  const providers: CodeIndexProviderView[] = []
+  if (Array.isArray(record['providers'])) {
+    for (const item of record['providers']) {
+      // 兼容旧主进程只返回字符串的情况
+      if (typeof item === 'string') {
+        providers.push({ name: item, label: item, base_url: '', preset: null })
+        continue
+      }
+      if (typeof item !== 'object' || item === null) continue
+      const row = item as Record<string, unknown>
+      if (typeof row['name'] !== 'string' || row['name'] === '') continue
+      providers.push({
+        name: row['name'],
+        label: typeof row['label'] === 'string' && row['label'].trim() !== '' ? row['label'].trim() : row['name'],
+        base_url: typeof row['base_url'] === 'string' ? row['base_url'] : '',
+        preset: typeof row['preset'] === 'string' && row['preset'] !== '' ? row['preset'] : null,
+      })
+    }
+  }
+  return {
+    provider: typeof record['provider'] === 'string' ? record['provider'] : null,
+    model: typeof record['model'] === 'string' ? record['model'] : null,
+    base_url: typeof record['base_url'] === 'string' ? record['base_url'] : null,
+    has_api_key: record['has_api_key'] === true,
+    providers,
+  }
+}
+
+function codeIndexProviderHint(option: CodeIndexProviderView): string | undefined {
+  const preset = PROVIDER_PRESETS.find((item) => item.id === option.preset)
+  if (preset !== undefined) return preset.label
+  return option.base_url === '' ? undefined : hostOf(option.base_url)
+}
+
+function CodeIndexSection() {
+  const [status, setStatus] = useState<CodeIndexStatusView | null>(null)
+  const [providers, setProviders] = useState<readonly CodeIndexProviderView[]>([])
+  const [provider, setProvider] = useState('')
+  const [model, setModel] = useState('')
+  const [customBase, setCustomBase] = useState('')
+  const [customKey, setCustomKey] = useState('')
+  const [hasApiKey, setHasApiKey] = useState(false)
+  const [busy, setBusy] = useState<'save' | 'rebuild' | 'clear' | undefined>()
+  const [clearing, setClearing] = useState(false)
+
+  const refresh = (): void => {
+    void Promise.all([window.lcode.codeIndex.status(), window.lcode.codeIndex.config()])
+      .then(([statusValue, configValue]) => {
+        const nextStatus = toCodeIndexStatus(statusValue)
+        if (nextStatus !== undefined) setStatus(nextStatus)
+        const nextConfig = toCodeIndexConfig(configValue)
+        if (nextConfig !== undefined) {
+          setProviders(nextConfig.providers)
+          setProvider(nextConfig.provider ?? '')
+          setModel(nextConfig.model ?? '')
+          setCustomBase(nextConfig.base_url ?? '')
+          setHasApiKey(nextConfig.has_api_key)
+          setCustomKey('')
+        }
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('读取代码索引状态失败')))
+  }
+
+  useEffect(refresh, [])
+
+  const save = (): void => {
+    if (model.trim() === '') {
+      toast(t('请填写 embedding 模型名'))
+      return
+    }
+    if (provider === 'custom' && customBase.trim() === '') {
+      toast(t('自定义 Embedding 需要填写接口地址'))
+      return
+    }
+    if (provider === '') {
+      toast(t('请选择服务商或自定义 Embedding'))
+      return
+    }
+    setBusy('save')
+    void window.lcode.codeIndex.save(provider === 'custom'
+      ? { provider: 'custom', model, base_url: customBase, api_key: customKey }
+      : { provider, model })
+      .then(() => {
+        refresh()
+        toast(t('已保存；之后重建索引会使用这个模型'))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('保存代码索引配置失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  const rebuild = (): void => {
+    void window.lcode.chooseFolder(t('选择要建立索引的工作区')).then((path) => {
+      if (path === null || path === '') return
+      setBusy('rebuild')
+      void window.lcode.codeIndex.rebuild({ workspace: path })
+        .then((value) => {
+          const report = value as {
+            files?: number
+            chunks?: number
+            embeddedFiles?: number
+            deletedFiles?: number
+            truncated?: boolean
+          }
+          const skipped = Array.isArray((value as { skipped?: unknown }).skipped)
+            ? ((value as { skipped: unknown[] }).skipped.length)
+            : 0
+          toast(t('索引完成：{files} 个文件 / {chunks} 个片段（本次嵌入 {embedded} 个文件）', {
+            files: report.files ?? 0,
+            chunks: report.chunks ?? 0,
+            embedded: report.embeddedFiles ?? 0,
+          }))
+          if (report.truncated === true) toast(t('文件数超过索引上限，已只索引前 5000 个文件'))
+          if (skipped > 0) toast(t('{n} 个文件被跳过（读取失败或二进制）', { n: skipped }))
+          refresh()
+        })
+        .catch((error: unknown) => toast(error instanceof Error ? error.message : t('建立索引失败')))
+        .finally(() => setBusy(undefined))
+    })
+  }
+
+  const clear = (): void => {
+    setBusy('clear')
+    void window.lcode.codeIndex.clear()
+      .then(() => {
+        setClearing(false)
+        refresh()
+        toast(t('已清除全部代码索引'))
+      })
+      .catch((error: unknown) => toast(error instanceof Error ? error.message : t('清除索引失败')))
+      .finally(() => setBusy(undefined))
+  }
+
+  const selectedProvider = providers.find((item) => item.name === provider)
+  const isCustomProvider = provider === 'custom'
+  const selectedProviderLabel = isCustomProvider
+    ? t('自定义 Embedding')
+    : selectedProvider?.label ?? (provider === '' ? t('跟随默认模型服务商') : provider)
+  const canRebuild = model.trim() !== '' && provider !== '' && (!isCustomProvider || customBase.trim() !== '')
+
+  return (
+    <>
+      <div className="sect" style={{ marginTop: 12 }}>
+        <div className="sh2">
+          {t('索引状态')}
+          <span className="src" style={{ marginLeft: 'auto' }}>
+            {status === null
+              ? t('读取中…')
+              : t('{files} 个文件 · {chunks} 个片段', { files: status.totalFiles, chunks: status.totalChunks })}
+          </span>
+        </div>
+        {status !== null && status.workspaces.length > 0 ? status.workspaces.map((row) => (
+          <div className="srow" key={row.workspace}>
+            <div className="sl mono" title={row.workspace} style={{ width: 220 }}>{row.workspace}</div>
+            <div className="sr">
+              <span className="src mono" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {row.model} · {row.dim} 维 · {row.files} 文件 / {row.chunks} 片段
+              </span>
+              <span className="src">
+                {row.updatedAt > 0 ? t('更新于 {time}', { time: new Date(row.updatedAt).toLocaleString() }) : ''}
+              </span>
+            </div>
+          </div>
+        )) : (
+          <div className="srow">
+            <div className="sr">
+              <span className="src">
+                {status?.configured === true
+                  ? t('还没有建立索引。点击下方「重建索引」选择工作区。')
+                  : t('先配置 embedding 模型，再选择工作区建立索引。')}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="sect" style={{ marginTop: 16 }}>
+        <div className="sh2">{t('Embedding 模型')}</div>
+        <div className="srow">
+          <div className="sl">{t('服务商')}</div>
+          <div className="sr">
+            <div className="field" style={{ maxWidth: 260 }}>
+              <PopMenu
+                block
+                width={260}
+                buttonClass="selectbtn"
+                items={[
+                  ...providers.map((item) => {
+                    const hint = codeIndexProviderHint(item)
+                    return {
+                      id: item.name,
+                      label: item.label,
+                      ...(hint === undefined ? {} : { hint }),
+                      checked: item.name === provider,
+                      group: '模型服务商',
+                      raw: true,
+                    }
+                  }),
+                  {
+                    id: 'custom',
+                    label: t('自定义 Embedding'),
+                    group: '自定义',
+                    checked: isCustomProvider,
+                    raw: true,
+                  },
+                ]}
+                onSelect={(id) => {
+                  setProvider(id)
+                  setCustomKey('')
+                }}
+                trigger={(
+                  <>
+                    <span className="selval">{selectedProviderLabel}</span>
+                    <i className="chev">▾</i>
+                  </>
+                )}
+              />
+            </div>
+            <span className="src">
+              {isCustomProvider
+                ? t('自定义 Embedding 的接口地址与 API Key 单独保存，Key 存在本机凭据存储。')
+                : providers.length > 0
+                  ? t('复用该服务商在「模型」里保存的接口地址与 API Key。')
+                  : t('还没有模型服务商；可以直接选择「自定义 Embedding」。')}
+            </span>
+          </div>
+        </div>
+        {isCustomProvider ? (
+          <>
+            <div className="srow">
+              <div className="sl">{t('接口地址')}</div>
+              <div className="sr">
+                <div className="field" style={{ maxWidth: 420 }}>
+                  <TextInput
+                    value={customBase}
+                    onChange={setCustomBase}
+                    placeholder="https://api.example.com/v1"
+                  />
+                </div>
+                <span className="src">{t('OpenAI 兼容的 embeddings 接口 base URL，例如 https://api.openai.com/v1。')}</span>
+              </div>
+            </div>
+            <div className="srow">
+              <div className="sl">API Key</div>
+              <div className="sr">
+                <div className="field" style={{ maxWidth: 420 }}>
+                  <TextInput
+                    type="password"
+                    value={customKey}
+                    onChange={setCustomKey}
+                    placeholder={hasApiKey ? t('已保存，留空则不修改') : t('输入 API Key（本地服务可留空）')}
+                    autoComplete="off"
+                  />
+                </div>
+                <span className="src">{t('只保存在本机凭据存储，不会写进 settings.json。')}</span>
+              </div>
+            </div>
+          </>
+        ) : null}
+        <div className="srow">
+          <div className="sl">{t('模型名')}</div>
+          <div className="sr">
+            <div className="field" style={{ maxWidth: 320 }}>
+              <TextInput value={model} onChange={setModel} placeholder="text-embedding-v4" />
+            </div>
+            <span className="src">{t('填服务商支持的 embedding 模型名。修改模型后需要重新建立索引。')}</span>
+          </div>
+        </div>
+        <div className="srow">
+          <div className="sl" />
+          <div className="sr">
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+              <button className="btn primary" disabled={busy !== undefined} onClick={save}>{t('保存')}</button>
+              <button className="btn" disabled={busy !== undefined || !canRebuild} onClick={rebuild}>
+                {busy === 'rebuild' ? t('正在建立索引…') : t('重建索引…')}
+              </button>
+              {status !== null && status.workspaces.length > 0 ? (
+                <button className="btn danger" disabled={busy !== undefined} onClick={() => setClearing(true)}>
+                  {t('清除全部索引')}
+                </button>
+              ) : null}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="warnrow" style={{ marginTop: 16 }}>
+        <span className="wt">{t('数据外发')}</span>
+        <span>{t('建立索引会把工作区代码片段发送给所选 embedding 服务；索引只存本机（~/.lcode/code-index.db），不会上传整库。code_search 只检索已建立索引的工作区。')}</span>
+      </div>
+
+      {clearing ? (
+        <ConfirmDialog
+          title={t('清除代码索引')}
+          message={t('会删除本机全部工作区的语义索引（不会修改任何源码）。下次使用 code_search 前需要重新建立索引。')}
+          confirmLabel={t('清除')}
+          danger
+          onCancel={() => setClearing(false)}
+          onConfirm={clear}
+        />
+      ) : null}
+    </>
+  )
+}
+
 /* ───────── 分区：Agent 预设 ───────── */
 
 function AgentPresetSection() {
@@ -2566,6 +3407,7 @@ const SECTIONS: { g?: string; id?: string; label?: string }[] = [
   { id: 'skills', label: '技能' },
   { id: 'plugins', label: '插件' },
   { id: 'webSearch', label: '网页搜索' },
+  { id: 'mcp', label: 'MCP 服务' },
   { g: '权限' },
   { id: 'perm', label: '权限预设' },
   { id: 'trust', label: '工作区信任' },
@@ -2596,6 +3438,8 @@ function SectionBody({ id }: { id: string }) {
       return <PluginSection />
     case 'webSearch':
       return <WebSearchSection />
+    case 'mcp':
+      return <McpSection />
     case 'perm':
       return <PermSection />
     case 'trust':

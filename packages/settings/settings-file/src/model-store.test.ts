@@ -179,6 +179,22 @@ describe('自定义模型：模型 id 与显示名是两件事', () => {
     const [saved] = await store.list()
     expect(saved!.model).toBe(sample.label)
   })
+
+  it('协议、计费类型与供应商预设会持久化；老配置默认 OpenAI', async () => {
+    await store.upsert({
+      ...sample,
+      protocol: 'anthropic',
+      billing_type: 'coding-plan',
+      provider_preset: 'kimi',
+    })
+    const [saved] = await store.list()
+    expect(saved).toMatchObject({ protocol: 'anthropic', billing_type: 'coding-plan', provider_preset: 'kimi' })
+
+    handEditRaw([{ name: 'legacy', base_url: 'https://a.example.com/v1' }])
+    const [legacy] = await store.list()
+    expect(legacy!.protocol).toBe('openai')
+    expect(legacy!.billing_type).toBeUndefined()
+  })
 })
 
 describe('自定义模型：坏数据不炸（settings.json 是用户可以手改的）', () => {

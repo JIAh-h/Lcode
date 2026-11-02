@@ -135,6 +135,13 @@ const SESSION_PLUGINS: readonly SessionPluginDef[] = [
     tools: ['delegate'],
   },
   {
+    id: 'lsp-provider',
+    name: '语言服务',
+    description: '按语言启动本地语言服务器，为 lsp_query 提供定义、引用与诊断。',
+    fullName: '@lcode/lsp-local',
+    resident: true,
+  },
+  {
     id: 'tool-todo',
     name: '任务清单工具',
     description: '让 AI 维护本会话的待办清单；被打断或改方向后可据此恢复剩余工作。',
@@ -218,7 +225,7 @@ const GLOBAL_PLUGINS: Readonly<Record<string, { readonly name: string; readonly 
   },
   'lsp-provider': {
     name: 'LSP 能力',
-    description: '显式配置后才加入组合的语言服务工具。',
+    description: '自动发现本机语言服务器；缺失时 lsp_query 返回安装提示。',
   },
 }
 

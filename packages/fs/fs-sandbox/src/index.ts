@@ -140,13 +140,18 @@ export function createSandboxedFs(options: SandboxedFsOptions): SandboxedFs {
     }
 
     const bootstrap = workerBootstrap(options.workerSource)
+    let wrapError: string | undefined
     const wrapped = await options.sandbox.wrap(
       [process.execPath, '--eval', bootstrap],
       { mode, workspaceRoot: root, allowNetwork: false },
-    ).catch(() => undefined)
+    ).catch((error: unknown) => {
+      // 保留真实原因：Provider 在自检/包装失败时会 throw，之前的空 catch 只剩“包装失败”
+      wrapError = error instanceof Error ? error.message : String(error)
+      return undefined
+    })
     if (wrapped === undefined || !wrapped.enforced) {
       hardFailure = true
-      return unavailable(wrapped?.degradationReason ?? '沙箱包装失败')
+      return unavailable(wrapped?.degradationReason ?? wrapError ?? '沙箱包装失败')
     }
 
     const env = environmentForWorker(root)

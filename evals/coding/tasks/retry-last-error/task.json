@@ -1,0 +1,7 @@
+{
+  "id": "retry-last-error",
+  "title": "修复重试吞错",
+  "prompt": "仓库里 src/retry.mjs 的 retry(task, attempts) 在全部尝试失败后会返回 undefined，而不是抛出最后一次错误。请修复：attempts 是最大尝试次数（正整数），成功立即返回；全部失败抛出最后一次错误；attempts 不是正整数时同步抛出 TypeError。不要改函数签名、不要加延迟或依赖。",
+  "test": { "command": "node", "args": ["verify.mjs"], "timeoutMs": 30000 },
+  "agentTimeoutMs": 180000
+}

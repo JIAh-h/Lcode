@@ -87,11 +87,21 @@ export function createWindowsSandboxBridge(options: WindowsSandboxBridgeOptions)
       if (candidate === undefined) {
         return { enforced: false, wrappedArgv: [...argv], degradationReason: 'Windows 原生沙箱 helper 尚未通过自检。' }
       }
-      const prepared = await invoke(options.subprocess, [
-        candidate, '--prepare', '--workspace', policy.workspaceRoot,
-        '--network', policy.allowNetwork === true ? 'allow' : 'deny',
-        '--mode', policy.mode,
-      ])
+      let prepared: { readonly stdout: string; readonly stderr: string }
+      try {
+        prepared = await invoke(options.subprocess, [
+          candidate, '--prepare', '--workspace', policy.workspaceRoot,
+          '--network', policy.allowNetwork === true ? 'allow' : 'deny',
+          '--mode', policy.mode,
+        ])
+      } catch (error) {
+        // helper 自身起不来（路径/权限/被杀）时也要给出可定位的原因，而不是只报“包装失败”
+        return {
+          enforced: false,
+          wrappedArgv: [...argv],
+          degradationReason: `沙箱 helper 调用失败：${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
       const proof = parseProbe(prepared.stdout)
       const ready = proof === undefined
         ? false

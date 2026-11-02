@@ -21,7 +21,7 @@ export interface CompactionService {
     readonly summary: string
     readonly start?: number | undefined
     readonly end?: number | undefined
-    readonly trigger?: 'manual' | 'threshold' | undefined
+    readonly trigger?: 'manual' | 'threshold' | 'overflow' | undefined
   }): CompactionResult
   /** 撤销一次摘要仍在当前表面上的压缩；原始事件从未删除。 */
   undo(input: {

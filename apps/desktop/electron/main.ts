@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
 import { isAbsolute, join, relative, resolve } from "node:path";
+import { createRequire } from "node:module";
 import { promisify } from "node:util";
 import {
   BUILTIN_AGENT_PRESETS,
@@ -13,7 +14,9 @@ import {
   buildBuiltinPluginCatalog,
   buildUserContent,
   createAgentRuntime,
+  createCodeIndex,
   createDesktopModelFeature,
+  discoverAutoLspServers,
   gcSessionAttachments,
   importSkill,
   mergeGitNumstat,
@@ -25,7 +28,7 @@ import {
   seedBuiltinSkills,
 } from "@lcode/lcode-desktop";
 import type { ParsedGitFile } from "@lcode/lcode-desktop";
-import type { AgentRuntime, DesktopModelFeature } from "@lcode/lcode-desktop";
+import type { AgentRuntime, CodeIndexService, DesktopModelFeature, DesktopServices, LspServerDef, McpServerConfig } from "@lcode/lcode-desktop";
 import { createApprovalService } from "@lcode/approval";
 import { createWebFetcher } from "@lcode/web-fetch";
 import {
@@ -612,6 +615,9 @@ ipcMain.handle(
       label: parsed.label,
       model: parsed.model,
       base_url: parsed.base_url,
+      ...(parsed.protocol === undefined ? {} : { protocol: parsed.protocol }),
+      ...(parsed.billing_type === undefined ? {} : { billing_type: parsed.billing_type }),
+      ...(parsed.provider_preset === undefined ? {} : { provider_preset: parsed.provider_preset }),
       ...(parsed.api_key === "" ? {} : { api_key: parsed.api_key }),
       api_key_ref: refNameFor(provider),
       ...(parsed.context_window_in === undefined ? {} : { context_window_in: parsed.context_window_in }),
@@ -635,6 +641,9 @@ ipcMain.handle(
         label: parsed.label,
         model: parsed.model,
         base_url: parsed.base_url,
+        ...(parsed.protocol === undefined ? {} : { protocol: parsed.protocol }),
+        ...(parsed.billing_type === undefined ? {} : { billing_type: parsed.billing_type }),
+        ...(parsed.provider_preset === undefined ? {} : { provider_preset: parsed.provider_preset }),
         api_key_ref: saved.api_key_ref,
         ...(parsed.context_window_in === undefined ? {} : { context_window_in: parsed.context_window_in }),
         ...(effectiveMax === undefined ? {} : { context_window_max: effectiveMax }),
@@ -688,11 +697,13 @@ ipcMain.handle(
     if (typeof baseUrl !== "string" || baseUrl.trim() === "")
       throw new Error("base_url 必填");
     if (typeof apiKey !== "string") throw new Error("api_key 必须是字符串");
+    const protocol = record["protocol"] === "anthropic" ? "anthropic" : "openai";
     const feature = await models();
     // 未保存的配置只用于探测：不落 settings、不落凭据
     return await feature.discover({
       base_url: baseUrl,
       api_key: apiKey,
+      protocol,
       ...(typeof credentialRef === "string" && credentialRef !== "" ? { credential_ref: credentialRef } : {}),
     });
   },
@@ -709,11 +720,13 @@ ipcMain.handle(
     if (typeof baseUrl !== "string" || baseUrl.trim() === "") return {};
     if (typeof model !== "string" || model === "") return {};
     if (typeof apiKey !== "string") return {};
+    const protocol = record["protocol"] === "anthropic" ? "anthropic" : "openai";
     const feature = await models();
     return await feature.limitsUnsaved({
       base_url: baseUrl,
       model,
       api_key: apiKey,
+      protocol,
       ...(typeof credentialRef === "string" && credentialRef !== "" ? { credential_ref: credentialRef } : {}),
     });
   },
@@ -786,6 +799,114 @@ function refNameFor(provider: string): string {
  */
 let runtime: AgentRuntime | null = null;
 let runtimeInit: Promise<AgentRuntime> | null = null;
+let codeIndex: CodeIndexService | null = null;
+
+/** 自定义 Embedding 的 API Key 单独存凭据存储，不复用聊天模型 Key。 */
+const CODE_INDEX_EMBEDDING_KEY_REF = "CODE_INDEX_EMBEDDING_API_KEY";
+
+/**
+ * 代码索引的 embedding 配置：
+ * - 默认复用「设置 → 模型」里已保存的服务商（base_url + 凭据）；
+ * - 也可以选「自定义 Embedding」，直接给接口地址、Key 与模型名。
+ */
+async function resolveCodeIndexEmbedding(
+  services: DesktopServices,
+): Promise<{ readonly provider: string; readonly config: { readonly baseUrl: string; readonly model: string; readonly apiKey?: string } } | undefined> {
+  const model = services.readSetting("codeIndex.model");
+  if (typeof model !== "string" || model.trim() === "") return undefined;
+  const explicit = services.readSetting("codeIndex.provider");
+  const providerName = typeof explicit === "string" ? explicit.trim() : "";
+  const baseSetting = services.readSetting("codeIndex.base_url");
+  const customBase = typeof baseSetting === "string" ? baseSetting.trim() : "";
+  if (providerName === "custom" || (providerName === "" && customBase !== "")) {
+    if (customBase === "") return undefined;
+    const credential = await services.credentials.resolve(CODE_INDEX_EMBEDDING_KEY_REF);
+    return {
+      provider: "custom",
+      config: {
+        baseUrl: customBase,
+        model: model.trim(),
+        ...(credential === undefined ? {} : { apiKey: credential.value }),
+      },
+    };
+  }
+  const fallback = services.readSetting("model.default_provider");
+  const name = providerName !== ""
+    ? providerName
+    : typeof fallback === "string"
+      ? fallback
+      : "";
+  const providers = services.readSetting("model.providers");
+  const list = Array.isArray(providers) ? providers : [];
+  const provider = list.find(
+    (item): item is Record<string, unknown> =>
+      typeof item === "object" && item !== null && (item as { name?: unknown }).name === name,
+  );
+  if (provider === undefined) return undefined;
+  const baseUrl = provider["base_url"];
+  if (typeof baseUrl !== "string" || baseUrl.trim() === "") return undefined;
+  const ref = typeof provider["api_key_ref"] === "string" ? provider["api_key_ref"] : "";
+  const credential = ref === "" ? undefined : await services.credentials.resolve(ref);
+  return {
+    provider: name,
+    config: {
+      baseUrl,
+      model: model.trim(),
+      ...(credential === undefined ? {} : { apiKey: credential.value }),
+    },
+  };
+}
+
+/** 设置页读的形状：模型服务商以显示名返回，内部 id 只用于保存。 */
+async function codeIndexConfigView(services: DesktopServices): Promise<{
+  readonly provider: string | null;
+  readonly model: string | null;
+  readonly base_url: string | null;
+  readonly has_api_key: boolean;
+  readonly providers: readonly {
+    readonly name: string;
+    readonly label: string;
+    readonly base_url: string;
+    readonly preset: string | null;
+  }[];
+}> {
+  const providersRaw = services.readSetting("model.providers");
+  const providers = Array.isArray(providersRaw)
+    ? providersRaw
+        .filter((item): item is Record<string, unknown> => typeof item === "object" && item !== null)
+        .flatMap((item) => {
+          const name = item["name"];
+          if (typeof name !== "string" || name === "") return [];
+          return [{
+            name,
+            label: typeof item["label"] === "string" && item["label"].trim() !== "" ? item["label"].trim() : name,
+            base_url: typeof item["base_url"] === "string" ? item["base_url"] : "",
+            preset: typeof item["provider_preset"] === "string" && item["provider_preset"] !== "" ? item["provider_preset"] : null,
+          }];
+        })
+    : [];
+  const provider = services.readSetting("codeIndex.provider");
+  const model = services.readSetting("codeIndex.model");
+  const base = services.readSetting("codeIndex.base_url");
+  const credential = await services.credentials.resolve(CODE_INDEX_EMBEDDING_KEY_REF);
+  return {
+    provider: typeof provider === "string" && provider !== "" ? provider : null,
+    model: typeof model === "string" && model !== "" ? model : null,
+    base_url: typeof base === "string" && base !== "" ? base : null,
+    has_api_key: credential !== undefined,
+    providers,
+  };
+}
+
+async function codeIndexService(): Promise<CodeIndexService> {
+  if (codeIndex !== null) return codeIndex;
+  const feature = await models();
+  codeIndex = createCodeIndex({
+    home: feature.services.home,
+    resolveEmbedding: () => resolveCodeIndexEmbedding(feature.services),
+  });
+  return codeIndex;
+}
 /** 已订阅的会话 → 撤销器（避免同一会话被重复订阅） */
 const sessionWatch = new Map<string, () => void>();
 /** 已订阅"轮失败"的会话 → 撤销器 */
@@ -871,6 +992,100 @@ function readFsWorkerSource(): string | undefined {
   return undefined;
 }
 
+/**
+ * 语言服务器：TS/JS 用随包的 typescript-language-server；其余语言由 bundle 里的
+ * `discoverAutoLspServers` 扫描 PATH，找到才注册。缺失时不阻塞，`lsp_query` 会返回
+ * 带安装命令的错误。`~/.lcode/lsp.json` 仍可覆盖或追加语言。
+ */
+function readLspServers(home: string): Readonly<Record<string, LspServerDef>> {
+  const servers: Record<string, LspServerDef> = {};
+  try {
+    const requireFromApp = createRequire(join(app.getAppPath(), "package.json"));
+    const cli = requireFromApp.resolve("typescript-language-server/lib/cli.mjs");
+    const typescript: LspServerDef = {
+      command: process.execPath,
+      args: [cli, "--stdio"],
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    };
+    servers.typescript = typescript;
+    servers.javascript = typescript;
+  } catch {
+    // 未随包安装时留空：查询对应语言会得到安装/配置提示
+  }
+  Object.assign(servers, discoverAutoLspServers());
+  try {
+    const parsed = JSON.parse(readFileSync(join(home, "lsp.json"), "utf8")) as { servers?: unknown };
+    const custom = parsed.servers;
+    if (typeof custom === "object" && custom !== null && !Array.isArray(custom)) {
+      for (const [language, value] of Object.entries(custom as Record<string, unknown>)) {
+        if (language.trim() === "" || typeof value !== "object" || value === null) continue;
+        const record = value as Record<string, unknown>;
+        const command = record["command"];
+        if (typeof command !== "string" || command === "") continue;
+        const args = Array.isArray(record["args"])
+          ? record["args"].filter((item): item is string => typeof item === "string")
+          : undefined;
+        const env = typeof record["env"] === "object" && record["env"] !== null && !Array.isArray(record["env"])
+          ? Object.fromEntries(
+              Object.entries(record["env"] as Record<string, unknown>)
+                .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+            )
+          : undefined;
+        servers[language.trim()] = {
+          command,
+          ...(args === undefined ? {} : { args }),
+          ...(env === undefined || Object.keys(env).length === 0 ? {} : { env }),
+        };
+      }
+    }
+  } catch {
+    // 文件缺失或损坏：使用内置默认
+  }
+  return servers;
+}
+
+function mcpConfigPath(home: string): string {
+  return join(home, "mcp.json");
+}
+
+/** 解析 mcp.json / 保存入参里的 servers 映射；结构不对的条目直接跳过。 */
+function parseMcpServers(input: unknown): Record<string, McpServerConfig> {
+  const root = typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+  const source = root["servers"] ?? input;
+  const servers: Record<string, McpServerConfig> = {};
+  if (typeof source !== "object" || source === null || Array.isArray(source)) return servers;
+  for (const [name, value] of Object.entries(source as Record<string, unknown>)) {
+    if (name.trim() === "" || typeof value !== "object" || value === null || Array.isArray(value)) continue;
+    const record = value as Record<string, unknown>;
+    const command = record["command"];
+    if (typeof command !== "string" || command === "") continue;
+    const args = Array.isArray(record["args"])
+      ? record["args"].filter((item): item is string => typeof item === "string")
+      : undefined;
+    const env = typeof record["env"] === "object" && record["env"] !== null && !Array.isArray(record["env"])
+      ? Object.fromEntries(
+          Object.entries(record["env"] as Record<string, unknown>)
+            .filter((entry): entry is [string, string] => typeof entry[1] === "string"),
+        )
+      : undefined;
+    servers[name.trim()] = {
+      command,
+      ...(args === undefined ? {} : { args }),
+      ...(env === undefined || Object.keys(env).length === 0 ? {} : { env }),
+      ...(record["enabled"] === false ? { enabled: false } : {}),
+    };
+  }
+  return servers;
+}
+
+function readMcpServers(home: string): Record<string, McpServerConfig> {
+  try {
+    return parseMcpServers(JSON.parse(readFileSync(mcpConfigPath(home), "utf8")));
+  } catch {
+    return {};
+  }
+}
+
 async function agentRuntime(): Promise<AgentRuntime> {
   if (runtime !== null) return runtime;
   if (runtimeInit === null) {
@@ -899,6 +1114,9 @@ async function agentRuntime(): Promise<AgentRuntime> {
         approval: createApprovalService({ channel: approvalChannel }),
         builtinSkillsDir: join(__dirname, "skills"),
         fsWorkerSource: readFsWorkerSource(),
+        lspServers: readLspServers(feature.services.home),
+        mcpServers: readMcpServers(feature.services.home),
+        codeSearch: async (input) => (await codeIndexService()).search(input),
         web: {
           fetch: createWebFetcher(undefined, { resolveProxy: resolveSystemProxy }).fetch,
           search: async (input) => {
@@ -1069,6 +1287,99 @@ ipcMain.handle("lcode:webSearch.test", async (_e: IpcMainInvokeEvent, input: unk
   });
   const results = await backend.search({ query: "Lcode AI coding tool", maxResults: 1 });
   return { ok: true, count: results.length };
+});
+
+// ─────────────── MCP 服务（本地 stdio；保存后运行时重连） ───────────────
+
+ipcMain.handle("lcode:mcp.status", async () => {
+  const rt = await agentRuntime();
+  return { status: rt.ctx.get("mcp").status() };
+});
+
+ipcMain.handle("lcode:mcp.config", async () => {
+  const rt = await agentRuntime();
+  return { servers: readMcpServers(rt.services.home), path: mcpConfigPath(rt.services.home) };
+});
+
+ipcMain.handle("lcode:mcp.save", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const servers = parseMcpServers(record["servers"] === undefined ? input : { servers: record["servers"] });
+  const rt = await agentRuntime();
+  const path = mcpConfigPath(rt.services.home);
+  writeFileSync(path, JSON.stringify({ version: 1, servers }, null, 2), "utf8");
+  await rt.ctx.get("mcp").reload(servers);
+  return { status: rt.ctx.get("mcp").status(), servers, path };
+});
+
+ipcMain.handle("lcode:mcp.reload", async () => {
+  const rt = await agentRuntime();
+  const servers = readMcpServers(rt.services.home);
+  await rt.ctx.get("mcp").reload(servers);
+  return { status: rt.ctx.get("mcp").status(), servers };
+});
+
+// ─────────────── 代码语义索引（code_search） ───────────────
+
+ipcMain.handle("lcode:codeIndex.status", async () => (await codeIndexService()).status());
+
+ipcMain.handle("lcode:codeIndex.config", async () => {
+  const rt = await agentRuntime();
+  return await codeIndexConfigView(rt.services);
+});
+
+ipcMain.handle("lcode:codeIndex.save", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const provider = typeof record["provider"] === "string" ? record["provider"].trim() : "";
+  const model = typeof record["model"] === "string" ? record["model"].trim() : "";
+  if (model === "") throw new Error("embedding 模型名必填");
+  if (model.length > 200) throw new Error("embedding 模型名过长");
+  const rt = await agentRuntime();
+  if (provider === "custom") {
+    const baseUrl = typeof record["base_url"] === "string" ? record["base_url"].trim() : "";
+    if (baseUrl === "") throw new Error("自定义 Embedding 需要填写接口地址");
+    if (!/^https?:\/\//i.test(baseUrl)) throw new Error("接口地址必须以 http:// 或 https:// 开头");
+    await rt.services.settings.setByKey("codeIndex.provider", "custom");
+    await rt.services.settings.setByKey("codeIndex.base_url", baseUrl);
+    await rt.services.settings.setByKey("codeIndex.model", model);
+    const apiKey = typeof record["api_key"] === "string" ? record["api_key"].trim() : "";
+    if (apiKey !== "") await rt.services.credentials.write(CODE_INDEX_EMBEDDING_KEY_REF, apiKey);
+  } else {
+    if (provider === "") throw new Error("请选择服务商");
+    const providersRaw = rt.services.readSetting("model.providers");
+    const exists = Array.isArray(providersRaw) && providersRaw.some(
+      (item) => typeof item === "object" && item !== null && (item as { name?: unknown }).name === provider,
+    );
+    if (!exists) throw new Error("所选服务商已不存在，请重新选择");
+    await rt.services.settings.setByKey("codeIndex.provider", provider);
+    await rt.services.settings.setByKey("codeIndex.base_url", "");
+    await rt.services.settings.setByKey("codeIndex.model", model);
+  }
+  return await codeIndexConfigView(rt.services);
+});
+
+ipcMain.handle("lcode:codeIndex.rebuild", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const workspace = record["workspace"];
+  if (typeof workspace !== "string" || workspace === "") throw new Error("workspace 必填");
+  const root = resolve(workspace);
+  let stat: Stats;
+  try {
+    stat = statSync(root);
+  } catch {
+    throw new Error("工作区目录不存在");
+  }
+  if (!stat.isDirectory()) throw new Error("工作区不是目录");
+  return (await codeIndexService()).rebuild(root);
+});
+
+ipcMain.handle("lcode:codeIndex.clear", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const workspace = record["workspace"];
+  if (workspace !== undefined && typeof workspace !== "string") throw new Error("workspace 必须是字符串");
+  const cleared = (await codeIndexService()).clear(
+    workspace === undefined || workspace === "" ? undefined : resolve(workspace),
+  );
+  return { cleared };
 });
 
 // ─────────────── 权限预设（P4-05：主进程持状态，renderer 只显示） ───────────────
@@ -2720,6 +3031,9 @@ interface SaveInput {
   readonly model: string;
   readonly base_url: string;
   readonly api_key: string;
+  readonly protocol?: "openai" | "anthropic";
+  readonly billing_type?: "token-plan" | "coding-plan" | "pay-as-you-go";
+  readonly provider_preset?: string;
   readonly context_window_in?: number;
   readonly context_window_max?: number;
   readonly context_window_out?: number;
@@ -2746,11 +3060,17 @@ function parseSaveInput(input: unknown): SaveInput {
   const windowIn = parsePositiveInteger(record["context_window_in"]);
   const windowMax = parsePositiveInteger(record["context_window_max"]);
   const windowOut = parsePositiveInteger(record["context_window_out"]);
+  const protocol = record["protocol"] === "anthropic" ? "anthropic" : "openai";
+  const billing = record["billing_type"];
+  const providerPreset = record["provider_preset"];
   return {
     label: label.trim(),
     model: trimmedModel === "" ? label.trim() : trimmedModel,
     base_url: baseUrl.trim(),
     api_key: apiKey,
+    protocol,
+    ...(billing === "token-plan" || billing === "coding-plan" || billing === "pay-as-you-go" ? { billing_type: billing } : {}),
+    ...(typeof providerPreset === "string" && providerPreset.trim() !== "" ? { provider_preset: providerPreset.trim() } : {}),
     ...(windowIn === undefined ? {} : { context_window_in: windowIn }),
     ...(windowMax === undefined ? {} : { context_window_max: windowMax }),
     ...(windowOut === undefined ? {} : { context_window_out: windowOut }),

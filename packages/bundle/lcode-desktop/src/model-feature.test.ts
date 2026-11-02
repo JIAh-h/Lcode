@@ -79,6 +79,21 @@ describe('装配：保存 → 立即生效 → 重启仍在', () => {
     f.dispose()
   })
 
+  it('Anthropic 协议保存后注册 Anthropic 适配器，并保留协议/计费/预设元数据', async () => {
+    const { feature: f } = await feature()
+    await f.saveCustom({
+      ...CUSTOM,
+      protocol: 'anthropic',
+      billing_type: 'coding-plan',
+      provider_preset: 'kimi',
+      api_key: 'sk-secret',
+    })
+    expect(f.ctx.get('llm').get('custom-gw')?.providerInfo().id).toBe('custom-gw')
+    const [saved] = await f.listCustom()
+    expect(saved).toMatchObject({ protocol: 'anthropic', billing_type: 'coding-plan', provider_preset: 'kimi' })
+    f.dispose()
+  })
+
   it('**重启后仍在**：新建实例会从 settings 把供应商同步进 ctx.llm', async () => {
     const first = await feature()
     await first.feature.saveCustom({ ...CUSTOM, api_key: 'sk-secret' })

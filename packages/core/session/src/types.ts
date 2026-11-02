@@ -387,7 +387,7 @@ export interface SessionEventMap {
     readonly sources: readonly ('user' | 'workspace')[]
     readonly config: JsonValue
   }
-  'compaction/start': { readonly compactionId: string; readonly trigger: 'manual' | 'threshold' }
+  'compaction/start': { readonly compactionId: string; readonly trigger: 'manual' | 'threshold' | 'overflow' }
   'compaction/summary': {
     readonly compactionId: string
     readonly summary: string

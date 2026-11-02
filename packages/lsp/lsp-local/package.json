@@ -1,0 +1,21 @@
+{
+  "name": "@lcode/lsp-local",
+  "version": "0.1.0",
+  "description": "本地语言服务：按语言启动 LSP server，执行 definition/references/diagnostics 查询",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "dependencies": {
+    "@lcode/lsp": "workspace:*",
+    "@lcode/lsp-stdio": "workspace:*",
+    "@lcode/subprocess": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json --noEmit"
+  }
+}

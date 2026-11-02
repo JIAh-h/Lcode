@@ -1080,6 +1080,6 @@ export const EN: Readonly<Record<string, string>> = {
   '显式配置后才加入组合的网页抓取与搜索工具。':
     'Web fetch/search tools added only when explicitly configured.',
   'LSP 能力': 'LSP capability',
-  '显式配置后才加入组合的语言服务工具。':
-    'Language-service tools added only when explicitly configured.',
+  '自动发现本机语言服务器；缺失时 lsp_query 返回安装提示。':
+    'Discovers local language servers on PATH; lsp_query reports install hints when missing.',
 }

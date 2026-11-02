@@ -13,6 +13,8 @@ export interface LspStdioClientOptions {
   /** 语言服务器的 argv，不接受 shell 字符串。 */
   readonly argv: readonly string[]
   readonly cwd: string
+  /** 追加/覆盖的环境变量（例如用 Electron 作为 Node 启动打包的 server）。 */
+  readonly env?: Readonly<Record<string, string>> | undefined
   /** 唯一的进程入口；实现包不直接调用 `child_process`。 */
   readonly subprocess: SubprocessService
   /** 由运行时注入；用于将 LSP 进程放进与 shell 相同的沙箱边界。 */
@@ -26,6 +28,8 @@ export interface LspStdioClient {
   readonly state: 'running' | 'closed'
   request<TResult = unknown>(method: string, params?: unknown, signal?: AbortSignal): Promise<TResult>
   notify(method: string, params?: unknown): void
+  /** 订阅服务器推送（如 `textDocument/publishDiagnostics`），返回取消函数 */
+  onNotification(listener: (method: string, params: unknown) => void): () => void
   close(): Promise<void>
 }
 
@@ -38,6 +42,8 @@ interface PendingRequest {
 interface JsonRpcResponse {
   readonly jsonrpc?: unknown
   readonly id?: unknown
+  readonly method?: unknown
+  readonly params?: unknown
   readonly result?: unknown
   readonly error?: { readonly code?: unknown; readonly message?: unknown } | undefined
 }
@@ -60,7 +66,18 @@ export async function createLspStdioClient(options: LspStdioClientOptions): Prom
     : await options.wrap(options.argv, policy)
   if (wrapped.wrappedArgv.length === 0) throw notReady('LSP 沙箱没有返回可执行命令。')
 
-  const child = await options.subprocess.spawn({ argv: wrapped.wrappedArgv, cwd: options.cwd })
+  const child = await options.subprocess.spawn({
+    argv: wrapped.wrappedArgv,
+    cwd: options.cwd,
+    ...(options.env === undefined
+      ? {}
+      : {
+          env: Object.fromEntries(
+            Object.entries({ ...process.env, ...options.env })
+              .filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
+          ),
+        }),
+  })
   if (child.writeStdin === undefined) {
     await child.killTree()
     throw notReady('当前子进程 Provider 不支持受控 stdin，不能启动 LSP。')
@@ -74,6 +91,7 @@ function bindClient(child: SpawnedProcess, enforced: boolean): LspStdioClient {
   let nextId = 1
   let state: 'running' | 'closed' = 'running'
   let buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0)
+  const notificationListeners = new Set<(method: string, params: unknown) => void>()
 
   const close = async (): Promise<void> => {
     if (state === 'closed') return
@@ -92,7 +110,18 @@ function bindClient(child: SpawnedProcess, enforced: boolean): LspStdioClient {
   child.stdout.on('data', (chunk: Buffer | Uint8Array | string) => {
     try {
       buffer = Buffer.concat([buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)])
-      buffer = consumeFrames(buffer, (message) => settleResponse(message, pending))
+      buffer = consumeFrames(buffer, (message) => {
+        if (typeof message.method === 'string') {
+          // 服务器 → 客户端的请求：用最小可用值应答，避免服务器在 initialize 后卡住
+          if (message.id !== undefined) {
+            const result = message.method === 'workspace/configuration' ? [] : null
+            send({ jsonrpc: '2.0', id: message.id, result })
+          }
+          for (const listener of notificationListeners) listener(message.method, message.params)
+          return
+        }
+        settleResponse(message, pending)
+      })
     } catch (cause) {
       fail(new Error(`LSP stdio 帧无效：${cause instanceof Error ? cause.message : String(cause)}`))
     }
@@ -142,6 +171,10 @@ function bindClient(child: SpawnedProcess, enforced: boolean): LspStdioClient {
     notify(method: string, params?: unknown): void {
       if (method.trim() === '') throw invalidArgs('LSP method 不能为空。')
       send({ jsonrpc: '2.0', method, ...(params === undefined ? {} : { params }) })
+    },
+    onNotification(listener) {
+      notificationListeners.add(listener)
+      return () => { notificationListeners.delete(listener) }
     },
     close,
   }

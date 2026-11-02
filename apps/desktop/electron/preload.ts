@@ -216,6 +216,21 @@ const api = {
     remove: (): Promise<unknown> => ipcRenderer.invoke('lcode:webSearch.remove'),
     test: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:webSearch.test', input),
   },
+  /** MCP 客户端：~/.lcode/mcp.json 配置、连接状态与重连 */
+  mcp: {
+    status: (): Promise<unknown> => ipcRenderer.invoke('lcode:mcp.status'),
+    config: (): Promise<unknown> => ipcRenderer.invoke('lcode:mcp.config'),
+    save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:mcp.save', input),
+    reload: (): Promise<unknown> => ipcRenderer.invoke('lcode:mcp.reload'),
+  },
+  /** 仓库语义索引：embedding 配置、索引状态与重建 */
+  codeIndex: {
+    status: (): Promise<unknown> => ipcRenderer.invoke('lcode:codeIndex.status'),
+    config: (): Promise<unknown> => ipcRenderer.invoke('lcode:codeIndex.config'),
+    save: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:codeIndex.save', input),
+    rebuild: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:codeIndex.rebuild', input),
+    clear: (input?: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:codeIndex.clear', input),
+  },
   plugins: {
     list: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.list'),
     inspect: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.inspect'),
