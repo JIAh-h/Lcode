@@ -11,11 +11,33 @@ describe('model-router', () => {
       ],
     })
     const result = router.route({
-      agentId: 'a1', sessionId: 's1', turn: 2,
+      agentId: 'a1', sessionId: 's1', turn: 2, role: 'normal',
       selection: { provider: 'primary', model: 'primary-v1', params: { temperature: 0.2 } },
     })
     expect(result).toEqual({ provider: 'fast', model: 'fast-v1', params: { temperature: 0.2 } })
     expect(router.rules()).toHaveLength(2)
+  })
+
+  it('按会话角色匹配：Router 会话走轻模型（docs/26 §3.2）', () => {
+    const router = createModelRouter({
+      rules: [
+        { id: 'router-light', match: { role: 'router' }, target: { provider: 'cheap', model: 'cheap-v1' } },
+      ],
+    })
+    // Router 被改写成轻模型
+    expect(
+      router.route({
+        agentId: 'a1', sessionId: 's-router', turn: 1, role: 'router',
+        selection: { provider: 'strong', model: 'strong-v1' },
+      }),
+    ).toEqual({ provider: 'cheap', model: 'cheap-v1' })
+    // 普通会话不受影响
+    expect(
+      router.route({
+        agentId: 'a2', sessionId: 's-normal', turn: 1, role: 'normal',
+        selection: { provider: 'strong', model: 'strong-v1' },
+      }),
+    ).toEqual({ provider: 'strong', model: 'strong-v1' })
   })
 
   it('注销后不再路由后续回合，且不保留可变输入引用', async () => {
@@ -24,11 +46,11 @@ describe('model-router', () => {
       ctx,
       routing: createModelRouter({ rules: [{ id: 'route', target: { provider: 'routed', model: 'v2', params: { maxTokens: 42 } } }] }),
     })
-    const args = { agentId: 'a1', sessionId: 's1', turn: 1, selection: { provider: 'base', model: 'v1' } }
+    const args = { agentId: 'a1', sessionId: 's1', turn: 1, role: 'normal' as const, selection: { provider: 'base', model: 'v1' } }
     const routed = await ctx.waterfall('agent/model-selection', args, undefined, async () => args.selection)
     expect(routed).toEqual({ provider: 'routed', model: 'v2', params: { maxTokens: 42 } })
     dispose()
-    const next = { agentId: 'a1', sessionId: 's1', turn: 2, selection: { provider: 'base', model: 'v1' } }
+    const next = { agentId: 'a1', sessionId: 's1', turn: 2, role: 'normal' as const, selection: { provider: 'base', model: 'v1' } }
     await expect(ctx.waterfall('agent/model-selection', next, undefined, async () => next.selection)).resolves.toEqual({ provider: 'base', model: 'v1' })
   })
 })

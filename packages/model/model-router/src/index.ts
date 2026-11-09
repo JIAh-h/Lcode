@@ -1,12 +1,20 @@
 import type {} from '@lcode/agent-loop'
 import type { ModelSelection } from '@lcode/agent-default-model'
 import type { Context } from '@lcode/context'
+import type { SessionRole } from '@lcode/session'
 import type { Disposer } from '@lcode/util'
 
 export interface ModelRouteRule {
   readonly id: string
   readonly enabled?: boolean | undefined
   readonly match?: {
+    /**
+     * 按**会话角色**匹配（docs/26 §3.2）。
+     *
+     * 这是给 Router 配轻模型的关键：Router 会话是动态创建的，没法用 `sessionId`
+     * 预先写死规则；而"所有 Router 会话都用某个便宜模型"正是要表达的策略。
+     */
+    readonly role?: SessionRole | undefined
     readonly sessionId?: string | undefined
     readonly provider?: string | undefined
     readonly model?: string | undefined
@@ -18,6 +26,7 @@ export interface ModelRoutingInput {
   readonly agentId: string
   readonly sessionId: string
   readonly turn: number
+  readonly role: SessionRole
   selection: ModelSelection
 }
 
@@ -76,7 +85,8 @@ export function registerModelRouter(input: { readonly ctx: Context; readonly rou
 function matches(rule: ModelRouteRule, input: ModelRoutingInput): boolean {
   if (rule.enabled === false) return false
   const match = rule.match
-  return (match?.sessionId === undefined || match.sessionId === input.sessionId)
+  return (match?.role === undefined || match.role === input.role)
+    && (match?.sessionId === undefined || match.sessionId === input.sessionId)
     && (match?.provider === undefined || match.provider === input.selection.provider)
     && (match?.model === undefined || match.model === input.selection.model)
 }

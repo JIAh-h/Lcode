@@ -669,9 +669,12 @@ describe('A. 装配的接线正确性', () => {
 
   it('工具已接：注册表含计划提交工具，但正常请求不暴露它', async () => {
     const rt = await makeRuntime([textScript])
-    // 五个文件工具 + shell + terminal + 子代理 + 代码模式 + 两个计划工具 + 待办清单
+    // 五个文件工具 + shell + terminal + 子代理 + 跨会话派发 + 代码模式 + 两个计划工具 + 待办清单
     expect(rt.ctx.get('tools').schemas().map((s) => s.name).sort()).toEqual([
       'delegate',
+      'delegate_async',
+      'delegate_wait',
+      'dispatch_worker',
       'edit',
       'glob',
       'grep',
@@ -719,6 +722,103 @@ describe('A. 装配的接线正确性', () => {
     const header = childEvents.find((event) => event.type === 'request/header')
     expect(header).toMatchObject({ data: { header: { tools: [{ name: 'read' }, { name: 'glob' }, { name: 'grep' }] } } })
     expect(rt.ctx.get('agents').list().some((agent) => agent.sessionId === delegated.childSessionId)).toBe(false)
+  })
+
+  it('P10-01：异步派发立刻返回回执，父会话不等子代理跑完', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id: parentSessionId } = await rt.sessions.create({ cwd: home, title: '父任务' })
+
+    const outcome = await rt.subagents.start({ parentSessionId, task: '调查入口文件。' })
+    expect(outcome.kind).toBe('started')
+    if (outcome.kind !== 'started') throw new Error('派发被拒')
+    // 回执先于结果：此刻还没结算，但派发事实已经落盘
+    expect(rt.sessions.sessionServiceFor(parentSessionId).events().some((event) => event.type === 'subagent/delegated')).toBe(true)
+
+    const settled = await rt.subagents.wait(outcome.receipt.delegationId)
+    expect(settled).toMatchObject({ outcome: 'completed', depth: 1, result: '改完了，测试也过了。' })
+    // 结算后重复取用仍返回同一结果（wait 可重复）
+    expect(await rt.subagents.wait(outcome.receipt.delegationId)).toMatchObject({ outcome: 'completed' })
+  })
+
+  it('P10-02：结构化产物从子会话日志投影，不只是末条文本', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id: parentSessionId } = await rt.sessions.create({ cwd: home, title: '父任务' })
+
+    const delegated = await rt.subagents.run({ parentSessionId, task: '调查入口文件。' })
+    // 本轮子代理是纯文本，没有工具调用，但字段必须存在且形状稳定
+    expect(delegated.artifacts).toMatchObject({ changedPaths: [], toolCalls: 0, failedToolCalls: 0 })
+    expect(delegated.artifacts?.events).toBeGreaterThan(0)
+  })
+
+  it('P10-03：未知派发 id 的 wait 返回 undefined，status 为空', async () => {
+    const rt = await makeRuntime([textScript])
+    expect(await rt.subagents.wait('no-such-delegation')).toBeUndefined()
+    expect(rt.subagents.status('no-such-delegation')).toBeUndefined()
+  })
+
+  it('P10-04：深度超限时拒绝，且不创建子会话', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id: parentSessionId } = await rt.sessions.create({ cwd: home, title: '父任务' })
+    const before = rt.sessions.list ? (await rt.sessions.list()).items.length : 0
+
+    const outcome = await rt.subagents.start({ parentSessionId, task: '再往下派一层。', depth: 2 })
+    expect(outcome.kind).toBe('rejected')
+    if (outcome.kind !== 'rejected') throw new Error('应当被拒')
+    expect(outcome.result).toMatchObject({ outcome: 'depth-denied' })
+    expect(outcome.result.childSessionId ?? undefined).toBeUndefined()
+    // 拒绝不产生新会话，也不留在 pending 里
+    const after = rt.sessions.list ? (await rt.sessions.list()).items.length : 0
+    expect(after).toBe(before)
+    expect(rt.subagents.pending()).toEqual([])
+  })
+
+  it('P10-05：子代理在跑时父会话仍可创建并推进别的工作（不阻塞）', async () => {
+    const rt = await makeRuntime([textScript, textScript])
+    const { session_id: parentSessionId } = await rt.sessions.create({ cwd: home, title: '父任务' })
+
+    const outcome = await rt.subagents.start({ parentSessionId, task: '调查入口文件。' })
+    expect(outcome.kind).toBe('started')
+    if (outcome.kind !== 'started') throw new Error('派发被拒')
+    // 派发尚未结算时，父会话可以继续做与子代理无关的事
+    expect(rt.subagents.status(outcome.receipt.delegationId)?.state).toBeDefined()
+
+    const other = await rt.sessions.create({ cwd: home, title: '并行任务' })
+    const { agent_id } = await rt.agents.create({ session_id: other.session_id })
+    await sendAndWait(rt, agent_id, '另一件不相干的事。')
+    expect(rt.sessions.sessionServiceFor(other.session_id).events().some((event) => event.type === 'turn/end')).toBe(true)
+
+    // 子代理此时也应已结算
+    expect(await rt.subagents.wait(outcome.receipt.delegationId)).toMatchObject({ outcome: 'completed' })
+    expect(rt.subagents.pending()).toEqual([])
+  })
+
+  it('P10-06：取消传播——父级 abort 时子代理一并中止，结果为 cancelled', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id: parentSessionId } = await rt.sessions.create({ cwd: home, title: '父任务' })
+    const controller = new AbortController()
+
+    const running = rt.subagents.run({ parentSessionId, task: '调查入口文件。', signal: controller.signal })
+    // 立刻取消：子代理要么还没启动、要么正在跑，都必须以 cancelled 收尾
+    controller.abort()
+    const result = await running
+
+    expect(result.outcome).toBe('cancelled')
+    // 不能记成 failed：用户主动暂停不算故障
+    expect(result.outcome).not.toBe('failed')
+    const parentEvents = rt.sessions.sessionServiceFor(parentSessionId).events()
+    const completed = parentEvents.find((event) => event.type === 'subagent/completed')
+    expect(completed).toMatchObject({ data: { outcome: 'cancelled' } })
+  })
+
+  it('P10-07：已取消的 signal 不会启动子代理', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id: parentSessionId } = await rt.sessions.create({ cwd: home, title: '父任务' })
+    const controller = new AbortController()
+    controller.abort()
+
+    const result = await rt.subagents.run({ parentSessionId, task: '调查入口文件。', signal: controller.signal })
+    expect(result).toMatchObject({ outcome: 'cancelled' })
+    expect(result.artifacts).toBeUndefined()
   })
 
   it('计划模式：请求只暴露只读工具，写调用被拒绝且不落盘', async () => {

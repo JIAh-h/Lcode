@@ -771,6 +771,13 @@ export const EN: Readonly<Record<string, string>> = {
   新对话使用: 'New chats use',
   '会话里也可以临时切换，只影响那个对话。':
     'You can also switch temporarily inside a chat — that affects only that chat.',
+  编排模型: 'Orchestration model',
+  'Router 使用': 'Router uses',
+  跟随默认模型: 'Follow the default model',
+  'Router 负责判断与派发，用轻模型就够；worker 仍走默认模型。':
+    'The Router only decides and dispatches, so a lightweight model is enough; workers still use the default model.',
+  保存中: 'Saving…',
+  '已保存。重开应用后生效。': 'Saved. Restart the app to apply.',
   自定义模型: 'Custom models',
   '配置一份 OpenAI 兼容的接口即可。配置存在本地 ':
     'Just configure an OpenAI-compatible endpoint. It’s stored locally in ',

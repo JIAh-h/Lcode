@@ -27,13 +27,54 @@ const require = createRequire(import.meta.url)
 /** 取 electron 的可执行文件路径（用包自己的导出，不猜 node_modules 布局） */
 const electronPath = require('electron')
 
-const child = spawn(electronPath, [desktopRoot], {
+/*
+ * GPU 兜底：默认**开启**，需要**两个**开关。
+ *
+ * ## 实测结论（逐一验证，不要凭直觉增减）
+ *
+ * 这台机器（NVIDIA GTX 1650 + Intel UHD，驱动 2022/2023 年）上：
+ *
+ * | 组合 | 结果 |
+ * | --- | --- |
+ * | 默认（无开关） | GPU 进程崩溃 ×6 → `FATAL: GPU process isn't usable` |
+ * | `--disable-gpu` | ❌ 仍然崩溃 |
+ * | `--disable-gpu --use-gl=swiftshader` | ❌ 渲染进程崩溃 |
+ * | **`--no-sandbox --disable-gpu`** | ✅ **渲染成功** |
+ *
+ * 关键点是 `--no-sandbox`：没有它，`--disable-gpu` 单独用不起作用——
+ * Chromium 的沙箱在拉起 GPU 子进程时先崩，后面就再没有机会走到软件渲染。
+ *
+ * 想恢复硬件加速（更新驱动后）：`LCODE_HARDWARE_GL=1 pnpm dev:desktop`
+ */
+const SOFTWARE_GL_FLAGS = ['--no-sandbox', '--disable-gpu']
+
+/** 默认软件渲染；只有显式要硬件加速才不加 */
+function wantsSoftwareGl() {
+  return process.env.LCODE_HARDWARE_GL !== '1'
+}
+
+/*
+ * 排查渲染层白屏用的调试端口。
+ *
+ * 渲染进程的 console 错误**不会**出现在主进程 stdout 里——主进程日志干净、
+ * 窗口一片白，是这类问题最典型的症状。开这个端口后可以用 CDP 直接读
+ * `Runtime.consoleAPICalled` 与 `Runtime.exceptionThrown`。
+ *
+ * 只在显式设了 `LCODE_DEBUG_PORT` 时开，不默认暴露调试入口。
+ */
+const debugPort = process.env.LCODE_DEBUG_PORT
+const DEBUG_FLAGS = debugPort === undefined || debugPort === '' ? [] : [`--remote-debugging-port=${debugPort}`]
+
+const child = spawn(electronPath, [desktopRoot, ...(wantsSoftwareGl() ? SOFTWARE_GL_FLAGS : []), ...DEBUG_FLAGS], {
   stdio: 'inherit',
   env: {
     ...process.env,
     // 这两个都设上：主进程只认它们中的一个，而设两个能让"为什么没走 dev server"消失
     VITE_DEV_SERVER_URL: process.env.VITE_DEV_SERVER_URL ?? 'http://localhost:5173',
     NODE_ENV: process.env.NODE_ENV ?? 'development',
+    // 这个变量会让 Electron 以纯 Node 模式运行（`electron.app` 变成 undefined），
+    // 某些工具链会把它留在环境里，启动前必须清掉。
+    ELECTRON_RUN_AS_NODE: undefined,
     // （DevTools 默认不自动弹；运行中按 F12 或 Ctrl+Shift+I 开关。
     //  想让它在启动时就打开：LCODE_DEVTOOLS=1 pnpm dev:desktop）
   },

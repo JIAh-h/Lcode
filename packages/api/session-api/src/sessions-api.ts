@@ -568,7 +568,13 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
     // 不传工作区是合法状态（桌面会把它归入「最近任务」），不要回落进程 cwd
     const cwd = input.cwd === undefined || input.cwd.trim() === '' ? null : this.requireCwd(input.cwd)
     const sessionId = newSessionId()
-    await this.persistence.open(sessionId, cwd === null ? {} : { cwd })
+    // 父会话只做归属标记（docs/26 §4.2）；不能读它的 cwd 做继承，否则 worker 的
+    // 工作区会被 Router 隐性决定。
+    const parentSession = input.parentSessionId === undefined || input.parentSessionId === '' ? null : input.parentSessionId
+    await this.persistence.open(
+      sessionId,
+      { ...(cwd === null ? {} : { cwd }), ...(parentSession === null ? {} : { parentSession }) },
+    )
     this.sessions.set(sessionId, { store: new InMemorySessionStore(sessionId), cwd })
     // 落一次空投影：否则 `list` 看不到这个还没有任何事件的会话
     await this.persistence.flush(sessionId)

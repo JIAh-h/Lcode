@@ -10,7 +10,7 @@ import type {} from "./attachments.ts";
 import type {} from "@lcode/system-prompt";
 import type { LlmAdapter, PreparedCall } from "@lcode/llm";
 import type { ModelSelection } from "@lcode/agent-default-model";
-import type { SessionService } from "@lcode/session";
+import type { SessionRole, SessionService } from "@lcode/session";
 import { deriveRequestItems } from "@lcode/session";
 import type {
   AssistantMessage,
@@ -65,6 +65,14 @@ export interface AgentLoopDeps {
   readonly ctx: Context;
   /** 会话查找（装配层提供；与 InMemoryAgentStore 同一约定） */
   readonly getSession: (sessionId: string) => SessionService;
+  /**
+   * 会话角色解析（docs/26 §4.4）。
+   *
+   * 由装配层注入而不是让引擎去查某个具体服务：角色是核心概念，但"角色存在哪里"
+   * 属于装配决策（当前落在 `session/role` 事件里）。缺省一律按 `normal` 处理——
+   * 这让既有调用方不用改，也不会因为查不到角色就把会话降级成 Router。
+   */
+  readonly roleOf?: (sessionId: string) => SessionRole;
 }
 
 /** 排队项：输入 + 完成通知（followup 的 Promise 在对应轮终态时落定） */
@@ -457,15 +465,24 @@ export class TurnEngine {
       };
       // 模型路由必须发生在解析 Adapter 之前。结果在本回合开始即冻结，后续步骤不能
       // 因设置变化或临时降级混用另一家 Provider，保证 request/header 可重放。
-      const selectionArgs: { agentId: string; sessionId: string; turn: number; selection: ModelSelection } = {
+      // `role` 一并交给路由：Router 会话可以用轻模型（docs/26 §3.2）。
+      const sessionRole: SessionRole = this.deps.roleOf?.(this.inner.sessionId) ?? "normal";
+      const selectionArgs: {
+        agentId: string;
+        sessionId: string;
+        turn: number;
+        role: SessionRole;
+        selection: ModelSelection;
+      } = {
         agentId: this.inner.id,
         sessionId: this.inner.sessionId,
         turn,
+        role: sessionRole,
         selection: initialSelection,
       };
       const routedSelection = await this.deps.ctx.waterfall<
         "agent/model-selection",
-        { agentId: string; sessionId: string; turn: number; selection: ModelSelection },
+        { agentId: string; sessionId: string; turn: number; role: SessionRole; selection: ModelSelection },
         ModelSelection
       >(
         "agent/model-selection",
@@ -738,22 +755,39 @@ export class TurnEngine {
     }
 
     this.activeStepAbort = null;
-    // 取消收尾：闭合打开的步，再闭合轮（带血缘，A2）
-    if (stepOpened) session.append({ type: "step/end", data: { turn, step } });
-    const end = reason === "cancelled"
-      ? session.append({
-        type: "turn/end",
-        data: { turn, reason },
-        sourceEventSeqs: [turnStart.seq],
-      })
-      : session.append({ type: "turn/end", data: { turn, reason } });
+    /*
+     * 收尾写事件可能撞上"会话已关闭"。
+     *
+     * 场景：`dispose()` 先 abort 当前轮，然后调用方立刻 `sessions.close()`；
+     * 而本函数的收尾要等 `runTurn` 的 promise 走到这里。此时
+     * `getSession` 拿到的是**创建时的绑定**，其 `append` 会抛
+     * ES-SESSION_NOT_FOUND。轮已经结束（用户看到的就是取消），
+     * 因为写不进终态事件就让整个进程吃 unhandled rejection 是不划算的。
+     */
+    let endSeq: number | undefined;
+    try {
+      // 取消收尾：闭合打开的步，再闭合轮（带血缘，A2）
+      if (stepOpened) session.append({ type: "step/end", data: { turn, step } });
+      const end = reason === "cancelled"
+        ? session.append({
+          type: "turn/end",
+          data: { turn, reason },
+          sourceEventSeqs: [turnStart.seq],
+        })
+        : session.append({ type: "turn/end", data: { turn, reason } });
+      endSeq = end.seq;
+    } catch (error) {
+      // 会话已关闭：轮终态没地方写。这不是执行失败，不该再往上抛。
+      console.error("[lcode] 会话已关闭，本轮终态未能写入：", error);
+    }
+    if (endSeq === undefined) return reason;
     await this.deps.ctx.emit('agent/turn-ended', {
       agentId: this.inner.id,
       sessionId: this.inner.sessionId,
       session,
       turn,
       reason,
-      endSeq: end.seq,
+      endSeq,
     });
     return reason;
   }

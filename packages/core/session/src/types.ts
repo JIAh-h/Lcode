@@ -22,6 +22,15 @@ export type CardType = 'generic' | 'terminal' | 'diff' | 'search' | 'read' | 'we
 /** agent 状态（20 §5.4 AgentHandle） */
 export type AgentStatus = 'idle' | 'running' | 'waiting-approval' | 'cancelled'
 
+/**
+ * 会话角色（docs/26 §4.4）。
+ *
+ * - `normal`：普通会话，什么都能做。
+ * - `router`：跨会话调度者，**不持有执行工具**（读所有消息、提示注入面最大）。
+ * - `worker`：由 Router 派发的独立任务，有完整执行工具但**不能再派发**。
+ */
+export type SessionRole = 'router' | 'worker' | 'normal'
+
 /** 请求快照原因（06 待补充完整集合，骨架先列已知值） */
 export type RequestHeaderReason = 'new-epoch' | 'continuation' | 'model-switch'
 
@@ -433,11 +442,72 @@ export interface SessionEventMap {
   'subagent/completed': {
     readonly delegationId: string
     readonly childSessionId: string
-    readonly outcome: 'completed' | 'failed' | 'depth-denied'
+    readonly outcome: 'completed' | 'failed' | 'cancelled' | 'depth-denied'
     readonly result?: string | undefined
     readonly error?: string | undefined
     readonly depth?: number | undefined
     readonly task?: string | undefined
+  }
+  /**
+   * 跨会话编排（26 §4.2）：Router 派发一个 worker。
+   *
+   * **写在 Router 会话**，因为它记录的是"调度事实"——Router 的日志因此是
+   * 派发决策的唯一权威。worker 会话自己的 `FileHeader.parentSession` 指向 Router，
+   * 但两者语义不同：subagent 是会话内实现细节（取消传播），worker 是独立任务
+   * （取消隔离）。**不要复用 `subagent/*` 承载 worker**，见 26 §4.1。
+   */
+  'worker/dispatched': {
+    readonly taskId: string
+    readonly workerSessionId: string
+    readonly task: string
+    readonly routerSessionId: string
+    /** Router 的判断依据：为什么派这个、为什么拆 */
+    readonly reason?: string | undefined
+    readonly dispatchedAt: number
+  }
+  /**
+   * worker 结束（26 §4.3）。写在 **Router 会话**。
+   *
+   * 与 `subagent/completed` 的关键区别：它不唤醒某个 turn、不阻塞任何人，
+   * 而是排进 Router 的队列（可能让 Router 开新一轮）。
+   */
+  'worker/completed': {
+    readonly taskId: string
+    readonly workerSessionId: string
+    readonly outcome: 'completed' | 'failed' | 'cancelled'
+    readonly summary?: string | undefined
+    /** 与 subagent 共用同一套结构化产物形状（P10-02） */
+    readonly artifacts?:
+      | {
+          readonly changedPaths: readonly string[]
+          readonly toolCalls: number
+          readonly failedToolCalls: number
+          readonly usage?: { readonly input?: number | undefined; readonly output?: number | undefined } | undefined
+          readonly events: number
+        }
+      | undefined
+    readonly error?: string | undefined
+  }
+  /**
+   * 会话角色变更（26 §4.4）：只追加，不改历史。回放时按 seq 判定有效 role。
+   *
+   * role 是**核心概念**而不是某个接入层的私有状态：它决定工具可见性
+   * （Router 无执行工具）、取消语义（subagent 传播 / worker 隔离）
+   * 与模型路由（Router 可用轻模型）。所以类型定义在这里，各层共用。
+   */
+  'session/role': {
+    readonly role: SessionRole
+    readonly reason?: string | undefined
+  }
+  /**
+   * 编排授权档位变更（26 §7.4）。
+   *
+   * 落盘是刻意的：`observe` 下"本来会派发什么"必须可回放，
+   * 否则用户没法评估要不要切到 `auto`。
+   */
+  'orchestration/mode': {
+    readonly mode: 'off' | 'observe' | 'auto'
+    readonly reason?: string | undefined
   }
 }
 

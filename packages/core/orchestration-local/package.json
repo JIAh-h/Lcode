@@ -1,0 +1,16 @@
+{
+  "name": "@lcode/orchestration-local",
+  "version": "0.1.0",
+  "description": "Lcode 本机跨会话编排实现（Router 派发 / Worker 独立会话，26）",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/agent-loop": "workspace:*",
+    "@lcode/context": "workspace:*",
+    "@lcode/orchestration": "workspace:*",
+    "@lcode/session-api": "workspace:*",
+    "@lcode/util": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}

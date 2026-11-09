@@ -3,6 +3,7 @@ export type {
   ApprovalResult,
   CardType,
   AgentStatus,
+  SessionRole,
   RequestHeaderReason,
   ApprovalAction,
   ApprovalBasis,

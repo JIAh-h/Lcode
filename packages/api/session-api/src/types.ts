@@ -68,6 +68,13 @@ export interface CreateSessionInput {
   readonly preset?: string | undefined
   readonly title?: string | undefined
   readonly modelSelection?: ModelSelection | undefined
+  /**
+   * 父会话（docs/26 §4.2）。
+   *
+   * 用途是**归属**，不是取消继承：worker 的父是 Router，但 worker 的生命周期
+   * 独立于 Router（取消隔离）。subagent 也用它标记父链，二者语义靠事件类型区分。
+   */
+  readonly parentSessionId?: string | undefined
 }
 
 export interface CreateSessionResult {

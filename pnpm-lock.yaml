@@ -340,6 +340,12 @@ importers:
       '@lcode/model-router':
         specifier: workspace:*
         version: link:../../model/model-router
+      '@lcode/orchestration':
+        specifier: workspace:*
+        version: link:../../core/orchestration
+      '@lcode/orchestration-local':
+        specifier: workspace:*
+        version: link:../../core/orchestration-local
       '@lcode/permission-presets':
         specifier: workspace:*
         version: link:../../interaction/permission-presets
@@ -731,6 +737,33 @@ importers:
       '@lcode/scope':
         specifier: workspace:*
         version: link:../scope
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
+  packages/core/orchestration:
+    dependencies:
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../context
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
+  packages/core/orchestration-local:
+    dependencies:
+      '@lcode/agent-loop':
+        specifier: workspace:*
+        version: link:../agent-loop
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../context
+      '@lcode/orchestration':
+        specifier: workspace:*
+        version: link:../orchestration
+      '@lcode/session-api':
+        specifier: workspace:*
+        version: link:../../api/session-api
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util
@@ -1286,6 +1319,9 @@ importers:
       '@lcode/context':
         specifier: workspace:*
         version: link:../../core/context
+      '@lcode/session':
+        specifier: workspace:*
+        version: link:../../core/session
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util

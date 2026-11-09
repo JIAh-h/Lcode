@@ -1,7 +1,7 @@
 import type { AgentHandle, AgentRef, AgentSpec } from '@lcode/agent'
 import type { PreparedCall } from '@lcode/llm'
 import type { ModelSelection } from '@lcode/agent-default-model'
-import type { SessionService, ToolResultMessage, TurnEndReason } from '@lcode/session'
+import type { SessionRole, SessionService, ToolResultMessage, TurnEndReason } from '@lcode/session'
 import { TurnEngine } from './engine.ts'
 import type { AgentLoopDeps, LoopHandle } from './engine.ts'
 
@@ -72,7 +72,17 @@ export function createAgentLoop(deps: AgentLoopDeps): AgentLoopRuntime {
 declare module '@lcode/context' {
   interface Events {
     'agent/pre-step': { agentId: string; turn: number; nextStep: number }
-    'agent/model-selection': { agentId: string; sessionId: string; turn: number; selection: ModelSelection }
+    'agent/model-selection': {
+      agentId: string
+      sessionId: string
+      turn: number
+      /**
+       * 会话角色（docs/26 §4.4）。路由规则据此决定用哪个模型：
+       * Router 只做判断与派发，配轻模型就够（§3.2）。
+       */
+      role: SessionRole
+      selection: ModelSelection
+    }
     'agent/request': { call: PreparedCall }
     /**
      * 请求失败（waterfall）。处理器可在此做"压缩后重试"之类的恢复，并返回

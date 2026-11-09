@@ -1280,6 +1280,15 @@ function ModelSection() {
   }, [])
   const [custom, setCustom] = useState<CustomModelInfo[]>([])
   const [bridgeError, setBridgeError] = useState<string | null>(null)
+  /**
+   * Router 专用模型（docs/26 §3.2）。`null` = 跟随默认模型。
+   *
+   * 单独读一栏而不是塞进 `uiPrefs`：它是**编排策略**而不是"当前默认模型"，
+   * 两者生命周期不同（改默认模型影响所有新会话，改这个只影响 Router 会话）。
+   */
+  const [routerModel, setRouterModel] = useState<{ provider: string; model: string } | null>(null)
+  const [routerSaving, setRouterSaving] = useState(false)
+  const [routerNote, setRouterNote] = useState<string | null>(null)
 
   /** 从主进程刷新清单（保存/删除后也调它——单一数据源，不自己拼） */
   /**
@@ -1300,6 +1309,12 @@ function ModelSection() {
       setCustom(result.custom)
       setBridgeError(null)
       await syncModelsFromMain({ force: true })
+      // 编排模型与模型清单一起刷新：它引用的是同一批供应商
+      const orch = (globalThis as unknown as { lcode?: { orchestration?: { get(): Promise<unknown> } } }).lcode?.orchestration
+      if (orch !== undefined) {
+        const stored = (await orch.get()) as { routerModel?: { provider: string; model: string } | null } | null
+        setRouterModel(stored?.routerModel ?? null)
+      }
     } catch (err) {
       setBridgeError(err instanceof Error ? err.message : String(err))
     }
@@ -1339,9 +1354,56 @@ function ModelSection() {
           </div>
         </div>
       </div>
+      {/*
+       * 编排模型（docs/26 §3.2）。
+       *
+       * 为什么要单独配：Router 只做"判断要不要派、派给谁、汇总结果"这类工作，
+       * 用轻模型就够。把它和默认模型分开，既省钱又不牺牲 worker 的执行质量。
+       *
+       * 为什么现在就有意义：**`observe` 档下 Router 同样在调模型**，不是等切到
+       * `auto` 才生效——这一点很多人的直觉是反的。
+       */}
       <div className="sect">
-        <div className="sh2">
-          {t('自定义模型')}{' '}
+        <div className="sh2">{t('编排模型')}</div>
+        <div className="srow">
+          <div className="sl">{t('Router 使用')}</div>
+          <div className="sr">
+            <Seg
+              options={[t('跟随默认模型'), ...custom.map((m) => m.label)]}
+              value={routerModel === null ? t('跟随默认模型') : (custom.find((m) => m.name === routerModel.provider)?.label ?? t('跟随默认模型'))}
+              onChange={(v) => {
+                const picked = custom.find((m) => m.label === v)
+                setRouterSaving(true)
+                setRouterNote(null)
+                const orch = (globalThis as unknown as { lcode?: { orchestration?: { setRouterModel(input: unknown): Promise<unknown> } } }).lcode?.orchestration
+                if (orch === undefined) {
+                  setRouterSaving(false)
+                  setRouterNote(t('当前环境没有主进程桥'))
+                  return
+                }
+                const payload = picked === undefined ? null : { provider: picked.name, model: picked.model }
+                void orch
+                  .setRouterModel(payload)
+                  .then(() => {
+                    setRouterModel(payload)
+                    setRouterNote(t('已保存。重开应用后生效。'))
+                  })
+                  .catch((err: unknown) => {
+                    setRouterNote(err instanceof Error ? err.message : String(err))
+                  })
+                  .finally(() => setRouterSaving(false))
+              }}
+            />
+            <span className="src">
+              {t('Router 负责判断与派发，用轻模型就够；worker 仍走默认模型。')}
+              {routerSaving ? ` ${t('保存中…')}` : ''}
+              {routerNote !== null ? ` ${routerNote}` : ''}
+            </span>
+          </div>
+        </div>
+      </div>
+      <div className="sect">
+        <div className="sh2">{t('自定义模型')}{' '}
           <button
             className="mini"
             onClick={() => {

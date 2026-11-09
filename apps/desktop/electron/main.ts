@@ -246,6 +246,38 @@ function createMainWindow(): BrowserWindow {
   });
 
   /*
+   * 渲染层诊断（仅开发态）。
+   *
+   * 为什么需要：渲染进程的 console 错误**不会**出现在主进程 stdout 里。
+   * 症状是「主进程日志干净、窗口一片白」——这类问题靠猜几乎定位不了。
+   * 这里把渲染层的异常、加载失败与控制台错误转发到主进程日志。
+   *
+   * 用 `LCODE_DEVTOOLS=1` 时原本要看 DevTools 才知道的东西，现在直接有输出。
+   */
+  if (process.env.NODE_ENV === "development" || process.env.VITE_DEV_SERVER_URL) {
+    win.webContents.on("did-fail-load", (_event, code, description, url) => {
+      console.error(`[renderer] 加载失败 ${code} ${description} ${url}`);
+    });
+    win.webContents.on("render-process-gone", (_event, details) => {
+      console.error(`[renderer] 渲染进程退出：${details.reason} (exitCode=${details.exitCode})`);
+    });
+    win.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+      // level: 0=verbose 1=info 2=warning 3=error
+      if (level < 2) return;
+      const tag = level === 3 ? "error" : "warn";
+      console.error(`[renderer:${tag}] ${message} (${sourceId}:${line})`);
+    });
+    win.webContents.on("did-finish-load", () => {
+      void win.webContents
+        .executeJavaScript(
+          'JSON.stringify({ rootChildren: document.getElementById("root")?.childElementCount ?? -1, bodyLen: document.body.innerHTML.length })',
+        )
+        .then((state: string) => console.log(`[renderer] 已加载 ${state}`))
+        .catch((error: unknown) => console.error("[renderer] 读取 DOM 失败", error));
+    });
+  }
+
+  /*
    * 关闭按钮的三选一确认（Qoder 式）。
    *
    * 为什么必须拦：dev 下 `concurrently -k` 会在 Electron 退出时连带杀掉
@@ -784,6 +816,48 @@ ipcMain.handle("lcode:model.getDefault", async () => {
   return (await feature.api.getDefault()) ?? null;
 });
 
+/**
+ * 跨会话编排的模型配置（docs/26 §3.2）。
+ *
+ * 只存 `{ provider, model }`：与默认模型同一套形状，渲染层可以直接用现成的
+ * 模型清单渲染下拉。**改完需要重开应用生效**——路由规则在装配时构造。
+ */
+ipcMain.handle("lcode:orchestration.get", async () => {
+  const feature = await models();
+  const raw = feature.services.readSetting("orchestration.routerModel");
+  const routerModel =
+    raw !== null &&
+    typeof raw === "object" &&
+    typeof (raw as { provider?: unknown }).provider === "string" &&
+    typeof (raw as { model?: unknown }).model === "string"
+      ? {
+          provider: (raw as { provider: string }).provider,
+          model: (raw as { model: string }).model,
+        }
+      : null;
+  return { routerModel };
+});
+
+ipcMain.handle(
+  "lcode:orchestration.setRouterModel",
+  async (_e: IpcMainInvokeEvent, input: unknown) => {
+    const feature = await models();
+    const record = (input ?? {}) as Record<string, unknown>;
+    const provider = record["provider"];
+    const model = record["model"];
+    // `null` 表示"跟随默认模型"——那是合法取值，不是缺参
+    if (provider === null || provider === "") {
+      await feature.services.settings.setByKey("orchestration.routerModel", null);
+      return { saved: true, routerModel: null };
+    }
+    if (typeof provider !== "string" || typeof model !== "string" || model === "") {
+      throw new Error("同时需要 provider 与 model；要恢复跟随默认模型请传 null");
+    }
+    await feature.services.settings.setByKey("orchestration.routerModel", { provider, model });
+    return { saved: true, routerModel: { provider, model } };
+  },
+);
+
 function refNameFor(provider: string): string {
   return `${provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_API_KEY`;
 }
@@ -1129,6 +1203,19 @@ async function agentRuntime(): Promise<AgentRuntime> {
           searchProvider: searcher.provider,
         },
         webSearch: true,
+        /*
+         * Router 专用模型（docs/26 §3.2）。设置里没配就跟随默认模型。
+         *
+         * 用 `readSetting` 直接读而不是走 IPC：这是启动时的一次性装配，
+         * 而路由规则本身不需要热更新——改设置后重开应用即可生效。
+         */
+        ...(() => {
+          const raw = feature.services.readSetting("orchestration.routerModel");
+          if (raw === null || typeof raw !== "object") return {};
+          const record = raw as { provider?: unknown; model?: unknown };
+          if (typeof record.provider !== "string" || typeof record.model !== "string") return {};
+          return { routerModel: { provider: record.provider, model: record.model } };
+        })(),
         /*
          * 只给沙箱 helper 一个精确候选：
          * - 打包态只认 resources/app/native；

@@ -2,6 +2,9 @@ import type { Context } from '@lcode/context'
 import type { ToolDefinition } from '@lcode/tools'
 import type { SubagentRunResult } from '@lcode/subagent'
 
+export { createAsyncSubagentTool, createAwaitSubagentTool } from './async-tools.ts'
+export type { AsyncDelegateResult, AwaitDelegateResult } from './async-tools.ts'
+
 /**
  * 把内置 `ctx.subagents` 暴露为统一工具流水线中的一个纯委托入口。
  * 该工具自身不直接读写文件、启动进程或请求网络；真正可用的能力仍由 provider 的
@@ -31,6 +34,8 @@ export function createSubagentTool(ctx: Context): ToolDefinition<{
         ...(agentIdOf(opts.scope) === undefined ? {} : { parentAgentId: agentIdOf(opts.scope) }),
         task: call.parsed.task,
         ...(call.parsed.allowedToolIds === undefined ? {} : { allowedToolIds: call.parsed.allowedToolIds }),
+        // 取消传播：父回合被暂停/取消时，子代理必须一并中止（会话内它是内部执行单元）。
+        signal: opts.signal,
       })
     },
   }

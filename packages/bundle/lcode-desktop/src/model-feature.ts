@@ -110,6 +110,19 @@ export function createServices(options: CreateServicesOptions = {}): DesktopServ
     { namespace: 'codeIndex', key: 'model', type: 'string' },
     { namespace: 'codeIndex', key: 'base_url', type: 'string' },
   ])
+  /*
+   * 跨会话编排（docs/26 §3.2）：Router 专用模型。
+   *
+   * 必须在这里**显式注册命名空间**——`setByKey` 对未知命名空间直接抛
+   * `EC-NOT_FOUND`（"未知的设置命名空间"）。不注册的话，设置页保存会失败，
+   * 而且失败点在 IPC 深处，表现是"点了没反应"。
+   *
+   * 存成 `{ provider, model }` 对象：与默认模型同一形状，读取方不用做两套解析。
+   * 值为 `null` 表示"跟随默认模型"（合法状态，不是缺参）。
+   */
+  settings.registerNamespace([
+    { namespace: 'orchestration', key: 'routerModel', type: 'object' },
+  ])
   settings.open()
 
   const credentials = new LocalCredentialsService({ home })

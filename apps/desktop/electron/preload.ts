@@ -72,6 +72,17 @@ const api = {
     hasCredential: (ref: string): Promise<boolean> => ipcRenderer.invoke('lcode:model.hasCredential', ref),
   },
 
+  /**
+   * 跨会话编排的模型配置（docs/26 §3.2）。
+   *
+   * Router 只做判断与派发，配轻模型就够。`routerModel: null` 表示跟随默认模型。
+   * 改完重开应用生效（路由规则在装配时构造）。
+   */
+  orchestration: {
+    get: (): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.get'),
+    setRouterModel: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.setRouterModel', input),
+  },
+
   /** 内容寻址附件：图片缩略图按需读取，避免把 base64 一次性全塞进渲染层 */
   attachments: {
     read: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:attachments.read', input),

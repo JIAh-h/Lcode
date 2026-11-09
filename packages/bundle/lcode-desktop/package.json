@@ -40,6 +40,8 @@
     "@lcode/mcp-local": "workspace:*",
     "@lcode/model-api": "workspace:*",
     "@lcode/model-router": "workspace:*",
+    "@lcode/orchestration": "workspace:*",
+    "@lcode/orchestration-local": "workspace:*",
     "@lcode/permission-presets": "workspace:*",
     "@lcode/plan-mode": "workspace:*",
     "@lcode/plugin-host": "workspace:*",

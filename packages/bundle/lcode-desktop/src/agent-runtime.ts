@@ -89,6 +89,27 @@ export interface AgentRuntimeOptions {
    * 提供后工作区内读写会进入受 OS 沙箱约束的 worker。
    */
   readonly fsWorkerSource?: string | undefined
+  /**
+   * 跨会话编排的并发上限（docs/26 §7.5.2）。缺省 8；0 = 不限。
+   */
+  readonly maxConcurrentWorkers?: number | undefined
+  /**
+   * 编排授权档位（docs/26 §7.4）。缺省 `observe`——只记录派发意向、不真正建 worker。
+   * 这是刻意的保守默认：跨会话编排是第一个能自主花钱的能力。
+   */
+  readonly orchestrationMode?: 'off' | 'observe' | 'auto' | undefined
+  /** Watchdog 巡检间隔（ms）。缺省 5 分钟；测试可传很小的值。 */
+  readonly watchdogIntervalMs?: number | undefined
+  /**
+   * Router 会话专用的模型（docs/26 §3.2）。
+   *
+   * Router 只做"判断要不要派、派给谁、汇总结果"，用轻模型就够；配了它就能
+   * 把 Router 的每次判断从默认模型上摘下来，直接省钱。
+   *
+   * 省略 = Router 跟随默认模型（行为与之前一致）。
+   * **注意：`observe` 档下 Router 同样在调模型**，所以这个配置现在就有效。
+   */
+  readonly routerModel?: ModelSelection | undefined
 }
 
 import type { Disposer } from '@lcode/util'
@@ -120,7 +141,7 @@ import { createPluginHost, InstalledPluginLifecycleService, PluginLifecycleManag
 import { createLocalSkillFilesystem } from '@lcode/skill-filesystem'
 import { registerSkillTools } from '@lcode/tool-skill'
 import { createLocalAgentPresets, type PresetSnapshot } from '@lcode/agent-presets'
-import { composeRuntimeProfile, type InternalBundleEntry, type RuntimeCompositionSnapshot } from '@lcode/runtime-composition'
+import { composeRuntimeProfile, type InternalBundleEntry, type RuntimeCompositionSnapshot, type RuntimeDisposer } from '@lcode/runtime-composition'
 import { registerLocalContextSources } from '@lcode/context-local'
 import { registerContextBudget } from '@lcode/context-budget'
 import type { TokenMeasurement } from '@lcode/context-budget'
@@ -130,7 +151,13 @@ import { registerCompactionPrune } from '@lcode/compaction-prune'
 import { registerLocalSpill } from '@lcode/spill-local'
 import { registerInprocessSubagents } from '@lcode/subagent-inprocess'
 import type { InprocessSubagentService } from '@lcode/subagent-inprocess'
-import { createSubagentTool } from '@lcode/tool-subagent'
+import type { OrchestrationService } from '@lcode/orchestration'
+import type { SessionRoleService } from './session-roles.ts'
+import { createAsyncSubagentTool, createAwaitSubagentTool, createSubagentTool } from '@lcode/tool-subagent'
+import { registerLocalOrchestration } from '@lcode/orchestration-local'
+import { registerSessionRoles } from './session-roles.ts'
+import { registerLocalWatchdog } from './watchdog.ts'
+import { createDispatchWorkerTool } from './tool-dispatch-worker.ts'
 import type { WebService } from '@lcode/web'
 import { createWebTools } from '@lcode/tool-web'
 import type { LspService } from '@lcode/lsp'
@@ -138,6 +165,7 @@ import { createLocalLsp, type LocalLspService, type LspServerDef } from '@lcode/
 import { createMcpManager, type McpServerConfig } from '@lcode/mcp-local'
 import { createLspTools } from '@lcode/tool-lsp'
 import { createModelRouter, registerModelRouter, type ModelRoutingService } from '@lcode/model-router'
+import type { ModelSelection } from '@lcode/agent-default-model'
 import type { CodeRuntime } from '@lcode/code-runtime'
 import { createSubprocessCodeRuntime } from '@lcode/code-runtime-subprocess'
 import { createCodeTool } from '@lcode/tool-code'
@@ -242,6 +270,10 @@ export interface AgentRuntime {
   compactSession(input: { readonly sessionId: string }): Promise<CompactionResult>
   /** P7-04：受限的进程内子代理 provider；不能取得审批端口或扩展 root Context。 */
   readonly subagents: InprocessSubagentService
+  /** P11：跨会话编排（Router 派发 / worker 独立会话）；契约见 docs/26。 */
+  readonly orchestration: OrchestrationService
+  /** P11：会话角色（router / worker / normal），由 `session/role` 事件派生。 */
+  readonly sessionRoles: SessionRoleService
   /** 当前实际的内置组合；只含 service 关系，不含凭据、路径或运行时句柄。 */
   readonly composition: RuntimeCompositionSnapshot
   /**
@@ -324,7 +356,24 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
       if (sessions === undefined) throw new Error('内部组合未能挂载 sessions-local')
       return mountToolingBundle(options, sessions, ctx)
     },
-    (ctx) => registerModelRouter({ ctx, routing: options.modelRouting ?? createModelRouter() }),
+    /*
+     * 模型路由（docs/26 §3.2）：给 Router 会话单独指定模型。
+     *
+     * 顺序注意：这里在 policy bundle 之前注册，而 `sessionRoles` 在其后才存在——
+     * 没问题，因为规则匹配发生在**回合开始时**（惰性），那时角色服务已装配好。
+     */
+    (ctx) =>
+      registerModelRouter({
+        ctx,
+        routing:
+          options.modelRouting ??
+          createModelRouter({
+            rules:
+              options.routerModel === undefined
+                ? []
+                : [{ id: 'router-session-model', match: { role: 'router' }, target: options.routerModel }],
+          }),
+      }),
     (ctx) => {
       if (sessions === undefined || fsMutationAuthority === undefined) throw new Error('内部组合缺少 policy provider 依赖')
       return mountPolicyBundle(options, services, sessions, fsMutationAuthority, ctx, () => compositionSnapshot ?? { profile: profileId, entries: [] })
@@ -436,7 +485,7 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
   return () => { unregisterCodeSearch?.(); unregisterTodo(); unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
 }
 
-function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServices, sessions: LocalSessionsApi, mutationAuthority: ReturnType<typeof createFsMutationAuthority>, ctx: DesktopServices['ctx'], profile: () => RuntimeCompositionSnapshot): Disposer {
+function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServices, sessions: LocalSessionsApi, mutationAuthority: ReturnType<typeof createFsMutationAuthority>, ctx: DesktopServices['ctx'], profile: () => RuntimeCompositionSnapshot): RuntimeDisposer {
   const permissionPresets = createLocalPermissionPresets({ home: services.home })
   const unregisterPresets = ctx.set('permissionPresets', permissionPresets)
   const webAllowlist = createLocalWebAllowlist({ home: services.home })
@@ -447,6 +496,22 @@ function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServic
   const unregisterTrust = ctx.set('workspaceTrust', workspaceTrust)
   const subagentProvider = registerInprocessSubagents({ ctx, sessions, workspaceOf: (id) => sessions.workspaceOf(id), profile })
   const unregisterSubagentTool = ctx.get('tools').register(createSubagentTool(ctx))
+  // 异步门面：delegate 保持同步语义不变，这两个只是在同一 provider 上加"等不等"的选择。
+  const unregisterAsyncSubagentTool = ctx.get('tools').register(createAsyncSubagentTool(ctx))
+  const unregisterAwaitSubagentTool = ctx.get('tools').register(createAwaitSubagentTool(ctx))
+  /*
+   * 跨会话编排（docs/26）。顺序有讲究：
+   * 角色服务必须先于编排 provider——后者要靠 roleOf 拦截"worker 再派发 worker"。
+   */
+  const sessionRoles = registerSessionRoles({ ctx, getSession: (id) => sessions.sessionServiceFor(id) })
+  const orchestration = registerLocalOrchestration({
+    ctx,
+    sessions,
+    roleOf: (id) => sessionRoles.service.roleOf(id),
+    ...(options.maxConcurrentWorkers === undefined ? {} : { maxConcurrentWorkers: options.maxConcurrentWorkers }),
+    ...(options.orchestrationMode === undefined ? {} : { initialMode: options.orchestrationMode }),
+  })
+  const unregisterDispatchTool = ctx.get('tools').register(createDispatchWorkerTool(ctx))
   const uninstallPolicy = installPolicyHook({
     ctx,
     ...(options.approval === undefined ? {} : { approval: options.approval }),
@@ -464,7 +529,45 @@ function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServic
   })
   const planMode = createPlanModeService({ ctx, getSession: (id) => sessions.sessionServiceFor(id), systemPrompt: ctx.get('systemPrompt'), tools: ctx.get('tools'), ...(options.approval === undefined ? {} : { approval: options.approval }) })
   const unregisterPlan = ctx.set('planMode', planMode)
-  return () => { planMode.dispose(); unregisterPlan(); uninstallPolicy(); unregisterSubagentTool(); subagentProvider.dispose(); unregisterTrust(); unregisterNetworkAudit(); unregisterWebAllowlist(); unregisterPresets() }
+  /*
+   * Watchdog（docs/26 §8）：只通知，不派发、不接管、不自动重试。
+   *
+   * 判据全部读日志，因此结论可回放。巡检默认 5 分钟一轮，可用
+   * `LCODE_WATCHDOG_INTERVAL_MS` 覆盖（验收时用很小的值）。
+   *
+   * 注意 `onFindings` 只把结果交给调用方（UI/日志），**这里绝不做任何派发动作**——
+   * 让它能派发就等于让一个定时任务能自主花钱。
+   */
+  const watchdog = registerLocalWatchdog({
+    ctx,
+    sessions,
+    ...(options.watchdogIntervalMs === undefined ? {} : { intervalMs: options.watchdogIntervalMs }),
+    listSessions: async () => {
+      // 只看最近活跃的一批：长尾会话既没人看，也没人在里面出错。
+      const listed = await sessions.list({ limit: 50 })
+      return listed.items.map((item) => item.session_id)
+    },
+    onFindings: (findings: readonly { readonly kind: string; readonly sessionId: string; readonly detail: string }[]) => {
+      if (findings.length === 0) return
+      for (const finding of findings) {
+        console.warn(`[watchdog] ${finding.kind} ${finding.sessionId}：${finding.detail}`)
+      }
+    },
+  })
+  ctx.set('watchdog', watchdog.service)
+  /*
+   * 编排的 dispose 是**异步**的：它要等 worker 的 agent 真正停下。
+   * `RuntimeDisposer` 允许返回 Promise，所以直接把等待放进同一个调用——
+   * 同步注销在前、异步等待在后，调用方 await 完就一定没有在途写入。
+   * 少了这一步，关会话时在途 worker 的收尾会向已关闭的会话写事件（unhandled rejection）。
+   */
+  return async () => {
+    watchdog.dispose()
+    planMode.dispose(); unregisterPlan(); uninstallPolicy(); unregisterDispatchTool(); sessionRoles.dispose()
+    unregisterSubagentTool(); unregisterAsyncSubagentTool(); unregisterAwaitSubagentTool(); subagentProvider.dispose()
+    unregisterTrust(); unregisterNetworkAudit(); unregisterWebAllowlist(); unregisterPresets()
+    await orchestration.dispose()
+  }
 }
 
 /**
@@ -809,7 +912,24 @@ function mountAgentBundle(
   })
 
   // ④ 循环（唯一的具体循环）
-  const loop = createAgentLoop({ ctx, getSession })
+  /*
+   * 把会话角色交给引擎：路由规则据此决定用哪个模型（docs/26 §3.2）。
+   *
+   * 用**惰性读取**而不是在装配时求值：`sessionRoles` 在 policy bundle 里注册，
+   * 而它的真正取值要等到回合开始（那时角色可能已经被 `session/role` 改过）。
+   */
+  const loop = createAgentLoop({
+    ctx,
+    getSession,
+    roleOf: (sessionId) => {
+      try {
+        return ctx.get('sessionRoles').roleOf(sessionId)
+      } catch {
+        // 角色服务未装配（极简组合/单测）：按普通会话处理，不影响既有行为。
+        return 'normal'
+      }
+    },
+  })
   unregisterServices.push(ctx.set('agentLoop', loop))
 
   // ⑤ 活体 agent 注册表（依赖 ctx 与 getSession）
@@ -986,6 +1106,8 @@ async function mountDesktopSpine(
       })
     },
     subagents: ctx.get('subagents') as InprocessSubagentService,
+    orchestration: ctx.get('orchestration'),
+    sessionRoles: ctx.get('sessionRoles'),
     watchSession(sessionId, handler) {
       // `sessionServiceFor` 会校验"会话已打开"并抛 ES-SESSION_NOT_FOUND——
       // 那正是我们要的行为：未开放的会话没有内存镜像，也没有事件可订阅。
