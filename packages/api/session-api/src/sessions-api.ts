@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
 import { strToU8, unzipSync, zipSync } from 'fflate'
-import type { EpochHeader, ModelMessage, SessionEvent, SessionService, StreamChunk, ToolResultMessage } from '@lcode/session'
+import type { EpochHeader, ModelMessage, SessionEvent, SessionRole, SessionService, StreamChunk, ToolResultMessage } from '@lcode/session'
 import { InMemorySessionStore, deriveMessages } from '@lcode/session'
 import type { EventFrame, JsonlSessionPersistence, LoadedLog } from '@lcode/session-persistence-jsonl'
 import {
@@ -508,7 +508,14 @@ function rowToMeta(row: SessionRowLike): SessionMeta {
     log_revision: (row['log_revision'] as string | null) ?? null,
     archived_at: (row['archived_at'] as number | null) ?? null,
     deleted_at: (row['deleted_at'] as number | null) ?? null,
+    // 老索引（迁移 v2 之前建的行）这一列可能是 null：按普通会话处理。
+    role: normalRole(row['role']),
   }
+}
+
+/** 索引里的 role 是自由文本；任何非 router/worker 的值都归一到 normal。 */
+function normalRole(raw: unknown): SessionRole {
+  return raw === 'router' || raw === 'worker' ? raw : 'normal'
 }
 
 function sha256Hex(data: Uint8Array | string): string {

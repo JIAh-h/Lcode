@@ -779,6 +779,35 @@ export const EN: Readonly<Record<string, string>> = {
   保存中: 'Saving…',
   '已保存。重开应用后生效。': 'Saved. Restart the app to apply.',
   自定义模型: 'Custom models',
+  '作为编排调度会话（可派发 worker，自己不执行）':
+    'Use as an orchestration session (can dispatch workers, but doesn’t execute itself)',
+  '勾选后这次会话只做调度：可以派发 worker，但不能自己改文件或执行命令':
+    'When checked, this session only dispatches: it can hand tasks to workers but cannot edit files or run commands itself',
+  编排档位: 'Orchestration mode',
+  新建编排会话时: 'New orchestration sessions',
+  编排关闭: 'Off',
+  只观察: 'Observe only',
+  自动执行: 'Auto',
+  '只记录本来会派什么，不创建 worker——先看它怎么拆任务。':
+    'Only records what it would dispatch — no workers are created. A good first look at how it splits tasks.',
+  '真的派发 worker 并汇总，会消耗更多 token。':
+    'Actually dispatches workers and summarises. Uses more tokens.',
+  '完全关闭跨会话编排。': 'Disables cross-session orchestration entirely.',
+  调度: 'Dispatch',
+  '编排调度会话：可派发 worker，自己不执行':
+    'Orchestration session: can dispatch workers but does not execute itself',
+  '{n} 个 worker': '{n} workers',
+  '编排状态：这里能看到 Router 派出去的 worker':
+    'Orchestration status — workers this Router has dispatched',
+  'worker {n}': 'workers {n}',
+  '预演 {n}': 'preview {n}',
+  在途worker: 'Running workers',
+  '没有在跑的 worker': 'No workers running',
+  预演: 'Preview',
+  已取消: 'Cancelled',
+  失败: 'Failed',
+  '取消这个 worker 的当前回合（不影响 Router）':
+    'Cancel this worker’s current turn (does not affect the Router)',
   '配置一份 OpenAI 兼容的接口即可。配置存在本地 ':
     'Just configure an OpenAI-compatible endpoint. It’s stored locally in ',
   '，API Key 存在凭据存储里（两者都只在本机，不会上传）。':

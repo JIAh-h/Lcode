@@ -386,6 +386,36 @@ describe('T3.4 工具与变更投影', () => {
     ])
     await store.closeAll()
   })
+
+  /*
+   * 会话角色投影（docs/26 §4.4，迁移 v2）。
+   *
+   * 侧栏要按角色分组，而它每次列几十个会话——让渲染层逐个读 JSONL 找
+   * `session/role` 事件不可接受，所以角色必须是索引的一部分。
+   */
+  it('session/role 投影到 sessions.role，取最后一条且无事件时为 normal', async () => {
+    const writer = new SessionIndexWriter({ home, retryBaseMs: 1 })
+    const store = createJsonlPersistence({ home, sink: writer, batchMs: 5 })
+    // S1：先升格 router、再降回 normal —— 取最后一条
+    await seedSession(store, 'S1', [
+      f('session/role', 0, { role: 'router' }),
+      f('session/role', 1, { role: 'normal', reason: '降回' }),
+    ], null)
+    // S2：worker
+    await seedSession(store, 'S2', [f('session/role', 0, { role: 'worker' })], null)
+    // S3：没有任何角色事件
+    await seedSession(store, 'S3', [f('turn/start', 0, { turn: 1 })], null)
+    await writer.drain()
+
+    const db = openIndexDb({ home })
+    const rows = db.prepare('SELECT session_id, role FROM sessions ORDER BY session_id').all()
+    expect(rows).toEqual([
+      { session_id: 'S1', role: 'normal' },
+      { session_id: 'S2', role: 'worker' },
+      { session_id: 'S3', role: 'normal' },
+    ])
+    await store.closeAll()
+  })
 })
 
 describe('T3.6 index rebuild', () => {

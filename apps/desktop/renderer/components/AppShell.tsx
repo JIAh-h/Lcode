@@ -275,10 +275,34 @@ export function AppShell({ children }: { children: ReactNode }) {
       toast(t('工作区已归档'))
     }
   }
+  /**
+   * 编排会话的分组（docs/26 §4.4）。
+   *
+   * - `rootSessions`：可作为顶层条目展示的会话——**worker 被排除在外**。
+   *   不排除的话，Router 每派 3 个任务侧栏就多 3 条，比不折叠还乱。
+   * - `workersByParent`：`Router session_id → 它的 worker`，渲染时缩进到 Router 下面。
+   *
+   * 判据用 `role`（索引投影）而不是标题前缀：标题是用户可改的元数据，不能当语义用。
+   */
+  const { rootSessions, workersByParent } = useMemo(() => {
+    const byParent = new Map<string, SessionMeta[]>()
+    for (const session of sessions) {
+      if (session.role !== 'worker') continue
+      const parent = session.parent_session
+      if (parent === null || parent === undefined || parent === '') continue
+      const list = byParent.get(parent) ?? []
+      list.push(session)
+      byParent.set(parent, list)
+    }
+    return {
+      rootSessions: sessions.filter((session) => session.role !== 'worker'),
+      workersByParent: byParent,
+    }
+  }, [sessions])
   /** 没有选择工作区的会话单独归入「最近任务」，不再伪装成某个工作区 */
   const recentSessions = useMemo(() => {
     const pinnedSessions = sidebar.pinnedSessions
-    return sessions
+    return rootSessions
       .filter((session) => session.workspace === null || session.workspace === '')
       .sort((a, b) => {
         const ia = pinnedSessions.indexOf(a.session_id)
@@ -288,10 +312,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         if (ib === -1) return -1
         return ia - ib
       })
-  }, [sessions, sidebar.pinnedSessions])
+  }, [rootSessions, sidebar.pinnedSessions])
   const sessionGroups = useMemo(() => {
     const groups = new Map<string, { workspace: string | null; name: string; items: SessionMeta[] }>()
-    for (const session of sessions) {
+    for (const session of rootSessions) {
       // 空工作区不进工作区树：它属于「最近任务」
       if (session.workspace === null || session.workspace === '') continue
       const key = session.workspace
@@ -323,7 +347,48 @@ export function AppShell({ children }: { children: ReactNode }) {
       return ia - ib
     })
     return entries
-  }, [sessions, sidebar])
+  }, [rootSessions, sidebar])
+  /**
+   * 渲染一条会话行（含编排标记与它的 worker）。
+   *
+   * 抽成函数而不是复制两份：工作区分组与「最近任务」都要用，两处各写一遍
+   * 是"一处加了徽标、另一处忘了"的经典来源。
+   */
+  const renderSessionRow = (it: SessionMeta): ReactNode => {
+    const workers = workersByParent.get(it.session_id) ?? []
+    return (
+      <div key={it.session_id}>
+        <div className={'snrow' + (pathname.startsWith(`/sessions/${it.session_id}`) ? ' on' : '')}>
+          <NavLink to={`/sessions/${it.session_id}`} className="sitem" title={it.title || t('未命名会话')}>
+            {it.role === 'router' && (
+              <span className="srole" title={t('编排调度会话：可派发 worker，自己不执行')}>
+                {t('调度')}
+              </span>
+            )}
+            <span className="sname">{it.title || t('未命名会话')}</span>
+            {workers.length > 0 && (
+              <span className="sworkers" title={t('{n} 个 worker', { n: workers.length })}>
+                {workers.length}
+              </span>
+            )}
+          </NavLink>
+          <SessionActionsMenu session={it} buttonClass="sga sact" />
+        </div>
+        {/* worker 缩进挂在 Router 下：它们是同一个任务派出去的，不该和普通会话平铺 */}
+        {workers.map((worker) => (
+          <div
+            className={'snrow snrow-worker' + (pathname.startsWith(`/sessions/${worker.session_id}`) ? ' on' : '')}
+            key={worker.session_id}
+          >
+            <NavLink to={`/sessions/${worker.session_id}`} className="sitem" title={worker.title || t('未命名会话')}>
+              <span className="sname">{worker.title || t('未命名会话')}</span>
+            </NavLink>
+            <SessionActionsMenu session={worker} buttonClass="sga sact" />
+          </div>
+        ))}
+      </div>
+    )
+  }
   /* 菜单文案：标签与提示统一过 t()；`label` 同时用作 key，仍保留中文原文 */
   const MENUS: { id: string; label: string; items: MItem[] }[] = [
     {
@@ -611,21 +676,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                     </div>
                     {open && (
                       <div className="slist">
-                        {group.items.map((it) => (
-                          <div
-                            className={'snrow' + (pathname.startsWith(`/sessions/${it.session_id}`) ? ' on' : '')}
-                            key={it.session_id}
-                          >
-                            <NavLink
-                              to={`/sessions/${it.session_id}`}
-                              className="sitem"
-                              title={it.title || t('未命名会话')}
-                            >
-                              <span className="sname">{it.title || t('未命名会话')}</span>
-                            </NavLink>
-                            <SessionActionsMenu session={it} buttonClass="sga sact" />
-                          </div>
-                        ))}
+                        {group.items.map((it) => renderSessionRow(it))}
                       </div>
                     )}
                   </div>
@@ -635,21 +686,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 <>
                   <div className="shead recent-head">{t('最近任务')}</div>
                   <div className="slist">
-                    {recentSessions.map((it) => (
-                      <div
-                        className={'snrow' + (pathname.startsWith(`/sessions/${it.session_id}`) ? ' on' : '')}
-                        key={it.session_id}
-                      >
-                        <NavLink
-                          to={`/sessions/${it.session_id}`}
-                          className="sitem"
-                          title={it.title || t('未命名会话')}
-                        >
-                          <span className="sname">{it.title || t('未命名会话')}</span>
-                        </NavLink>
-                        <SessionActionsMenu session={it} buttonClass="sga sact" pinLabel={t('置顶')} />
-                      </div>
-                    ))}
+                    {recentSessions.map((it) => renderSessionRow(it))}
                   </div>
                 </>
               )}

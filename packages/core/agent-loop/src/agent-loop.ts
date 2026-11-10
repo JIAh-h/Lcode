@@ -50,7 +50,15 @@ class ConcreteAgentLoop implements AgentLoopRuntime {
   /** 同一 agent 只挂一个引擎（resume 幂等） */
   private attach(inner: AgentHandle): LoopHandle {
     const existing = this.engines.get(inner.id)
-    if (existing !== undefined) return existing.handle
+    /*
+     * 已销毁的引擎不能复用。
+     *
+     * `resume` 的语义是"接上这个会话的循环"，不是"把上次那个已经关掉的循环递给你"。
+     * 不复用判断的话，worker 收尾释放 agent（省内存）之后，任何再次 `resume`
+     * 都会拿到一个 disposed 引擎，`followup` 立刻抛 `EC-NOT_RUNNING`——
+     * 表现是"给已完成的 worker 追加输入永远失败"，而错误信息完全指错方向。
+     */
+    if (existing !== undefined && !existing.isDisposed) return existing.handle
     const engine = new TurnEngine(this.deps, inner)
     this.engines.set(inner.id, engine)
     return engine.handle

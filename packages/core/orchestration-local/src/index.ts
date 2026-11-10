@@ -29,10 +29,16 @@ interface WorkerRecord {
   readonly workerSessionId: string
   readonly routerSessionId: string
   readonly task: string
+  /** 边界与完成判据（26 §5.5），派发时一次性确定 */
+  readonly scope?: string | undefined
+  readonly doneWhen?: string | undefined
   readonly dispatchedAt: number
   readonly preview: boolean
   state: 'running' | 'settled'
   settled?: WorkerCompletion | undefined
+  /** worker 提了问在等人（26 §5.6） */
+  needsInput?: boolean | undefined
+  question?: string | undefined
   handle?: Awaited<ReturnType<AgentLoopRuntime['create']>> | undefined
 }
 
@@ -95,25 +101,66 @@ export function registerLocalOrchestration(
     return usage.heapUsed / limit > heapThreshold
   }
 
+  /**
+   * 读某个会话最近一条 `orchestration/mode` 事件（26 §7.4）。
+   *
+   * 读不到（会话未打开 / 还没切过档 / 事件格式不对）就返回 undefined，
+   * 由调用方回落到全局兜底值——**绝不用异常表达"没有设置"**。
+   */
+  const sessionModeOf = (sessionId: string): OrchestrationMode | undefined => {
+    try {
+      const events = options.sessions.sessionServiceFor(sessionId).events()
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index]
+        if (event?.type !== 'orchestration/mode') continue
+        const data = event.data as { readonly mode?: unknown } | null
+        const value = data?.mode
+        return value === 'off' || value === 'observe' || value === 'auto' ? value : undefined
+      }
+    } catch {
+      // 会话未打开：按全局兜底处理
+    }
+    return undefined
+  }
+
+  const modeFor = (sessionId: string): OrchestrationMode => sessionModeOf(sessionId) ?? mode
+
   const service: OrchestrationService = {
     mode: () => mode,
 
-    setMode(next, reason) {
-      mode = next
-      // 档位变更本身落事件：`observe` 下"本来会派发什么"必须可回放（26 §7.4）。
-      // 这里没有会话上下文，由调用方（runtime/CLI）负责写进目标会话。
-      void reason
+    modeFor,
+
+    setMode(next, reason, sessionId) {
+      /*
+       * 传了会话就落该会话的事件（按会话生效）；没传就改全局兜底值。
+       *
+       * 档位变更本身必须落事件：`observe` 下"本来会派发什么"必须可回放（26 §7.4）。
+       */
+      if (sessionId === undefined) {
+        mode = next
+        return
+      }
+      try {
+        options.sessions.sessionServiceFor(sessionId).append({
+          type: 'orchestration/mode',
+          data: { mode: next, ...(reason === undefined ? {} : { reason }) },
+        })
+      } catch {
+        // 会话未打开：退回全局兜底，至少让档位不丢
+        mode = next
+      }
     },
 
     async dispatch(input: WorkerDispatchInput): Promise<WorkerDispatchReceipt> {
-      if (mode === 'off') throw new Error('跨会话编排已关闭（off）：请先切换到 observe 或 auto。')
+      const sessionMode = modeFor(input.routerSessionId)
+      if (sessionMode === 'off') throw new Error('跨会话编排已关闭（off）：请先切换到 observe 或 auto。')
       const taskId = `task-${++nextTaskSeq}-${Date.now().toString(36)}`
 
       // worker 不能派发 worker：这是**硬约束**，不是配额（26 §7.5.2）。
       const role = options.roleOf(input.routerSessionId)
       if (role === 'worker') throw new Error('worker 不能派发 worker：跨会话编排最多两层。')
 
-      if (mode === 'observe') {
+      if (sessionMode === 'observe') {
         // 预演：只落事件，不建会话、不调模型。workerSessionId 用空串表示"没有实体"。
         const record: WorkerRecord = {
           taskId,
@@ -161,6 +208,112 @@ export function registerLocalOrchestration(
     running(routerSessionId) {
       return runningCount(routerSessionId)
     },
+
+    taskIdOf(workerSessionId) {
+      for (const record of workers.values()) {
+        if (record.workerSessionId === workerSessionId) return record.taskId
+      }
+      return undefined
+    },
+
+    async inject(input) {
+      const record = workers.get(input.taskId)
+      if (record === undefined || disposed) return false
+      // 预演记录没有实体会话，注入无处可去
+      if (record.preview || record.workerSessionId === '') return false
+
+      /*
+       * 先在 Router 侧记一笔（26 §5.5）。
+       *
+       * 顺序有意：审计先于副作用。反过来的话，如果 resume 成功但记账失败，
+       * Router 日志里就会出现"worker 莫名改道"的一段。
+       */
+      appendToRouter(options.sessions, record.routerSessionId, {
+        type: 'worker/notified',
+        data: {
+          taskId: record.taskId,
+          workerSessionId: record.workerSessionId,
+          text: input.text,
+          ...(input.reason === undefined ? {} : { reason: input.reason }),
+        },
+      })
+
+      try {
+        /*
+         * 用 `resume` 而不是复用 `record.handle`：
+         * - worker 已 settled 时，原来的 handle 已经跑完，再 followup 不会重新驱动
+         * - resume 是幂等的（同一 agent 只挂一个引擎），运行中也能安全调用
+         */
+        const loop = options.ctx.get('agentLoop') as AgentLoopRuntime
+        const handle = await loop.resume({
+          sessionId: asSessionId(record.workerSessionId),
+          agentId: asAgentId(record.workerSessionId),
+        })
+        // 续跑意味着它重新"在做"，状态与遗留结论都要清掉
+        record.state = 'running'
+        record.settled = undefined
+        record.needsInput = undefined
+        record.question = undefined
+        /*
+         * 注入触发的那一轮也要收尾——否则 Router 收不到它的第二次汇报。
+         *
+         * 用后台 promise 而不是 await：`inject` 是工具调用，调用方不该被整轮
+         * 执行阻塞（与 `dispatch` 同一条原则，26 §5.1）。promise 登记进
+         * inflightRuns，dispose 时会等它，避免"关完还有写入"。
+         */
+        const run = (async () => {
+          await handle.followup({ kind: 'text', text: input.text }).catch(() => undefined)
+          settleFromSession(record, 'completed')
+          await handle.dispose()
+          record.handle = undefined
+        })().finally(() => {
+          inflightRuns.delete(run)
+        })
+        inflightRuns.add(run)
+        return true
+      } catch {
+        // worker 会话已关闭：注入失败，但审计事件保留（事实就是尝试过）
+        return false
+      }
+    },
+
+    async report(input) {
+      const taskId = service.taskIdOf(input.workerSessionId)
+      if (taskId === undefined || disposed) return false
+      const record = workers.get(taskId)
+      if (record === undefined) return false
+
+      appendToRouter(options.sessions, record.routerSessionId, {
+        type: 'worker/reported',
+        data: {
+          taskId,
+          workerSessionId: input.workerSessionId,
+          kind: input.kind,
+          summary: input.summary,
+          ...(input.question === undefined ? {} : { question: input.question }),
+          ...(input.needs === undefined ? {} : { needs: [...input.needs] }),
+        },
+      })
+
+      if (input.kind === 'question') {
+        /*
+         * 求助**绕过批处理**（26 §5.6）。
+         *
+         * 批处理的存在是为了"别让密集完成刷屏"，而求助是等不起的：
+         * 窗口里多等 200ms、冷却里多等 10s，worker 就白站着。
+         */
+        record.needsInput = true
+        record.question = input.question ?? input.summary
+        await flushReport(record.routerSessionId, [], {
+          taskId,
+          workerSessionId: input.workerSessionId,
+          summary: input.summary,
+          ...(input.question === undefined ? {} : { question: input.question }),
+        })
+      }
+      // progress 只记录，不打扰；done 由 worker 收尾路径负责，这里不重复唤醒
+      return true
+    },
   }
 
   async function materialize(input: WorkerDispatchInput, taskId: string): Promise<WorkerDispatchReceipt> {
@@ -175,11 +328,21 @@ export function registerLocalOrchestration(
       // 归属标记（26 §4.2）：worker 的父是 Router，但生命周期独立于它。
       parentSessionId: input.routerSessionId,
     })
+    /*
+     * 必须**同时**写 `session/role`（26 §4.4）。
+     *
+     * `parent_session` 只说明"谁派的"，说明不了"它是什么"——侧栏靠 `role === 'worker'`
+     * 把 worker 从顶层列表里摘出去并缩进挂到 Router 下。只设 parent 不设 role 的话，
+     * worker 会很普通地出现在顶层，同时又是某人的子会话（实测就是这样）。
+     */
+    appendWorkerRole(options.sessions, created.session_id)
     const record: WorkerRecord = {
       taskId,
       workerSessionId: created.session_id,
       routerSessionId: input.routerSessionId,
       task: input.task,
+      ...(input.scope === undefined ? {} : { scope: input.scope }),
+      ...(input.doneWhen === undefined ? {} : { doneWhen: input.doneWhen }),
       dispatchedAt: Date.now(),
       preview: false,
       state: 'running',
@@ -229,23 +392,11 @@ export function registerLocalOrchestration(
       }
       input.signal?.addEventListener('abort', onAbort, { once: true })
       try {
-        await record.handle.followup({ kind: 'text', text: record.task })
+        await record.handle.followup({ kind: 'text', text: briefingText(record) })
       } finally {
         input.signal?.removeEventListener('abort', onAbort)
       }
-      /*
-       * 收尾读取 worker 自己的会话。它理论上总是打开着——但 dispose 期间可能
-       * 已被 close，此时不该让整个收尾失败（那会把一次成功执行误报成 failed）。
-       */
-      const session = safeSession(options.sessions, record.workerSessionId)
-      settle(record, {
-        taskId: record.taskId,
-        workerSessionId: record.workerSessionId,
-        outcome: input.signal !== undefined && input.signal.aborted ? 'cancelled' : 'completed',
-        ...(session === undefined
-          ? {}
-          : { summary: lastAssistantText(session), artifacts: collectArtifacts(session) }),
-      })
+      settleFromSession(record, input.signal !== undefined && input.signal.aborted ? 'cancelled' : 'completed')
     } catch (error) {
       settle(record, {
         taskId: record.taskId,
@@ -258,6 +409,29 @@ export function registerLocalOrchestration(
       record.handle = undefined
       pumpQueue()
     }
+  }
+
+  /**
+   * 从 worker 会话的日志收尾（26 §5.4）。
+   *
+   * 抽出来是因为**有两处会跑 worker 回合**：初次派发与后续 `inject`。
+   * 只给初次派发收尾的话，注入触发的那一轮跑完不会写 `worker/completed`，
+   * Router 永远等不到第二次汇报（实测：注入后 worker 明明跑完了，汇报没有）。
+   */
+  function settleFromSession(record: WorkerRecord, outcome: WorkerCompletion['outcome']): void {
+    /*
+     * 收尾读取 worker 自己的会话。它理论上总是打开着——但 dispose 期间可能
+     * 已被 close，此时不该让整个收尾失败（那会把一次成功执行误报成 failed）。
+     */
+    const session = safeSession(options.sessions, record.workerSessionId)
+    settle(record, {
+      taskId: record.taskId,
+      workerSessionId: record.workerSessionId,
+      outcome,
+      ...(session === undefined
+        ? {}
+        : { summary: lastAssistantText(session), artifacts: collectArtifacts(session) }),
+    })
   }
 
   function settle(record: WorkerRecord, completion: WorkerCompletion): void {
@@ -311,7 +485,22 @@ export function registerLocalOrchestration(
   }
 
   /** 把一批完成合并成**一条**汇报，唤醒 Router 一次。 */
-  async function flushReport(routerSessionId: string, completions: readonly WorkerCompletion[]): Promise<void> {
+  /**
+   * 把一批完成合并成**一条**汇报，唤醒 Router 一次。
+   *
+   * `question` 非空时走**求助**通道：不发批量汇报，改发一条带问号的即时消息
+   * （26 §5.6）。求助等不起批处理窗口，也不该被合并成"顺手一提"。
+   */
+  async function flushReport(
+    routerSessionId: string,
+    completions: readonly WorkerCompletion[],
+    question?: {
+      readonly taskId: string
+      readonly workerSessionId: string
+      readonly summary: string
+      readonly question?: string | undefined
+    },
+  ): Promise<void> {
     try {
       /*
        * 唤醒 Router：`agentLoop.resume` 是幂等的（同一 agent 只挂一个引擎），
@@ -322,10 +511,30 @@ export function registerLocalOrchestration(
         sessionId: asSessionId(routerSessionId),
         agentId: asAgentId(routerSessionId),
       })
-      await handle.followup({ kind: 'text', text: batchReportText(completions) })
+      const text = question === undefined ? batchReportText(completions) : questionText(question)
+      await handle.followup({ kind: 'text', text })
     } catch {
       // Router 已关闭或不接受输入：汇报丢失，事件仍在日志里可查。
     }
+  }
+
+  /**
+   * 求助文案（26 §5.6）。
+   *
+   * 刻意与汇报分开写：汇报是"事情做完了"，求助是"事情卡住了"，
+   * 两者对读者要求的动作完全不同——前者可以只看不回，后者必须回。
+   */
+  function questionText(input: {
+    readonly taskId: string
+    readonly workerSessionId: string
+    readonly summary: string
+    readonly question?: string | undefined
+  }): string {
+    return [
+      `worker ${input.taskId} 需要你的决定｜会话 @session:${input.workerSessionId}`,
+      input.question ?? input.summary,
+      '（它在等这一条；回答后用 inject 传回去，或直接忽略并取消它）',
+    ].join('\n')
   }
 
   /**
@@ -411,6 +620,31 @@ function v8HeapLimit(): number {
   return 0
 }
 
+/**
+ * worker 收到的第一条消息（26 §5.5）。
+ *
+ * 为什么不是直接把 `task` 丢过去：worker 看不到 Router 的对话，它唯一能依据的
+ * 就是这条消息。所以这里必须把**边界**和**完成判据**一并写进去——
+ * 只说"要做什么"而不说"什么算做完"，完成标准就只能由 worker 自己定义。
+ *
+ * 没有 scope / doneWhen 时保持原样（单段文本），不让既有调用方看到格式变化。
+ */
+function briefingText(record: {
+  readonly task: string
+  readonly scope?: string | undefined
+  readonly doneWhen?: string | undefined
+}): string {
+  if (record.scope === undefined && record.doneWhen === undefined) return record.task
+  const lines = [record.task]
+  if (record.scope !== undefined && record.scope.trim() !== '') {
+    lines.push('', `**边界（不要做）**：${record.scope}`)
+  }
+  if (record.doneWhen !== undefined && record.doneWhen.trim() !== '') {
+    lines.push('', `**完成判据**：${record.doneWhen}`)
+  }
+  return lines.join('\n')
+}
+
 function toStatus(record: WorkerRecord): WorkerStatus {
   return {
     taskId: record.taskId,
@@ -423,6 +657,30 @@ function toStatus(record: WorkerRecord): WorkerStatus {
       ? {}
       : { completedAt: Date.now(), outcome: record.settled.outcome }),
     ...(record.preview ? { preview: true } : {}),
+    // 求助状态要跟着状态一起出去：Router 靠它判断"该不该主动问一句"
+    ...(record.needsInput === true ? { needsInput: true } : {}),
+    ...(record.question === undefined ? {} : { question: record.question }),
+  }
+}
+
+/**
+ * 给新 worker 会话写 `session/role`（docs/26 §4.4）。
+ *
+ * 直接追加事件而不是经 `sessionRoles` 服务：后者属于装配层，编排 provider 不该依赖它；
+ * `session/role` 是核心事件契约，写进去就够了（角色由日志派生，可回放）。
+ *
+ * **为什么必须写**：`parent_session` 只说明"谁派的"，说明不了"它是什么"。
+ * 侧栏靠 `role === 'worker'` 把 worker 从顶层摘出去并缩进挂到 Router 下；
+ * 只设 parent 不设 role 的话，它会既出现在顶层、又是某人的子会话（实测就是这样）。
+ */
+function appendWorkerRole(sessions: RuntimeSessionsService, workerSessionId: string): void {
+  try {
+    sessions.sessionServiceFor(workerSessionId).append({
+      type: 'session/role',
+      data: { role: 'worker', reason: '由 Router 派发' },
+    })
+  } catch {
+    // 会话刚建就写失败属于异常情况；worker 仍会跑，只是侧栏不会缩进它。
   }
 }
 
@@ -437,7 +695,10 @@ function toStatus(record: WorkerRecord): WorkerStatus {
 function appendToRouter(
   sessions: RuntimeSessionsService,
   routerSessionId: string,
-  event: { readonly type: 'worker/dispatched' | 'worker/completed'; readonly data: unknown },
+  event: {
+    readonly type: 'worker/dispatched' | 'worker/completed' | 'worker/notified' | 'worker/reported'
+    readonly data: unknown
+  },
 ): void {
   try {
     sessions.sessionServiceFor(routerSessionId).append(event as never)
@@ -459,6 +720,9 @@ function writeDispatched(
       workerSessionId,
       task: input.task,
       routerSessionId: input.routerSessionId,
+      // 边界与完成判据也落事件：回放时要能解释"worker 被要求做到什么程度"
+      ...(input.scope === undefined ? {} : { scope: input.scope }),
+      ...(input.doneWhen === undefined ? {} : { doneWhen: input.doneWhen }),
       ...(input.reason === undefined ? {} : { reason: input.reason }),
       dispatchedAt: Date.now(),
     },
@@ -506,16 +770,42 @@ function shouldReport(completion: WorkerCompletion): boolean {
   return false
 }
 
-/** 单个 worker 的一行摘要：模型可读、简洁、带 taskId 便于追问。 */
-function reportText(completion: WorkerCompletion): string {
-  const head =
-    completion.outcome === 'completed'
-      ? `worker ${completion.taskId} 已完成`
-      : completion.outcome === 'cancelled'
-        ? `worker ${completion.taskId} 被取消`
-        : `worker ${completion.taskId} 失败`
-  const lines = [head]
-  if (completion.summary !== undefined && completion.summary !== '') lines.push(completion.summary)
+/**
+ * 汇报里摘要的字数上限（docs/26 §5.4 的 Inline/Spill 纪律）。
+ *
+ * 官方把上下文当缓存：**Inline 只放短摘要 + 稳定 ID，其余 Spill 掉留指针**。
+ * 不设上限时 `summary` 是 worker 最后一条 assistant 的全文，动辄几千字，
+ * 会作为 user 消息永久留在 Router 历史里——派十个 worker 就把上下文填满了。
+ */
+const REPORT_SUMMARY_MAX = 500
+/** 合并汇报时每条更短：一批三个 worker 的长摘要加起来同样会撑爆。 */
+const REPORT_SUMMARY_MAX_BATCH = 200
+
+/**
+ * 单个 worker 的汇报文本。
+ *
+ * 两处刻意的设计：
+ *
+ * 1. **带上 `@session:<workerSessionId>`**。没有它，Router 只知道 `task-1-xxx`，
+ *    而 `taskId` 不是会话标识——它无法 `@session:` 跳过去看 worker 的完整日志，
+ *    Chain of Recall 就断了。`worker/completed` 事件里虽有 sessionId，但那个事件
+ *    不是 surface 事件、不进模型可见历史，等于 Router 看不见。
+ * 2. **摘要截断并显式说明**。不说明的话模型会以为摘要就这么多，进而基于残缺信息下判断。
+ */
+function reportText(completion: WorkerCompletion, maxSummary = REPORT_SUMMARY_MAX): string {
+  const verb =
+    completion.outcome === 'completed' ? '已完成' : completion.outcome === 'cancelled' ? '被取消' : '失败'
+  const sessionRef = completion.workerSessionId === '' ? '' : `｜会话 @session:${completion.workerSessionId}`
+  const lines = [`worker ${completion.taskId} ${verb}${sessionRef}`]
+
+  const summary = completion.summary?.trim() ?? ''
+  if (summary !== '') {
+    if (summary.length <= maxSummary) lines.push(summary)
+    else {
+      lines.push(`${summary.slice(0, maxSummary).trimEnd()}…`)
+      lines.push(`（摘要已截断，原长 ${summary.length} 字；完整内容见上面的会话）`)
+    }
+  }
   if (completion.error !== undefined) lines.push(`错误：${completion.error}`)
   const paths = completion.artifacts?.changedPaths ?? []
   if (paths.length > 0) lines.push(`改动文件：${paths.join('、')}`)
@@ -539,7 +829,7 @@ function batchReportText(completions: readonly WorkerCompletion[]): string {
     failed === 0
       ? `${ordered.length} 个 worker 已完成`
       : `${ordered.length} 个 worker 已结束（${failed} 个未成功）`
-  return [head, '', ...ordered.map((c) => `- ${reportText(c).replaceAll('\n', ' ')}`)].join('\n')
+  return [head, '', ...ordered.map((c) => `- ${reportText(c, REPORT_SUMMARY_MAX_BATCH).replaceAll('\n', ' ')}`)].join('\n')
 }
 
 /** 汇报排序：失败最先，取消次之，成功最后。 */

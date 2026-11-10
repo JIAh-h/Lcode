@@ -29,8 +29,24 @@ const EXECUTION_TOOLS: ReadonlySet<string> = new Set([
   'run_code',
 ])
 
-/** worker 不能持有的工具：派发类（否则变成三层结构，26 §7.5.2）。 */
-const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set(['dispatch_worker'])
+/**
+ * 只有 Router 该看到的工具（26 §3.2 / §5.5）。
+ *
+ * 普通会话也一并排除：`dispatch_worker` 在普通会话里没有任何意义——没有
+ * Router 身份就没有 worker 归属、没有汇报回路，派出去的任务会变成一个
+ * 谁也管不到的孤儿会话。工具内部还有第二道防线，这里是第一道。
+ */
+const ROUTER_ONLY_TOOLS: ReadonlySet<string> = new Set(['dispatch_worker', 'list_workers', 'inject_worker'])
+
+/** worker 不能持有的工具：派发与指挥类（否则变成三层结构，26 §7.5.2）。 */
+const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
+  'dispatch_worker',
+  'list_workers',
+  'inject_worker',
+])
+
+/** 只有 worker 该看到的工具：向 Router 回传（26 §5.6）。 */
+const WORKER_ONLY_TOOLS: ReadonlySet<string> = new Set(['report_to_router'])
 
 export interface SessionRoleService {
   roleOf(sessionId: string): SessionRole
@@ -74,12 +90,16 @@ export function registerSessionRoles(input: {
     const sessionId = promptCtx.sessionId
     if (sessionId === undefined) return all
     const role = service.roleOf(sessionId)
-    if (role === 'router') return all.filter((tool) => !EXECUTION_TOOLS.has(tool.name))
+    if (role === 'router') {
+      // Router：去掉执行能力与「只有 worker 该用」的工具，保留派发/巡检/注入
+      return all.filter((tool) => !EXECUTION_TOOLS.has(tool.name) && !WORKER_ONLY_TOOLS.has(tool.name))
+    }
     if (role === 'worker') {
-      // worker 有完整执行工具，但不能派发：否则变成三层结构（26 §7.5.2）。
+      // worker 有完整执行工具，但不能派发或指挥别人：否则变成三层结构（26 §7.5.2）。
       return all.filter((tool) => !WORKER_FORBIDDEN_TOOLS.has(tool.name))
     }
-    return all
+    // 普通会话：既不是 Router 也不是 worker，两边专属的工具都不给
+    return all.filter((tool) => !ROUTER_ONLY_TOOLS.has(tool.name) && !WORKER_ONLY_TOOLS.has(tool.name))
   })
 
   const unregisterService = input.ctx.set('sessionRoles', service)

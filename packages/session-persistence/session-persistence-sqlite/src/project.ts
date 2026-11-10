@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import type { ModelMessage } from '@lcode/session'
+import type { ModelMessage, SessionRole } from '@lcode/session'
 import { deriveEventMessage } from '@lcode/session'
 import type { EventFrame, FileHeaderFrame, LogRecordSpan } from '@lcode/session-persistence-jsonl'
 import { frameToEvent, scanSpans } from '@lcode/session-persistence-jsonl'
@@ -39,6 +39,14 @@ export interface SessionRow {
   readonly model_name: string | null
   readonly status: SessionStatus
   readonly parent_session: string | null
+  /**
+   * 会话角色（docs/26 §4.4）。由 `session/role` 事件派生，不是头部字段。
+   *
+   * 放进投影的理由：侧栏要按角色分组/打标，而它每次都要列几十个会话；
+   * 让渲染层逐个读 JSONL 找角色事件是不可接受的。索引本就是可重建投影，
+   * `index rebuild` 会原样重算这一列（I1 不受影响）。
+   */
+  readonly role: SessionRole
   readonly seed_length: number
   readonly log_path: string
   readonly log_codec: 'none' | 'zstd'
@@ -718,6 +726,7 @@ export function projectSession(input: ProjectionInput): ProjectedSession {
     model_name: lastModel,
     status,
     parent_session: header.parentSession,
+    role: lastRole(events),
     seed_length: header.seedLength,
     log_path: sessionLogRelPath(header.cwd, sessionId),
     log_codec: header.codec,
@@ -742,14 +751,31 @@ export function projectSession(input: ProjectionInput): ProjectedSession {
 
 // ─────────────── 落库 ───────────────
 
+/**
+ * 最后一个 `session/role` 事件给出的角色（docs/26 §4.4）；没有则 `normal`。
+ *
+ * 角色可变（普通会话可升格为 Router），所以取**最后一条**而不是第一条。
+ */
+function lastRole(events: readonly { readonly type: string; readonly data: unknown }[]): SessionRole {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'session/role') continue
+    const data = event.data
+    if (typeof data !== 'object' || data === null) return 'normal'
+    const role = (data as { readonly role?: unknown }).role
+    return role === 'router' || role === 'worker' ? role : 'normal'
+  }
+  return 'normal'
+}
+
 const SESSIONS_UPSERT = `
 INSERT INTO sessions (
   session_id, workspace, workspace_key, title, created_at, updated_at, last_seq,
-  preset, model_provider, model_name, status, parent_session, seed_length,
+  preset, model_provider, model_name, status, parent_session, role, seed_length,
   log_path, log_codec, log_bytes, log_revision, key_id, indexed_at
 ) VALUES (
   @session_id, @workspace, @workspace_key, @title, @created_at, @updated_at, @last_seq,
-  @preset, @model_provider, @model_name, @status, @parent_session, @seed_length,
+  @preset, @model_provider, @model_name, @status, @parent_session, @role, @seed_length,
   @log_path, @log_codec, @log_bytes, @log_revision, @key_id, @indexed_at
 )
 ON CONFLICT(session_id) DO UPDATE SET
@@ -766,6 +792,7 @@ ON CONFLICT(session_id) DO UPDATE SET
   model_name = excluded.model_name,
   status = excluded.status,
   parent_session = excluded.parent_session,
+  role = excluded.role,
   seed_length = excluded.seed_length,
   log_path = excluded.log_path,
   log_codec = excluded.log_codec,

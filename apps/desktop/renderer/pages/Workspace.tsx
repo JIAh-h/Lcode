@@ -7,6 +7,7 @@ import { CompactionDialog } from '../components/CompactionDialog.tsx'
 import { PlanReviewDialog } from '../components/PlanReviewDialog.tsx'
 import { SessionStream } from '../components/SessionStream.tsx'
 import { TurnStatusBar } from '../components/TurnStatusBar.tsx'
+import { OrchestrationBar } from '../components/OrchestrationBar.tsx'
 import { FileTree, type FileMarker } from '../components/FileTree.tsx'
 import { SessionActionsMenu } from '../components/SessionActionsMenu.tsx'
 import { PanelSplitter, useResizablePanel } from '../components/PanelSplitter.tsx'
@@ -789,8 +790,9 @@ export function WorkspacePage() {
               />
             </div>
           </div>
-          {/* 会话区与输入框之间的常驻状态条：本轮芯片 + 回到底部 */}
+          {/* 会话区与输入框之间的常驻状态条：编排在途 + 本轮芯片 + 回到底部 */}
           <div className="turnstrip">
+            <OrchestrationBar sessionId={sessionId} />
             <TurnStatusBar todos={todos} changes={changes} />
             {jumpVisible ? (
               <button

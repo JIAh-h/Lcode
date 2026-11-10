@@ -26,6 +26,18 @@ export interface Migration {
 /** 迁移清单：新增迁移**只追加**，不改已发布的项（22 §8.3「只增不改」） */
 export const MIGRATIONS: readonly Migration[] = [
   { version: 1, name: SCHEMA_NAME, sql: DDL_STATEMENTS },
+  {
+    version: 2,
+    name: '0002-session-role',
+    /*
+     * 会话角色投影（docs/26 §4.4）。
+     *
+     * 为什么要有这一列：侧栏要按角色给会话分组/打标，每次列几十个会话。
+     * 让渲染层逐个读 JSONL 找 `session/role` 事件不可接受，所以把它变成
+     * 索引的一部分——索引本就是可重建投影，`index rebuild` 会原样重算。
+     */
+    sql: ['ALTER TABLE sessions ADD COLUMN role TEXT'],
+  },
 ]
 
 /** 迁移脚本内容的 sha256（`schema_migrations.checksum`） */

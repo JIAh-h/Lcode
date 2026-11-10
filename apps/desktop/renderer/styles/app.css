@@ -1066,3 +1066,34 @@ body.noside .side { display: none; }
   .toolcard-summary { max-width: 40%; }
   .toolcard-title { max-width: 35%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
+
+/* ── 编排：新建时的调度会话勾选（docs/26 §3.3） ── */
+.orchestratetoggle { display: flex; align-items: center; gap: 7px; margin-top: var(--s3); font-size: 12px; color: var(--text-secondary); cursor: pointer; user-select: none; }
+.orchestratetoggle input { width: 13px; height: 13px; accent-color: var(--text-primary); cursor: pointer; margin: 0; }
+.orchestratetoggle:hover { color: var(--text-primary); }
+
+/* ── 编排：侧栏的 Router 标记与 worker 归属（docs/26 §4.4） ── */
+/* 角色徽标：小、方、低调——它是"这是什么会话"的提示，不该抢标题的注意力 */
+.srole { flex: none; margin-right: 6px; padding: 1px 5px; border-radius: 4px; background: var(--bg-inset); color: var(--text-secondary); font-size: 10px; line-height: 15px; letter-spacing: 0.2px; }
+.snrow.on .srole { background: var(--bg-canvas); }
+/* worker 计数：与徽标同尺寸，靠右 */
+.sworkers { flex: none; margin-left: auto; padding: 1px 5px; border-radius: 999px; border: 1px solid var(--border-subtle); color: var(--text-muted); font-size: 10px; line-height: 14px; }
+/* worker 行：缩进 + 左侧细线，表达"它属于上面那个 Router" */
+.snrow-worker { padding-left: 18px; position: relative; }
+.snrow-worker::before { content: ''; position: absolute; left: 9px; top: 50%; width: 5px; height: 1px; background: var(--border-strong); }
+.snrow-worker .sname { color: var(--text-secondary); font-size: 12.5px; }
+
+/* ── 编排：会话页的在途 worker 状态条（docs/26 §6） ── */
+.orchbar { position: relative; flex: none; }
+.orchchip { display: inline-flex; align-items: center; gap: 6px; height: 22px; padding: 0 8px; border: 1px solid var(--border-subtle); border-radius: 999px; background: var(--bg-elevated); color: var(--text-secondary); font-size: 11.5px; cursor: pointer; }
+.orchchip:hover { border-color: var(--border-strong); color: var(--text-primary); }
+.orchdot { width: 5px; height: 5px; border-radius: 50%; background: var(--state-running); }
+.orchpreview { padding-left: 6px; border-left: 1px solid var(--border-subtle); color: var(--text-muted); }
+.orchpop { position: absolute; bottom: calc(100% + 6px); left: 0; z-index: 40; width: 320px; padding: 6px; border: 1px solid var(--border-subtle); border-radius: var(--r3); background: var(--bg-elevated); box-shadow: var(--sh-2); }
+.orchpop-head { padding: 4px 8px 6px; color: var(--text-muted); font-size: 11px; }
+.orchpop-empty { padding: 6px 8px 8px; color: var(--text-muted); font-size: 11.5px; }
+.orchrow { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--r2); }
+.orchrow:hover { background: var(--bg-inset); }
+.orchrow-task { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11.5px; color: var(--text-primary); }
+.orchrow-state { flex: none; color: var(--text-muted); font-size: 11px; }
+.orchrow-state.live { color: var(--state-running); }

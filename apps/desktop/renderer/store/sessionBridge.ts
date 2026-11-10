@@ -40,6 +40,14 @@ export interface SessionMeta {
   readonly created_at: number
   readonly deleted_at: number | null
   readonly archived_at: number | null
+  /**
+   * 会话角色（docs/26 §4.4）。侧栏据此分组：Router 打标、worker 归到父会话下。
+   *
+   * 可选：老索引（迁移 v2 之前）没有这一列，按普通会话处理。
+   */
+  readonly role?: 'router' | 'worker' | 'normal' | undefined
+  /** worker 的父会话（Router 的 session_id）；普通会话为 null */
+  readonly parent_session?: string | null | undefined
 }
 
 /** 回收站条目（永久归档后的文件；到期后可被清理，不可恢复） */

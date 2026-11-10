@@ -320,6 +320,257 @@ describe('P11-04 批处理窗口（§5.3）', () => {
   }, 30000)
 })
 
+describe('P11-13 汇报的上下文纪律（26 §5.4）', () => {
+  it('汇报里带 @session:<workerSessionId>，Router 才能回溯 worker 细节', async () => {
+    const rt = await makeRuntime([reply('worker 的结论'), reply('router 收到')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const { agent_id } = await rt.agents.create({ session_id: routerSession })
+
+    const receipt = await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '回溯验证' })
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+    // 汇报会作为 user/message 进 Router，触发一轮
+    await waitForEvent(rt, routerSession, 'turn/start', 8000)
+
+    const report = rt.sessions
+      .sessionServiceFor(routerSession)
+      .events()
+      .filter((event) => event.type === 'user/message')
+      .map((event) => JSON.stringify(event.data))
+      .join('\n')
+    // Chain of Recall 的关键：必须有会话 id，而不只是 taskId
+    expect(report).toContain(`@session:${receipt.workerSessionId}`)
+    await rt.agents.dispose({ agent_id })
+  }, 25000)
+
+  it('超长摘要被截断，并明确告知"去哪看全文"', async () => {
+    const long = '很长的结论。'.repeat(400)
+    const rt = await makeRuntime([reply(long), reply('router 收到')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const { agent_id } = await rt.agents.create({ session_id: routerSession })
+
+    await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '长摘要验证' })
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+    await waitForEvent(rt, routerSession, 'turn/start', 8000)
+
+    const reportEvent = rt.sessions
+      .sessionServiceFor(routerSession)
+      .events()
+      .filter((event) => event.type === 'user/message')
+      .map((event) => JSON.stringify(event.data))
+      .find((text) => text.includes('worker'))
+    expect(reportEvent).toBeDefined()
+    const text = String(reportEvent)
+    // 截断提示存在（原文 2400 字）
+    expect(text).toContain('摘要已截断')
+    await rt.agents.dispose({ agent_id })
+  }, 25000)
+
+  it('`worker/completed` 事件仍保留完整摘要（审计不因展示而丢失）', async () => {
+    const long = '完整内容。'.repeat(300)
+    const rt = await makeRuntime([reply(long), reply('router 收到')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const { agent_id } = await rt.agents.create({ session_id: routerSession })
+
+    await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '审计验证' })
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+
+    const completed = rt.sessions
+      .sessionServiceFor(routerSession)
+      .events()
+      .find((event) => event.type === 'worker/completed')
+    const summary = (completed as { data: { summary?: string } }).data.summary ?? ''
+    // 事件里是全文：截断只发生在"给模型看的汇报"，不能损失审计事实
+    expect(summary.length).toBeGreaterThan(1000)
+    await rt.agents.dispose({ agent_id })
+  }, 25000)
+})
+
+describe('P11-15 按会话的编排档位（26 §7.4）', () => {
+  it('全局是 observe 时，单独把某会话设为 auto 只影响那个会话', async () => {
+    // 全局默认 observe（makeRuntime 的缺省）
+    const rt = await makeRuntime([reply('worker 好了'), reply('router 汇总')])
+    const { session_id: a } = await rt.sessions.create({ cwd: home, title: 'A' })
+    const { session_id: b } = await rt.sessions.create({ cwd: home, title: 'B' })
+    rt.sessionRoles.setRole(a, 'router')
+    rt.sessionRoles.setRole(b, 'router')
+
+    rt.orchestration.setMode('auto', '只给 A', a)
+    expect(rt.orchestration.modeFor(a)).toBe('auto')
+    // B 没被改：仍回落到全局 observe
+    expect(rt.orchestration.modeFor(b)).toBe('observe')
+
+    // A 真派发；B 只预演
+    const receiptA = await rt.orchestration.dispatch({ routerSessionId: a, task: '真派' })
+    const receiptB = await rt.orchestration.dispatch({ routerSessionId: b, task: '预演' })
+    expect(receiptA.materialized).toBe(true)
+    expect(receiptB.materialized).toBe(false)
+
+    // 等真实 worker 跑完再收尾：不等的话 afterEach 拆服务时它还在跑，
+    // 会在 stderr 留一条 "service not found"（用例仍绿，但那是噪音）
+    await waitForEvent(rt, a, 'worker/completed', 8000)
+  }, 20000)
+
+  it('档位切换落 orchestration/mode 事件（可回放），最后一条生效', async () => {
+    const rt = await makeRuntime([reply('ok')])
+    const { session_id } = await rt.sessions.create({ cwd: home, title: 'R' })
+    rt.sessionRoles.setRole(session_id, 'router')
+    rt.orchestration.setMode('observe', '先看', session_id)
+    rt.orchestration.setMode('auto', '再执行', session_id)
+
+    const events = rt.sessions.sessionServiceFor(session_id).events().filter((e) => e.type === 'orchestration/mode')
+    expect(events).toHaveLength(2)
+    expect(rt.orchestration.modeFor(session_id)).toBe('auto')
+  })
+})
+
+describe('P11-16 Router ↔ Worker 的信息流（26 §5.5 / §5.6）', () => {
+  it('派发时的边界与完成判据会写进 worker 的首条消息，并落事件', async () => {
+    const rt = await makeRuntime([reply('做完了'), reply('收到')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const { agent_id } = await rt.agents.create({ session_id: routerSession })
+
+    const receipt = await rt.orchestration.dispatch({
+      routerSessionId: routerSession,
+      task: '把配置拆开',
+      scope: '不要动 tests/',
+      doneWhen: 'pnpm test 全绿',
+    })
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+
+    // worker 首条消息要自包含：任务 + 边界 + 完成判据
+    const firstUser = rt.sessions
+      .sessionServiceFor(receipt.workerSessionId)
+      .events()
+      .find((e) => e.type === 'user/message')
+    const text = JSON.stringify(firstUser?.data ?? {})
+    expect(text).toContain('把配置拆开')
+    expect(text).toContain('不要动 tests/')
+    expect(text).toContain('pnpm test 全绿')
+
+    // Router 侧事件留档（回放要能解释"要求做到什么程度"）
+    const dispatched = rt.sessions
+      .sessionServiceFor(routerSession)
+      .events()
+      .find((e) => e.type === 'worker/dispatched') as { data: { scope?: string; doneWhen?: string } }
+    expect(dispatched.data.scope).toBe('不要动 tests/')
+    expect(dispatched.data.doneWhen).toBe('pnpm test 全绿')
+
+    await rt.agents.dispose({ agent_id })
+  }, 25000)
+
+  it('inject：向已完成的 worker 追加输入，它接着原历史继续', async () => {
+    const rt = await makeRuntime([reply('第一版'), reply('收到'), reply('按追加要求改好了')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const { agent_id } = await rt.agents.create({ session_id: routerSession })
+
+    const receipt = await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '初始任务' })
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+
+    const ok = await rt.orchestration.inject({
+      taskId: receipt.taskId,
+      text: '再补一处：把日志也加上',
+      reason: '用户追加要求',
+    })
+    expect(ok).toBe(true)
+
+    // Router 侧留审计：否则单看 Router 日志无法解释 worker 为何改道
+    const notified = rt.sessions
+      .sessionServiceFor(routerSession)
+      .events()
+      .find((e) => e.type === 'worker/notified') as { data: { text: string } }
+    expect(notified.data.text).toContain('把日志也加上')
+
+    // worker 会话里追加的文本作为新的一条用户消息
+    const workerUsers = rt.sessions
+      .sessionServiceFor(receipt.workerSessionId)
+      .events()
+      .filter((e) => e.type === 'user/message')
+      .map((e) => JSON.stringify(e.data))
+    expect(workerUsers.some((t) => t.includes('把日志也加上'))).toBe(true)
+
+    // 等注入触发的那一轮真正跑完再收尾：不等的话 afterEach 拆服务时它还在跑，
+    // 会留下一条 unhandled rejection（用例全绿但报 Errors）
+    await waitForEvents(rt, routerSession, 'worker/completed', 2, 8000)
+
+    await rt.agents.dispose({ agent_id })
+  }, 25000)
+
+  it('report(question)：求助绕过批处理立刻唤醒 Router，且状态暴露 needsInput', async () => {
+    const rt = await makeRuntime([reply('做了一半'), reply('上级答复')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const { agent_id } = await rt.agents.create({ session_id: routerSession })
+
+    const receipt = await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '改配置' })
+    await rt.orchestration.report({
+      workerSessionId: receipt.workerSessionId,
+      kind: 'question',
+      summary: '卡在一个只有人能决定的事',
+      question: '这个文件要删还是留？',
+    })
+
+    // 必须立刻唤醒，不等 200ms 窗口之外的额外冷却
+    await waitForEvent(rt, routerSession, 'turn/start', 3000)
+    const reported = rt.sessions
+      .sessionServiceFor(routerSession)
+      .events()
+      .find((e) => e.type === 'worker/reported') as { data: { kind: string; question?: string } }
+    expect(reported.data.kind).toBe('question')
+    expect(reported.data.question).toBe('这个文件要删还是留？')
+
+    // 状态查询要能看到"它在等人"
+    const status = rt.orchestration.status(receipt.taskId)
+    expect(status?.needsInput).toBe(true)
+    expect(status?.question).toBe('这个文件要删还是留？')
+
+    // 等 Router 那一轮结束再收尾，避免拆服务时它还在跑
+    await waitForEvent(rt, routerSession, 'turn/end', 8000)
+    await rt.agents.dispose({ agent_id })
+  }, 25000)
+
+  it('report(progress) 只记录，不唤醒 Router', async () => {
+    const rt = await makeRuntime([reply('做了一半'), reply('收到')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const { agent_id } = await rt.agents.create({ session_id: routerSession })
+
+    const receipt = await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '长任务' })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    await rt.orchestration.report({
+      workerSessionId: receipt.workerSessionId,
+      kind: 'progress',
+      summary: '已经读完相关文件',
+    })
+    await new Promise((resolve) => setTimeout(resolve, 400))
+
+    const events = rt.sessions.sessionServiceFor(routerSession).events()
+    expect(events.some((e) => e.type === 'worker/reported')).toBe(true)
+    // 进度不该额外唤醒 Router
+    expect(events.filter((e) => e.type === 'turn/start').length).toBeLessThanOrEqual(1)
+
+    // 等 worker 跑完再收尾
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+    await rt.agents.dispose({ agent_id })
+  }, 25000)
+
+  it('taskIdOf 能由 worker 会话反查任务', async () => {
+    const rt = await makeRuntime([reply('ok'), reply('ok')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const { agent_id } = await rt.agents.create({ session_id: routerSession })
+    const receipt = await rt.orchestration.dispatch({ routerSessionId: routerSession, task: 'x' })
+    expect(rt.orchestration.taskIdOf(receipt.workerSessionId)).toBe(receipt.taskId)
+    expect(rt.orchestration.taskIdOf('不存在的会话')).toBeUndefined()
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+    await rt.agents.dispose({ agent_id })
+  }, 25000)
+})
+
 describe('P11-10 Router 专用模型（26 §3.2）', () => {
   it('配了 routerModel 后，Router 会话的 request/header 用该模型，普通会话仍用默认模型', async () => {
     home = mkdtempSync(join(tmpdir(), 'lcode-p11-model-'))
@@ -381,6 +632,36 @@ describe('P11-10 Router 专用模型（26 §3.2）', () => {
     expect((header as { data: { header: { model: string } } }).data.header.model).toBe('test-model')
     await rt.agents.dispose({ agent_id })
   }, 15000)
+})
+
+describe('P11-11 侧栏分组所需的投影（26 §4.4）', () => {
+  it('worker 会话同时具备 role=worker 与 parent_session，Router 具备 role=router', async () => {
+    const rt = await makeRuntime([reply('worker 好了'), reply('router 汇总')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+    const receipt = await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '分组验证' })
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+    await rt.sessions.flush({ session_id: routerSession })
+    await rt.sessions.flush({ session_id: receipt.workerSessionId })
+
+    const items = (await rt.sessions.list({ limit: 20 })).items
+    const router = items.find((item) => item.session_id === routerSession)
+    const worker = items.find((item) => item.session_id === receipt.workerSessionId)
+
+    // Router 打标
+    expect(router?.role).toBe('router')
+    // worker 既要有归属（parent），也要有身份（role）——只有 parent 的话侧栏没法把它摘出顶层
+    expect(worker?.role).toBe('worker')
+    expect(worker?.parent_session).toBe(routerSession)
+  }, 20000)
+
+  it('普通会话的 role 是 normal（老索引/无角色事件都归一到这里）', async () => {
+    const rt = await makeRuntime([reply('ok')])
+    const { session_id } = await rt.sessions.create({ cwd: home, title: '普通' })
+    await rt.sessions.flush({ session_id })
+    const items = (await rt.sessions.list({ limit: 5 })).items
+    expect(items.find((item) => item.session_id === session_id)?.role).toBe('normal')
+  })
 })
 
 describe('P11-04 结构化回传（§4.3）', () => {

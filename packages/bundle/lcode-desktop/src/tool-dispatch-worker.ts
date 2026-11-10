@@ -17,6 +17,10 @@ import type { ToolDefinition } from '@lcode/tools'
 
 export interface DispatchWorkerInput {
   readonly task: string
+  /** 边界：不要做什么（26 §5.5）。worker 看不到 Router 的对话，只能靠这个知道哪里不该碰 */
+  readonly scope?: string
+  /** 完成判据：什么算做完（26 §5.5）。不写的话完成标准由 worker 自己定义 */
+  readonly doneWhen?: string
   /** Router 的判断依据：为什么派这个、为什么拆（落事件供回放） */
   readonly reason?: string
 }
@@ -32,12 +36,14 @@ export function createDispatchWorkerTool(ctx: Context): ToolDefinition<DispatchW
   return {
     name: 'dispatch_worker',
     description:
-      '把一个独立任务派发给 worker（独立会话，异步执行，结果稍后回传）。只传任务与理由，不要自己去执行它。',
+      '把一个独立任务派发给 worker（独立会话，异步执行，结果稍后回传）。只传任务、边界与完成判据，不要自己去执行它。',
     card: 'generic',
     inputSchema: {
       type: 'object',
       properties: {
         task: { type: 'string', description: '要派给 worker 的完整任务描述（worker 看不到当前对话，必须自包含）' },
+        scope: { type: 'string', description: '边界：明确不要做什么（避免它顺手改了不该改的地方）' },
+        doneWhen: { type: 'string', description: '完成判据：什么算做完、怎么验证（可检查的条件）' },
         reason: { type: 'string', description: '为什么派这个任务、为什么需要拆分（会落事件供回放）' },
       },
       required: ['task'],
@@ -54,12 +60,16 @@ export function createDispatchWorkerTool(ctx: Context): ToolDefinition<DispatchW
         return { state: 'rejected', message: 'worker 不能派发 worker：跨会话编排最多两层。' }
       }
       const orchestration = ctx.get('orchestration')
-      if (orchestration.mode() === 'off') {
+      // 按**本会话**的档位判断，不是全局的：勾了 Router 的会话默认 auto，
+      // 别的会话仍可能是 observe/off（26 §7.4）。
+      if (orchestration.modeFor(sessionId) === 'off') {
         return { state: 'rejected', message: '跨会话编排当前是 off 档，无法派发。' }
       }
       const receipt = await orchestration.dispatch({
         routerSessionId: sessionId,
         task: call.parsed.task,
+        ...(call.parsed.scope === undefined ? {} : { scope: call.parsed.scope }),
+        ...(call.parsed.doneWhen === undefined ? {} : { doneWhen: call.parsed.doneWhen }),
         ...(call.parsed.reason === undefined ? {} : { reason: call.parsed.reason }),
         ...(opts.signal === undefined ? {} : { signal: opts.signal }),
       })
@@ -74,7 +84,8 @@ export function createDispatchWorkerTool(ctx: Context): ToolDefinition<DispatchW
         state: 'dispatched',
         taskId: receipt.taskId,
         workerSessionId: receipt.workerSessionId,
-        message: '已派发。worker 完成后结果会自动回到这里，不需要你等待。',
+        message:
+          '已派发。worker 完成后结果会自动回到这里，不需要你等待。之后要补充要求或回答它的提问，用 inject_worker（taskId 见上）。',
       }
     },
   }

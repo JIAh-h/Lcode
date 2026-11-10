@@ -7,6 +7,7 @@ import { closeAllIndexDbs, openIndexDb } from './db.ts'
 import { SCHEMA_VERSION } from './ddl.ts'
 import { buildMatchQuery, searchMessages, segmentForFts } from './fts.ts'
 import { applyMigrations, checksumOf, MIGRATIONS, readSchemaVersion } from './migrations.ts'
+import { openDatabase } from './native.ts'
 import { createEmptyIndexDb, describeIndexDb, dropIndexDb, indexDbFiles } from './rebuild.ts'
 
 /**
@@ -201,13 +202,17 @@ describe('T1.3 迁移器', () => {
   it('迁移到 SCHEMA_VERSION 并记录 checksum', () => {
     const db = openIndexDb({ home })
     expect(readSchemaVersion(db)).toBe(SCHEMA_VERSION)
-    const row = db.prepare('SELECT version, name, checksum FROM schema_migrations').get() as {
+    // 取**最后一条**迁移记录：`schema_migrations` 每次迁移一行，`.get()` 默认拿第一行。
+    const row = db
+      .prepare('SELECT version, name, checksum FROM schema_migrations ORDER BY version DESC LIMIT 1')
+      .get() as {
       version: number
       name: string
       checksum: string
     }
     expect(row.version).toBe(SCHEMA_VERSION)
-    expect(row.checksum).toBe(checksumOf(MIGRATIONS[0]!.sql))
+    const latest = MIGRATIONS[MIGRATIONS.length - 1]!
+    expect(row.checksum).toBe(checksumOf(latest.sql))
   })
 
   it('可重入：重复调用 applyMigrations 不报错也不重复写', () => {
@@ -231,7 +236,11 @@ describe('T1.3 迁移器', () => {
   })
 
   it('迁移中途失败 → 整体回滚，版本不推进', () => {
-    const db = openIndexDb({ home })
+    /*
+     * 用**独立的内存库**而不是 `openIndexDb({ home })`：后者会把库直接迁到最新版本，
+     * 再拿 target=1 去调会先撞上"库版本高于程序"的守卫，测不到回滚本身。
+     */
+    const db = openDatabase(':memory:')
     applyMigrations(db, [{ version: 1, name: 'ok', sql: MIGRATIONS[0]!.sql }], 1)
     const boom: readonly { version: number; name: string; sql: readonly string[] }[] = [
       { version: 1, name: 'ok', sql: MIGRATIONS[0]!.sql },
@@ -240,8 +249,8 @@ describe('T1.3 迁移器', () => {
     expect(() => applyMigrations(db, boom, 2)).toThrow()
     expect(readSchemaVersion(db)).toBe(1)
     // 半成品表也不该留下（单事务回滚）
-    const names = tableNames(db)
-    expect(names).not.toContain('tmp_ok')
+    expect(tableNames(db)).not.toContain('tmp_ok')
+    db.close()
   })
 })
 

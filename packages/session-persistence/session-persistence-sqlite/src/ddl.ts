@@ -57,8 +57,13 @@ export const SQLITE_PRAGMAS: readonly string[] = [
 /**
  * 索引结构版本（22 §8.1）。与 `schema_migrations.version` 一一对应；
  * 与 JSONL 的 `formatVersion` 是**两套独立演进**的版本空间。
+ *
+ * | 版本 | 内容 |
+ * |---|---|
+ * | 1 | 初始 15 表 + FTS |
+ * | 2 | `sessions.role`：会话角色投影（docs/26 §4.4） |
  */
-export const SCHEMA_VERSION = 1
+export const SCHEMA_VERSION = 2
 
 /** 本版本迁移的可读名（写进 `schema_migrations.name`，用于日志） */
 export const SCHEMA_NAME = '0001-initial-schema'

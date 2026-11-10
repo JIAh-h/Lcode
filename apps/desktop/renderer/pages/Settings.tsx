@@ -1289,6 +1289,13 @@ function ModelSection() {
   const [routerModel, setRouterModel] = useState<{ provider: string; model: string } | null>(null)
   const [routerSaving, setRouterSaving] = useState(false)
   const [routerNote, setRouterNote] = useState<string | null>(null)
+  /**
+   * 编排授权档位（docs/26 §7.4）：`off` / `observe` / `auto`。
+   *
+   * 与 `routerModel` 不同，**改完即刻生效、不需要重开应用**——档位是运行时状态，
+   * 模型路由规则才是装配期构造的。默认 `observe`：只记录派发意向，不建 worker。
+   */
+  const [orchMode, setOrchMode] = useState<'off' | 'observe' | 'auto'>('observe')
 
   /** 从主进程刷新清单（保存/删除后也调它——单一数据源，不自己拼） */
   /**
@@ -1312,8 +1319,13 @@ function ModelSection() {
       // 编排模型与模型清单一起刷新：它引用的是同一批供应商
       const orch = (globalThis as unknown as { lcode?: { orchestration?: { get(): Promise<unknown> } } }).lcode?.orchestration
       if (orch !== undefined) {
-        const stored = (await orch.get()) as { routerModel?: { provider: string; model: string } | null } | null
+        const stored = (await orch.get()) as {
+          routerModel?: { provider: string; model: string } | null
+          defaultMode?: string
+        } | null
         setRouterModel(stored?.routerModel ?? null)
+        // 默认 auto：勾了 Router 就该真派发，见 docs/26 §7.4
+        setOrchMode(stored?.defaultMode === 'observe' ? 'observe' : 'auto')
       }
     } catch (err) {
       setBridgeError(err instanceof Error ? err.message : String(err))
@@ -1398,6 +1410,36 @@ function ModelSection() {
               {t('Router 负责判断与派发，用轻模型就够；worker 仍走默认模型。')}
               {routerSaving ? ` ${t('保存中…')}` : ''}
               {routerNote !== null ? ` ${routerNote}` : ''}
+            </span>
+          </div>
+        </div>
+        {/*
+         * 新建编排会话时的默认档位（docs/26 §7.4）。
+         *
+         * **不再是"全局开关"**：档位是按会话的。勾选 Router 就是人给出的
+         * "这次需要拆"的显式信号，所以默认 `auto`——勾了却回一句"你还没切档"
+         * 等于把同一个意图问两遍。想看它怎么拆而不真执行的人改这里。
+         */}
+        <div className="srow">
+          <div className="sl">{t('新建编排会话时')}</div>
+          <div className="sr">
+            <Seg
+              options={[t('自动执行'), t('只观察')]}
+              value={orchMode === 'observe' ? t('只观察') : t('自动执行')}
+              onChange={(v) => {
+                const next = v === t('只观察') ? 'observe' : 'auto'
+                const orch = (globalThis as unknown as { lcode?: { orchestration?: { setDefaultMode(input: unknown): Promise<unknown> } } }).lcode?.orchestration
+                if (orch === undefined) return
+                void orch
+                  .setDefaultMode({ mode: next })
+                  .then(() => setOrchMode(next))
+                  .catch(() => undefined)
+              }}
+            />
+            <span className="src">
+              {orchMode === 'observe'
+                ? t('只记录本来会派什么，不创建 worker——先看它怎么拆任务。')
+                : t('真的派发 worker 并汇总，会消耗更多 token。')}
             </span>
           </div>
         </div>

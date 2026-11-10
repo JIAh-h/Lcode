@@ -81,6 +81,16 @@ const api = {
   orchestration: {
     get: (): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.get'),
     setRouterModel: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.setRouterModel', input),
+    /** 新建编排会话时的默认档位（auto / observe）；默认 auto */
+    setDefaultMode: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.setDefaultMode', input),
+    /** 某个会话当前的档位（传 sessionId 按会话解析，否则读全局兜底） */
+    mode: (input?: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.mode', input),
+    /** 切换档位；传 sessionId 只改那个会话（落事件，可回放） */
+    setMode: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.setMode', input),
+    /** 某个 Router 下的在途 worker */
+    workers: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.workers', input),
+    /** 取消一个 worker 的当前回合（取消隔离的出口） */
+    cancelWorker: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:orchestration.cancelWorker', input),
   },
 
   /** 内容寻址附件：图片缩略图按需读取，避免把 base64 一次性全塞进渲染层 */

@@ -669,7 +669,7 @@ describe('A. 装配的接线正确性', () => {
 
   it('工具已接：注册表含计划提交工具，但正常请求不暴露它', async () => {
     const rt = await makeRuntime([textScript])
-    // 五个文件工具 + shell + terminal + 子代理 + 跨会话派发 + 代码模式 + 两个计划工具 + 待办清单
+    // 五个文件工具 + shell + terminal + 子代理 + 编排四件套 + 代码模式 + 两个计划工具 + 待办清单
     expect(rt.ctx.get('tools').schemas().map((s) => s.name).sort()).toEqual([
       'delegate',
       'delegate_async',
@@ -678,7 +678,10 @@ describe('A. 装配的接线正确性', () => {
       'edit',
       'glob',
       'grep',
+      'inject_worker',
+      'list_workers',
       'read',
+      'report_to_router',
       'request_plan_change',
       'run_code',
       'shell',

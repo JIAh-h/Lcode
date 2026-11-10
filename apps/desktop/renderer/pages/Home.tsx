@@ -51,6 +51,13 @@ export function HomePage() {
   const [pickOpen, setPickOpen] = useState(false)
   const [dragOver, setDragOver] = useState(false)
   const [projects, setProjects] = useState<Proj[]>([])
+  /**
+   * 是否把这次新会话建成**编排调度会话**（Router，docs/26 §3.3）。
+   *
+   * 默认关闭：日常任务还是单会话，编排是按需启用的能力。
+   * 勾上之后模型可以派发 worker，但它自己**没有执行工具**（不能改文件、不能跑命令）。
+   */
+  const [asRouter, setAsRouter] = useState(false)
   const pickRef = useRef<HTMLSpanElement | null>(null)
 
   useEffect(() => {
@@ -128,6 +135,7 @@ export function HomePage() {
       const created = await api.session.create({
         ...(proj === null ? {} : { cwd: proj.path }),
         title,
+        ...(asRouter ? { role: 'router' } : {}),
       })
       // 首句**在这里就发出去**：用户已经表达完了意图，没必要进去再发一次
       await api.agent.send({
@@ -282,6 +290,16 @@ export function HomePage() {
             onSend={submit}
             placeholder={proj ? t('描述一个任务，或直接问个问题…') : t('描述一个任务；不选择项目时会放进「最近任务」…')}
           />
+          {/*
+           * 编排调度会话（docs/26 §3.3）。
+           *
+           * 放在输入框下方而不是项目行：它改的是"这次会话做什么"，与"在哪个目录做"是两件事。
+           * 文案直接说清代价——Router 自己没有执行能力，用户才不会以为它是"更强的会话"。
+           */}
+          <label className="orchestratetoggle" title={t('勾选后这次会话只做调度：可以派发 worker，但不能自己改文件或执行命令')}>
+            <input type="checkbox" checked={asRouter} onChange={(e) => setAsRouter(e.target.checked)} />
+            <span>{t('作为编排调度会话（可派发 worker，自己不执行）')}</span>
+          </label>
         </div>
       </div>
       {dragOver && <div className="dropmask">{t('松开以打开该文件夹')}</div>}

@@ -1037,6 +1037,17 @@ export class TurnEngine {
     return adapter;
   }
 
+  /**
+   * 是否已被销毁。
+   *
+   * `ConcreteAgentLoop` 用它判断缓存里的引擎还能不能复用：销毁过的引擎
+   * 再交给调用方，`followup` 会直接抛 `EC-NOT_RUNNING`（"agent 已销毁"）。
+   * 典型场景：worker 收尾时释放了 agent（省内存），之后又对它追加输入。
+   */
+  get isDisposed(): boolean {
+    return this.disposed;
+  }
+
   private assertInteractive(): void {
     if (this.disposed) {
       throw new LcodeErrorImpl({

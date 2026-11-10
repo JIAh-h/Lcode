@@ -5,6 +5,7 @@ import type {
   EpochHeader,
   Impact,
   ModelMessage,
+  SessionRole,
   SessionService,
   SessionEvent,
   StreamChunk,
@@ -57,6 +58,12 @@ export interface SessionMeta extends SessionHeader {
   readonly log_revision: string | null
   readonly archived_at: number | null
   readonly deleted_at: number | null
+  /**
+   * 会话角色（docs/26 §4.4）。由 `session/role` 事件派生，投影在索引里。
+   *
+   * 侧栏据此分组：Router 打标、worker 归到它的 Router 下面。
+   */
+  readonly role?: SessionRole | undefined
 }
 
 export interface CreateSessionInput {

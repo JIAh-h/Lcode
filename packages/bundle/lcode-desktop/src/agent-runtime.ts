@@ -158,6 +158,9 @@ import { registerLocalOrchestration } from '@lcode/orchestration-local'
 import { registerSessionRoles } from './session-roles.ts'
 import { registerLocalWatchdog } from './watchdog.ts'
 import { createDispatchWorkerTool } from './tool-dispatch-worker.ts'
+import { createInjectWorkerTool } from './tool-inject-worker.ts'
+import { createListWorkersTool } from './tool-list-workers.ts'
+import { createReportToRouterTool } from './tool-report-router.ts'
 import type { WebService } from '@lcode/web'
 import { createWebTools } from '@lcode/tool-web'
 import type { LspService } from '@lcode/lsp'
@@ -511,7 +514,15 @@ function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServic
     ...(options.maxConcurrentWorkers === undefined ? {} : { maxConcurrentWorkers: options.maxConcurrentWorkers }),
     ...(options.orchestrationMode === undefined ? {} : { initialMode: options.orchestrationMode }),
   })
+  /*
+   * 编排三件套（26 §5.5 / §5.6）：派发、追加输入、主动巡检，外加 worker 的回传。
+   * 四个工具都注册到全局表，**可见性交给 `sessionRoles` 的工具过滤**——
+   * 工具内部只做第二道防线（拒绝越权调用），不做"我该不该出现"的判断。
+   */
   const unregisterDispatchTool = ctx.get('tools').register(createDispatchWorkerTool(ctx))
+  const unregisterInjectTool = ctx.get('tools').register(createInjectWorkerTool(ctx))
+  const unregisterListWorkersTool = ctx.get('tools').register(createListWorkersTool(ctx))
+  const unregisterReportTool = ctx.get('tools').register(createReportToRouterTool(ctx))
   const uninstallPolicy = installPolicyHook({
     ctx,
     ...(options.approval === undefined ? {} : { approval: options.approval }),
@@ -563,7 +574,9 @@ function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServic
    */
   return async () => {
     watchdog.dispose()
-    planMode.dispose(); unregisterPlan(); uninstallPolicy(); unregisterDispatchTool(); sessionRoles.dispose()
+    planMode.dispose(); unregisterPlan(); uninstallPolicy()
+    unregisterDispatchTool(); unregisterInjectTool(); unregisterListWorkersTool(); unregisterReportTool()
+    sessionRoles.dispose()
     unregisterSubagentTool(); unregisterAsyncSubagentTool(); unregisterAwaitSubagentTool(); subagentProvider.dispose()
     unregisterTrust(); unregisterNetworkAudit(); unregisterWebAllowlist(); unregisterPresets()
     await orchestration.dispose()

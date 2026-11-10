@@ -474,7 +474,7 @@ export interface SessionEventMap {
   'worker/completed': {
     readonly taskId: string
     readonly workerSessionId: string
-    readonly outcome: 'completed' | 'failed' | 'cancelled'
+    readonly outcome: 'completed' | 'failed' | 'cancelled' | 'needs-input'
     readonly summary?: string | undefined
     /** 与 subagent 共用同一套结构化产物形状（P10-02） */
     readonly artifacts?:
@@ -487,6 +487,35 @@ export interface SessionEventMap {
         }
       | undefined
     readonly error?: string | undefined
+  }
+  /**
+   * Router 向 worker 追加了一条输入（26 §5.5）。
+   *
+   * **记在 Router 的日志里**，不是 worker 的：worker 那边那条输入本来就是
+   * 一条 `user/message`。Router 侧必须有这条，否则只回放 Router 日志时
+   * 无法解释"worker 为什么中途改了方向"。
+   */
+  'worker/notified': {
+    readonly taskId: string
+    readonly workerSessionId: string
+    /** 追加的文本；模型可见的是 worker 会话里的那条 user/message，这里只为审计 */
+    readonly text: string
+    readonly reason?: string | undefined
+  }
+  /**
+   * worker 主动回传（26 §5.6）。
+   *
+   * 与 `worker/completed` 的分工：这个表示"我还在做，但有事要说"，
+   * `worker/completed` 表示"我做完了"。`kind: 'question'` 是**求助**，
+   * 必须立刻让 Router 知道，不能等批处理窗口。
+   */
+  'worker/reported': {
+    readonly taskId: string
+    readonly workerSessionId: string
+    readonly kind: 'progress' | 'question' | 'done'
+    readonly summary: string
+    readonly question?: string | undefined
+    readonly needs?: readonly string[] | undefined
   }
   /**
    * 会话角色变更（26 §4.4）：只追加，不改历史。回放时按 seq 判定有效 role。

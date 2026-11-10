@@ -122,6 +122,8 @@ export function createServices(options: CreateServicesOptions = {}): DesktopServ
    */
   settings.registerNamespace([
     { namespace: 'orchestration', key: 'routerModel', type: 'object' },
+    // 新建编排会话时的默认档位（auto / observe）；缺省按 auto 处理（docs/26 §7.4）
+    { namespace: 'orchestration', key: 'defaultMode', type: 'string' },
   ])
   settings.open()
 

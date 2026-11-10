@@ -68,7 +68,20 @@ export function registerContextRecovery(input: ContextRecoveryOptions): Disposer
   const unregisterStep = input.ctx.on('agent/pre-step', async ({ agentId, turn }) => {
     const window = input.contextWindowOf()
     if (window === undefined || window <= 0) return
-    const agent = input.ctx.get('agents').get(asAgentId(agentId))
+    /*
+     * 服务可能已经注销：装配层收尾时会先停循环、再拆服务，而在途回合的
+     * `agent/pre-step` 仍可能在这之后跑到一次。此时 `ctx.get` 直接抛
+     * "service not found"，会把一个本来正常的收尾回合记成执行失败。
+     *
+     * 压缩是**优化**而不是正确性的一部分：拿不到服务就跳过这一步，零损失。
+     */
+    let agents: ReturnType<typeof input.ctx.get<'agents'>>
+    try {
+      agents = input.ctx.get('agents')
+    } catch {
+      return
+    }
+    const agent = agents.get(asAgentId(agentId))
     if (agent === undefined) return
     if (attemptedTurn.get(agent.sessionId) === turn) return
 

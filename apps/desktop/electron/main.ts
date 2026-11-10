@@ -835,7 +835,27 @@ ipcMain.handle("lcode:orchestration.get", async () => {
           model: (raw as { model: string }).model,
         }
       : null;
-  return { routerModel };
+  return { routerModel, defaultMode: defaultModeOf(feature.services) };
+});
+
+/**
+ * 新建编排会话时的默认档位（docs/26 §7.4）。
+ *
+ * **默认 `auto`**：勾选「作为编排调度会话」本身就是人给出的"这次需要拆"的显式信号，
+ * 再让用户去别处切一档才肯执行，等于把同一个意图问两遍。
+ * 想看它怎么拆而不真执行的人，可以在设置里改成 `observe`。
+ */
+function defaultModeOf(services: { readonly readSetting: (key: string) => unknown }): "auto" | "observe" {
+  return services.readSetting("orchestration.defaultMode") === "observe" ? "observe" : "auto";
+}
+
+ipcMain.handle("lcode:orchestration.setDefaultMode", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const mode = record["mode"];
+  if (mode !== "auto" && mode !== "observe") throw new Error("mode 必须是 auto 或 observe");
+  const feature = await models();
+  await feature.services.settings.setByKey("orchestration.defaultMode", mode);
+  return { defaultMode: mode };
 });
 
 ipcMain.handle(
@@ -857,6 +877,53 @@ ipcMain.handle(
     return { saved: true, routerModel: { provider, model } };
   },
 );
+
+// ─────────────── 跨会话编排：档位 / 在途 worker（docs/26 §7.4 / §6） ───────────────
+
+/**
+ * 某个会话当前的编排档位（`off` / `observe` / `auto`）。
+ *
+ * 传 `sessionId` 就是按会话解析（会话自己切过档就用自己的，否则回落全局兜底）。
+ */
+ipcMain.handle("lcode:orchestration.mode", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const sessionId = record["sessionId"];
+  const rt = await agentRuntime();
+  if (typeof sessionId !== "string" || sessionId === "") return { mode: rt.orchestration.mode() };
+  return { mode: rt.orchestration.modeFor(sessionId) };
+});
+
+ipcMain.handle("lcode:orchestration.setMode", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const mode = record["mode"];
+  if (mode !== "off" && mode !== "observe" && mode !== "auto") {
+    throw new Error("mode 必须是 off / observe / auto");
+  }
+  const sessionId = record["sessionId"];
+  const rt = await agentRuntime();
+  // 传了会话就只改那个会话（落事件可回放），否则改全局兜底值
+  rt.orchestration.setMode(mode, "用户切换", typeof sessionId === "string" && sessionId !== "" ? sessionId : undefined);
+  return { mode: typeof sessionId === "string" && sessionId !== "" ? rt.orchestration.modeFor(sessionId) : rt.orchestration.mode() };
+});
+
+/** 某个 Router 下的在途 worker（列表 + 取消出口，docs/26 §6）。 */
+ipcMain.handle("lcode:orchestration.workers", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const routerSessionId = record["routerSessionId"];
+  if (typeof routerSessionId !== "string" || routerSessionId === "") {
+    throw new Error("routerSessionId 必填");
+  }
+  const rt = await agentRuntime();
+  return { workers: rt.orchestration.list({ routerSessionId }) };
+});
+
+ipcMain.handle("lcode:orchestration.cancelWorker", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const taskId = record["taskId"];
+  if (typeof taskId !== "string" || taskId === "") throw new Error("taskId 必填");
+  const rt = await agentRuntime();
+  return { cancelled: await rt.orchestration.cancel(taskId) };
+});
 
 function refNameFor(provider: string): string {
   return `${provider.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_API_KEY`;
@@ -1646,6 +1713,32 @@ ipcMain.handle(
       ...(cwd === undefined ? {} : { cwd }),
       ...(title === undefined ? {} : { title }),
     });
+    /*
+     * 编排调度会话（docs/26 §3.3）。
+     *
+     * 在建会话的同一次调用里定角色，而不是让渲染层再发一次 IPC——两步的话
+     * 中间任何一步失败都会留下"会话建了但角色没定"的半成品，用户看到的是一个
+     * 普通会话，却以为自己在用 Router。
+     */
+    const role = record["role"];
+    if (role === "router") {
+      rt.sessionRoles.setRole(result.session_id, "router", "用户在新建时选择");
+      /*
+       * 给这个会话定档位（docs/26 §7.4）。
+       *
+       * 勾选 Router 本身就是"这次需要跨会话拆任务"的人工声明，所以会话默认
+       * 就是 `auto`：勾了却说"你还没切档"是自相矛盾的。
+       * 想看它怎么拆而不真执行的人，把设置里的「新建时」改成 `observe`。
+       */
+      const defaultMode = defaultModeOf((await models()).services);
+      rt.orchestration.setMode(defaultMode, "新建编排会话时按设置定档", result.session_id);
+      /*
+       * 立刻 flush：`setRole` 只追加事件，而侧栏读的是**索引**。
+       * 不 flush 的话列表要等这条会话下一次写事件（用户发第一句话）才看得到
+       * role，期间它会显示成普通会话——徽标"点了新建却没出现"就是这么来的（实测确认）。
+       */
+      await rt.sessions.flush({ session_id: result.session_id });
+    }
     const workspace = rt.sessions.workspaceOf(result.session_id);
     if (workspace !== undefined) {
       const trusted = rt.ctx.get("workspaceTrust").isTrusted(workspace);
