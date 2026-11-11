@@ -91,6 +91,8 @@ export interface StepRow {
   readonly model_name: string | null
   readonly input_tokens: number | null
   readonly output_tokens: number | null
+  /** 其中命中提示缓存的输入 token（docs/09 §3.2.1） */
+  readonly cache_read_tokens: number | null
 }
 
 export interface EventRow {
@@ -416,6 +418,13 @@ export function projectSession(input: ProjectionInput): ProjectedSession {
     model: string | null
     inputTokens: number | null
     outputTokens: number | null
+    /**
+     * 其中命中提示缓存的输入 token（docs/09 §3.2.1）。
+     *
+     * 单看 input 无法判断"贵不贵"：命中缓存的部分价格低一个数量级。
+     * 这一列让"前缀有没有失效"成为可查询的历史事实，而不必等账单或翻供应商后台。
+     */
+    cacheReadTokens: number | null
   }
 
   const turns = new Map<number, TurnAcc>()
@@ -478,8 +487,10 @@ export function projectSession(input: ProjectionInput): ProjectedSession {
         if (acc !== undefined) {
           const input = num(usage['input'])
           const output = num(usage['output'])
+          const cacheRead = num(usage['cacheRead'])
           if (input !== null) acc.inputTokens = input
           if (output !== null) acc.outputTokens = output
+          if (cacheRead !== null) acc.cacheReadTokens = cacheRead
         }
       }
     } else if (event.type === 'turn/start' && turn !== null) {
@@ -509,6 +520,7 @@ export function projectSession(input: ProjectionInput): ProjectedSession {
         model: null,
         inputTokens: null,
         outputTokens: null,
+        cacheReadTokens: null,
       })
       openStepKeys.push(stepKey(turn, step))
       const acc = turns.get(turn)
@@ -684,6 +696,7 @@ export function projectSession(input: ProjectionInput): ProjectedSession {
       model_name: acc.model,
       input_tokens: acc.inputTokens,
       output_tokens: acc.outputTokens,
+      cache_read_tokens: acc.cacheReadTokens,
     }))
 
   const nodes = projectSurface(events)
@@ -842,9 +855,9 @@ export function applyProjection(db: BetterSqlite3.Database, projected: Projected
 
     const insertStep = db.prepare(
       `INSERT INTO steps (session_id, turn, step, start_seq, end_seq, started_at, ended_at,
-                          model_provider, model_name, input_tokens, output_tokens)
+                          model_provider, model_name, input_tokens, output_tokens, cache_read_tokens)
        VALUES (@session_id, @turn, @step, @start_seq, @end_seq, @started_at, @ended_at,
-               @model_provider, @model_name, @input_tokens, @output_tokens)`,
+               @model_provider, @model_name, @input_tokens, @output_tokens, @cache_read_tokens)`,
     )
     for (const row of projected.steps) insertStep.run(row as unknown as Record<string, unknown>)
 

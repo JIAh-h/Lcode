@@ -23,11 +23,33 @@ describe('InMemorySystemPromptService', () => {
 
     await expect(service.assemble({ variables: { name: 'Ada' }, sessionId: 's1' })).resolves.toEqual({
       system: '\n\nFirst\n\nTie\n\nHello Ada!\n\nsession=s1;name=Ada!',
+      volatile: '',
       tools: schemas,
     })
     removeBase()
     expect((await service.assemble({})).system).toContain('First')
     expect((await service.assemble({})).system).not.toContain('{{unknown}}')
+  })
+
+  /*
+   * 易变段（docs/09 §3.2.2）。
+   *
+   * 提供方按**前缀**缓存；系统提示词里只要有一个每步都变的东西，缓存就从那个
+   * 位置起失效，其后整段历史全价重算。所以会变的内容（任务清单、本轮注入）
+   * 必须**离开** `system`，改由引擎拼到消息末尾。
+   */
+  it('volatile 段落不进 system，单独返回给引擎拼接', async () => {
+    const service = createSystemPromptService(registry())
+    service.section('base', 'STABLE')
+    service.context('todos', () => 'TODO-LIST', { volatile: true, order: 1 })
+    service.context('stable-ctx', () => 'STABLE-CTX', { order: 2 })
+
+    const a = await service.assemble({})
+    expect(a.system).toContain('STABLE')
+    expect(a.system).toContain('STABLE-CTX')
+    // 关键：易变段绝不能出现在 system 里
+    expect(a.system).not.toContain('TODO-LIST')
+    expect(a.volatile).toBe('TODO-LIST')
   })
 
   it('拒绝重复静态段落，动态段落可替换，撤销只删除自己的注册', async () => {

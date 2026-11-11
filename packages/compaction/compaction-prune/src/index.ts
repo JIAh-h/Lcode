@@ -21,15 +21,20 @@ declare module '@lcode/context' {
 /**
  * 第一层零成本压缩：只替换成功工具的超长纯文本结果，原 tool/result 事实不会删除。
  * `read` 必须跳过，避免 read -> prune/spill -> read 的循环。
+ *
+ * ## 触发时机（docs/09 §3.2.5，2026-11-11 修正）
+ *
+ * **只在压缩流程中按需调用**（`compactionPrune.prune(...)`），不再监听
+ * `agent/tool-result-appended` 主动触发——理由与 spill 相同：每结果替换
+ * 会改写下一步请求的历史，让提供方前缀缓存从那个位置起失效（实测单轮
+ * 浪费 800K tokens，详见 spill-local 的注释）。
+ *
+ * 调用方：手动压缩 / 自动压缩（窗口阈值）的流程里。
  */
 export function registerCompactionPrune(input: { readonly ctx: Context; readonly thresholdChars?: number | undefined }): Disposer {
   const service = createCompactionPrune(input.thresholdChars)
   const unregisterService = input.ctx.set('compactionPrune', service)
-  const unregisterEvent = input.ctx.on('agent/tool-result-appended', ({ session, sourceEventSeq, tool }) => {
-    service.prune({ session, sourceEventSeq, toolName: tool.name })
-  })
   return () => {
-    unregisterEvent()
     unregisterService()
   }
 }

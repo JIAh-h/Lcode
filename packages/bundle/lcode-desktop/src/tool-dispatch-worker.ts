@@ -36,7 +36,9 @@ export function createDispatchWorkerTool(ctx: Context): ToolDefinition<DispatchW
   return {
     name: 'dispatch_worker',
     description:
-      '把一个独立任务派发给 worker（独立会话，异步执行，结果稍后回传）。只传任务、边界与完成判据，不要自己去执行它。',
+      '把一个独立任务派发给 worker（独立会话，异步执行，结果稍后回传）。只传任务、边界与完成判据，不要自己去执行它。' +
+      '**数量判断**：一件事只派一个 worker——同一件事派两个不会更快，只会各付一份上下文；' +
+      '小到一个人顺手就能做完的事（读一两个文件、答一个问题）不值得拆，直接派一个即可或建议用户用普通会话。',
     card: 'generic',
     inputSchema: {
       type: 'object',

@@ -214,7 +214,17 @@ export function registerProviderAdapter(
   }
   const adapter = config.protocol === 'anthropic'
     ? new AnthropicCompatibleAdapter(common)
-    : new OpenAiCompatibleAdapter(common)
+    : new OpenAiCompatibleAdapter({
+        ...common,
+        /*
+         * 显式提示缓存的开关（docs/09 §3.2.3）。
+         *
+         * 默认**开**：DashScope / Anthropic 都支持 `cache_control`，命中价 10%
+         * 且 5 分钟内确定；不支持的网关会直接 400，届时用 `model.promptCache=off`
+         * 关掉即可。判定依据是供应商预设名，而不是猜——猜错会让整轮请求失败。
+         */
+        promptCache: readSetting('model.promptCache') !== 'off',
+      })
   return ctx.get('llm').register(adapter)
 }
 

@@ -170,6 +170,10 @@ export interface SessionContextUsage {
     readonly total: number
     readonly observedInputTokens: number
     readonly observedOutputTokens: number
+    /** 命中提示缓存的输入 token（docs/09 §3.2.3） */
+    readonly cachedInputTokens?: number | undefined
+    /** 模型是否真的回传过缓存字段（false 时 UI 显示 `—` 而非 0%） */
+    readonly cacheReported?: boolean | undefined
     readonly providerTotal?: number | undefined
     readonly providerDeltaTokens?: number | undefined
   }

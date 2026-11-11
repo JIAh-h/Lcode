@@ -58,6 +58,28 @@ export function HomePage() {
    * 勾上之后模型可以派发 worker，但它自己**没有执行工具**（不能改文件、不能跑命令）。
    */
   const [asRouter, setAsRouter] = useState(false)
+  /**
+   * 勾选编排会话时，输入区显示的应该是 **Router 自己的模型**（设置里那一栏），
+   * 而不是"新对话默认模型"——后者只有 worker 用。不显示的话，用户在勾选后
+   * 完全看不出这次会用哪个模型。
+   */
+  const [routerModel, setRouterModel] = useState<{ provider: string; model: string } | undefined>(undefined)
+
+  useEffect(() => {
+    if (!asRouter || routerModel !== undefined) return
+    const orch = (globalThis as unknown as { lcode?: { orchestration?: { get(): Promise<unknown> } } }).lcode?.orchestration
+    if (orch === undefined) return
+    void orch
+      .get()
+      .then((value) => {
+        const stored = value as { routerModel?: { provider?: string; model?: string } | null } | null
+        const m = stored?.routerModel
+        if (m !== null && m !== undefined && typeof m.provider === 'string' && typeof m.model === 'string') {
+          setRouterModel({ provider: m.provider, model: m.model })
+        }
+      })
+      .catch(() => undefined)
+  }, [asRouter, routerModel])
   const pickRef = useRef<HTMLSpanElement | null>(null)
 
   useEffect(() => {
@@ -289,6 +311,7 @@ export function HomePage() {
             onChange={setText}
             onSend={submit}
             placeholder={proj ? t('描述一个任务，或直接问个问题…') : t('描述一个任务；不选择项目时会放进「最近任务」…')}
+            orchestrationModel={asRouter ? routerModel : undefined}
           />
           {/*
            * 编排调度会话（docs/26 §3.3）。
@@ -300,6 +323,21 @@ export function HomePage() {
             <input type="checkbox" checked={asRouter} onChange={(e) => setAsRouter(e.target.checked)} />
             <span>{t('作为编排调度会话（可派发 worker，自己不执行）')}</span>
           </label>
+          {/*
+           * 判据提示（docs/26 §9.3）。
+           *
+           * 为什么必须写：勾选之后 Router 连"帮我看看这个函数干嘛的"都会派 worker 去做——
+           * 这是对的（Router 不读仓库），但用户不知道，会觉得"这么点事也要起一个会话"。
+           * 与其放宽权限让 Router 自己读（会退化成普通会话），不如把判据说清楚。
+           */}
+          <div className="orchestratehint">
+            {t('需要拆分或并行的任务用它；单点问答用普通会话更省。')}
+            {asRouter && (
+              <span className="orchestratehint-warn">
+                {t('已勾选：接下来读代码、跑命令类的问题都会派给 worker 执行，由一个独立会话完成。')}
+              </span>
+            )}
+          </div>
         </div>
       </div>
       {dragOver && <div className="dropmask">{t('松开以打开该文件夹')}</div>}

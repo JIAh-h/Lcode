@@ -58,6 +58,16 @@ export interface OpenAiCompatibleOptions {
   readonly fetch?: typeof globalThis.fetch | undefined
   /** 单次请求超时（默认 120s；流式响应是长连接，比 probe 的 30s 宽） */
   readonly timeoutMs?: number | undefined
+  /**
+   * 给系统消息打 `cache_control`，启用提供方**显式**上下文缓存（docs/09 §3.2.3）。
+   *
+   * 默认关闭：不同网关对该字段的容忍度不一（有的会 400）。开启前应先确认
+   * 供应商支持 Anthropic 风格的 cache_control（DashScope / Anthropic 支持）。
+   *
+   * 开启后的收益：隐式缓存"不保证命中"，显式标记能拿到 5 分钟内确定命中，
+   * 命中价从 20%（隐式）降到 10%。
+   */
+  readonly promptCache?: boolean | undefined
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000
@@ -71,6 +81,14 @@ const DEFAULT_TIMEOUT_MS = 120_000
  * 的输入照常被接受）。目录有 300+ 条、分页返回，所以缓存 5 分钟。
  */
 const CATALOG_TTL_MS = 5 * 60 * 1000
+
+/**
+ * `finish_reason` 之后最多再看几个分片（为了取 usage-only 分片）。
+ *
+ * OpenAI 兼容协议里 usage 通常在 finish 后的第一个分片；给 8 个的余量足够覆盖
+ * 网关多包一层的情况，又不会因为个别服务不断流而把回合挂死。
+ */
+const MAX_TRAILING_CHUNKS = 8
 const CATALOG_PAGE_SIZE = 100
 const CATALOG_MAX_PAGES = 6
 const catalogCache = new Map<string, { readonly at: number; readonly models: Map<string, ModelLimits> }>()
@@ -268,6 +286,9 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
 
     const acc = new Map<number, { id: string; name: string; args: string }>()
     let usage: TokenUsage | undefined
+  /** 已收到 finish_reason；继续读少量后续分片以取 usage（见下方注释） */
+  let finished = false
+  let trailing = 0
     /**
      * 正文累加器。
      *
@@ -344,14 +365,33 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
         }
       }
 
+      /*
+       * `finish_reason` 到了**不能直接 return**。
+       *
+       * OpenAI 兼容协议（含设置了 `stream_options.include_usage` 的 DashScope/百炼）
+       * 把 usage 放在 `finish_reason` **之后**的独立分片里：那个分片 `choices` 是空数组，
+       * 只有 `usage`。原来的写法在这里立刻 return，于是 usage（以及其中的
+       * `prompt_tokens_details.cached_tokens`）永远拿不到——表现是"模型明明回了
+       * usage，我们的 token 统计却全是 0"，缓存命中率也就无从观测。
+       *
+       * 现在改为：标记已结束，继续读少量后续分片（usage-only 会在上面被解析），
+       * 读够 `MAX_TRAILING_CHUNKS` 或遇到结束就停。加这个上限是防止个别网关
+       * 送了 finish_reason 却不断流——那种情况下不能让整个回合挂住。
+       */
       if (typeof choice.finish_reason === 'string' && choice.finish_reason !== '') {
-        yield {
-          type: 'done',
-          message: finalMessage(call, parts, acc),
-          ...(usage === undefined ? {} : { usage }),
-        }
-        return
+        finished = true
+        trailing += 1
+        if (trailing > MAX_TRAILING_CHUNKS) break
+        continue
       }
+    }
+    if (finished) {
+      yield {
+        type: 'done',
+        message: finalMessage(call, parts, acc),
+        ...(usage === undefined ? {} : { usage }),
+      }
+      return
     }
 
     // 流断在半路（服务端没送 finish_reason）：也要给 done，否则循环会一直等
@@ -407,7 +447,7 @@ export class OpenAiCompatibleAdapter implements LlmAdapter {
   private buildRequest(model: string, params: SamplingParams, internal: InternalBody): unknown {
     return {
       model,
-      messages: toOpenAiMessages(internal),
+      messages: toOpenAiMessages(internal, this.options.promptCache === true),
       ...(params.maxTokens === undefined ? {} : { max_tokens: params.maxTokens }),
       ...(params.temperature === undefined ? {} : { temperature: params.temperature }),
       ...(internal.tools.length === 0 ? {} : { tools: internal.tools.map(toOpenAiTool) }),
@@ -592,9 +632,31 @@ function toOpenAiTool(tool: InternalBody['tools'][number]): unknown {
  * 而 OpenAI 协议把它拆成不同字段（`content` / `tool_calls` / `role: 'tool'`）。这个翻译
  * 必须在这里做——循环不该知道任何一家协议的形状。
  */
-function toOpenAiMessages(internal: InternalBody): unknown[] {
+/**
+ * 内部形状 → OpenAI 协议消息数组。
+ *
+ * `promptCache` 为真时给**系统消息**打 `cache_control: {type:'ephemeral'}`，
+ * 启用提供方的**显式**上下文缓存（docs/09 §3.2.3）。
+ */
+function toOpenAiMessages(internal: InternalBody, promptCache = false): unknown[] {
   const out: unknown[] = []
-  if (internal.system !== '') out.push({ role: 'system', content: internal.system })
+  if (internal.system !== '') {
+    /*
+     * 显式缓存（Anthropic 风格 `cache_control`，DashScope 兼容）。
+     *
+     * 为什么值得：隐式缓存**不保证命中**（官方原话 "hit probability is not
+     * guaranteed"，实测同请求连发 5 次会掉到 0），而且创建要 125% 价。显式标记
+     * 能拿到 5 分钟内**确定**命中，命中价 10%。
+     *
+     * 只标**系统消息**：它是全流程唯一稳定的前缀。历史消息逐轮增长，
+     * 标在它们上面只会反复创建、得不偿失。
+     */
+    out.push(
+      promptCache
+        ? { role: 'system', content: [{ type: 'text', text: internal.system, cache_control: { type: 'ephemeral' } }] }
+        : { role: 'system', content: internal.system },
+    )
+  }
 
   for (const message of internal.messages) {
     /*

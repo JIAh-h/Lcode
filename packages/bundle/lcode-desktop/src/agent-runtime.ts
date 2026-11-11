@@ -316,6 +316,27 @@ export interface RuntimePresetService {
 type MountedAgentRuntime = Omit<AgentRuntime, 'composition'>
 interface ExtensionFacade { readonly plugins: PluginRuntimeService; readonly skills: RuntimeSkillService; readonly presets: RuntimePresetService }
 
+/**
+ * 从设置里读 Router 会话专用模型（docs/26 §3.2）。
+ *
+ * 装配层在这里读，而不是只让主进程读：主进程、CLI、测试脚本、契约探针都走
+ * `createAgentRuntime`，配置只能有一个来源，否则会出现"设置里配了、实际没生效"。
+ */
+function readRouterModelSetting(services: DesktopServices | undefined): ModelSelection | undefined {
+  if (services === undefined) return undefined
+  try {
+    const raw = services.readSetting('orchestration.routerModel')
+    if (raw === null || typeof raw !== 'object') return undefined
+    const record = raw as { readonly provider?: unknown; readonly model?: unknown }
+    if (typeof record.provider !== 'string' || typeof record.model !== 'string') return undefined
+    if (record.provider === '' || record.model === '') return undefined
+    return { provider: record.provider, model: record.model }
+  } catch {
+    // 设置不可读（极简组合）：按"跟随默认模型"处理
+    return undefined
+  }
+}
+
 export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Promise<AgentRuntime> {
   /*
    * zstd 必须在**任何会话读写之前**初始化好。
@@ -364,6 +385,11 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
      *
      * 顺序注意：这里在 policy bundle 之前注册，而 `sessionRoles` 在其后才存在——
      * 没问题，因为规则匹配发生在**回合开始时**（惰性），那时角色服务已装配好。
+     *
+     * **配置来源只有一处**：`options.routerModel` 优先（测试/嵌入可覆盖），否则读
+     * `settings.json` 的 `orchestration.routerModel`。这一段必须在这里而不是只放在
+     * 主进程——否则脚本、测试、CLI 各自装配时都会漏掉这条规则，表现为
+     * "设置里配了 Router 模型，但实际跑的还是默认模型"（测试脚手架真的踩过）。
      */
     (ctx) =>
       registerModelRouter({
@@ -371,10 +397,12 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
         routing:
           options.modelRouting ??
           createModelRouter({
-            rules:
-              options.routerModel === undefined
+            rules: (() => {
+              const target = options.routerModel ?? readRouterModelSetting(options.services)
+              return target === undefined
                 ? []
-                : [{ id: 'router-session-model', match: { role: 'router' }, target: options.routerModel }],
+                : [{ id: 'router-session-model', match: { role: 'router' as const }, target }]
+            })(),
           }),
       }),
     (ctx) => {
@@ -454,10 +482,13 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
       .map(([, content]) => content.trim())
       .filter((content) => content !== '')
     return notes.length === 0 ? '' : `## 本轮补充上下文\n\n${notes.join('\n\n')}`
-  })
+  }, { volatile: true })
   /*
-   * 任务清单（todo/write，last-write-wins）每轮从会话日志取最近一次快照注入系统提示。
+   * 任务清单（todo/write，last-write-wins）每轮从会话日志取最近一次快照。
    * 打断、改方向或压缩之后，模型据此知道还剩哪些未完成项，而不是靠记忆。
+   *
+   * **volatile**：`todo_write` 一改，这段就变。放进系统提示词会从第一个 token
+   * 起打断前缀缓存（实测变化点在 1051/1074），所以改成拼在消息末尾（docs/09 §3.2.2）。
    */
   systemPrompt.context('session-todo', (assembleCtx) => {
     const sessionId = assembleCtx.sessionId
@@ -470,7 +501,7 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
     } catch {
       return ''
     }
-  })
+  }, { volatile: true })
   const unregisterPrompt = ctx.set('systemPrompt', systemPrompt)
   const workspaceOf = (sessionId: string) => sessions.workspaceOf(sessionId)
   const fs = ctx.has('fsFor') ? ctx.get('fsFor') : ctx.get('fs')

@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { createContext } from '@lcode/context'
 import { InMemorySessionStore } from '@lcode/session'
 import { asSessionId } from '@lcode/util'
-import { createCompactionPrune, registerCompactionPrune } from './index.ts'
+import { createCompactionPrune } from './index.ts'
 
 function toolResult(store: InMemorySessionStore, text: string): number {
   return store.append({
@@ -24,18 +23,26 @@ describe('compaction-prune', () => {
     expect(store.deriveMessages()[0]).toMatchObject({ content: expect.stringContaining('characters omitted') })
   })
 
-  it('read 输出和短输出永远不被处理', async () => {
-    const ctx = createContext()
-    const unregister = registerCompactionPrune({ ctx, thresholdChars: 20 })
+  /*
+   * read 输出与短输出永不处理。
+   *
+   * prune 已改为**按需调用**（docs/09 §3.2.5）：不再监听每结果事件主动触发，
+   * 因为每结果替换会改写下一步请求的历史，让提供方前缀缓存从那个位置起失效。
+   * 所以这里直接调 service.prune 断言行为，而不是 emit 事件。
+   */
+  it('read 输出和短输出永远不被处理', () => {
     const store = new InMemorySessionStore(asSessionId('read-skip'))
-    const sourceSeq = toolResult(store, 'a'.repeat(100))
-    const appended = store.events()[0]!
-    if (appended.type !== 'tool/result') throw new Error('expected tool/result event')
-    await ctx.emit('agent/tool-result-appended', {
-      agentId: 'a1', sessionId: 'read-skip', session: store, sourceEventSeq: sourceSeq,
-      tool: { callId: 'call-1', name: 'read' }, message: appended.data.message as never,
-    })
-    expect(store.events()).toHaveLength(1)
-    unregister()
+    const readSeq = store.append({
+      type: 'tool/result',
+      data: { turn: 1, step: 1, message: { role: 'user', toolCallId: 'read-1', content: 'a'.repeat(100), isError: false } },
+    }).seq
+    const shortSeq = store.append({
+      type: 'tool/result',
+      data: { turn: 1, step: 2, message: { role: 'user', toolCallId: 'grep-1', content: '短结果', isError: false } },
+    }).seq
+    const prune = createCompactionPrune(20)
+    expect(prune.prune({ session: store, sourceEventSeq: readSeq, toolName: 'read' }).status).toBe('not-applicable')
+    expect(prune.prune({ session: store, sourceEventSeq: shortSeq, toolName: 'grep' }).status).toBe('not-applicable')
+    expect(store.events()).toHaveLength(2)
   })
 })

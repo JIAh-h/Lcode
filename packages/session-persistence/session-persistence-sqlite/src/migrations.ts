@@ -38,6 +38,19 @@ export const MIGRATIONS: readonly Migration[] = [
      */
     sql: ['ALTER TABLE sessions ADD COLUMN role TEXT'],
   },
+  {
+    version: 3,
+    name: '0003-step-cache-tokens',
+    /*
+     * 提示缓存命中量（docs/09 §3.2.1）。
+     *
+     * 为什么必须存：单看 `input_tokens` 判断不了"贵不贵"——命中缓存的部分价格
+     * 低一个数量级。曾经因为系统提示词每步都变，缓存前缀全程失效，一个回合里
+     * 每次工具续步都在重算整段历史，直到把账户额度烧光才发现。
+     * 有这一列，"前缀有没有失效"就是可查询的历史事实，不必等账单。
+     */
+    sql: ['ALTER TABLE steps ADD COLUMN cache_read_tokens INTEGER'],
+  },
 ]
 
 /** 迁移脚本内容的 sha256（`schema_migrations.checksum`） */

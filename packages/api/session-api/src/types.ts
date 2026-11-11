@@ -137,6 +137,13 @@ export interface SessionMetaResult {
   readonly last_seq: number
   readonly header: SessionHeader
   readonly log_revision: string
+  /**
+   * 会话角色（docs/26 §4.4）。
+   *
+   * 界面据此决定"模型是否被编排模型接管"：Router 会话跑 `orchestration.routerModel`，
+   * 普通会话与 worker 走默认模型。放在 meta 里，免得渲染层再发一次 `list` 去查。
+   */
+  readonly role?: SessionRole | undefined
 }
 
 /**

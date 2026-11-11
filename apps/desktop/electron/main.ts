@@ -1670,6 +1670,18 @@ async function ensureSessionWatch(sessionId: string): Promise<void> {
         chunkTimer = setTimeout(flushChunks, CHUNK_FLUSH_MS);
       return;
     }
+    /*
+     * worker 会话诞生：**立刻**让所有渲染层刷新侧栏。
+     *
+     * worker 是编排 provider 在服务层建的、不经过任何 IPC handler，
+     * 所以不会触发任何已有的 `session.changed` 推送——实测表现为
+     * "worker 跑完才出现在侧栏"。`worker/session-created` 落在 Router 日志里，
+     * 在这里转发一次即可补上这条路。
+     */
+    if (event.type === "worker/session-created") {
+      pushToRenderer("lcode:session.changed", { session_id: event.data.workerSessionId });
+      pushToRenderer("lcode:session.changed", { session_id: sessionId });
+    }
     // 结构与表面事件**即时**推：它们是 UI 的骨架，攒批会让"正在做什么"看起来卡住
     pushToRenderer("lcode:session.event", { session_id: sessionId, event });
   });

@@ -19,6 +19,15 @@ export interface TokenMeasurement {
   readonly observedInputTokens: number
   readonly observedOutputTokens: number
   /**
+   * 其中**命中提示缓存**的输入 token（docs/09 §3.2.3）。
+   *
+   * 供应商只在部分模型上回传 `prompt_tokens_details.cached_tokens`；
+   * 拿不到时保持 0，调用方用 `cacheReported` 区分"0%"与"未提供"。
+   */
+  readonly cachedInputTokens: number
+  /** 是否真的拿到过缓存数据（决定 UI 显示 `—` 还是 `0%`） */
+  readonly cacheReported: boolean
+  /**
    * 以最近一次仍有效的供应商 usage 为基线的当前上下文大小：
    * `input + output + 其后新增表面的估算`。没有可用基线时缺省。
    */
@@ -47,10 +56,23 @@ export function measure(input: { readonly session: SessionService; readonly syst
   const schemas = JSON.stringify(input.tools)
   let observedInputTokens = 0
   let observedOutputTokens = 0
+  let cachedInputTokens = 0
+  let cacheReported = false
   for (const event of events) {
     if (event.type !== 'assistant/message') continue
     observedInputTokens += event.data.usage?.input ?? 0
     observedOutputTokens += event.data.usage?.output ?? 0
+    /*
+     * 缓存命中只累加**报告过**的部分。
+     *
+     * 不能把"没报告"当成 0：那会让 UI 显示一个假的 0%，把模型能力差异
+     * 误报成我们的实现问题（qwen 系部分模型确实不回传该字段）。
+     */
+    const cacheRead = event.data.usage?.cacheRead
+    if (cacheRead !== undefined) {
+      cachedInputTokens += cacheRead
+      cacheReported = true
+    }
   }
   const provider = providerBaseline(events, items)
   const systemTokens = estimateTokens(input.system)
@@ -68,6 +90,8 @@ export function measure(input: { readonly session: SessionService; readonly syst
     total: surfaceTokens + systemTokens + toolSchemaTokens,
     observedInputTokens,
     observedOutputTokens,
+    cachedInputTokens,
+    cacheReported,
     ...(provider === undefined ? {} : { providerTotal: provider.total, providerDeltaTokens: provider.delta }),
   })
 }

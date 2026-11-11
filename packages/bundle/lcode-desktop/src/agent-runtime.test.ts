@@ -580,7 +580,14 @@ describe('A. 装配的接线正确性', () => {
     expect(session.events().find((event) => event.type === 'turn/end')).toMatchObject({ data: { reason: 'completed' } })
   })
 
-  it('agents.inject 进入本轮系统提示，但不会污染下一轮', async () => {
+  /*
+   * 宿主注入改为**消息尾部追加**（docs/09 §3.2.2）。
+   *
+   * 以前它进系统提示词，于是"注入一次 = 系统提示词变一次 = 整段前缀缓存失效"。
+   * 现在它不进 `system`，而是作为一条独立 user 消息追加在历史末尾——
+   * 之前所有 token 仍然命中，只有这条新消息全价。
+   */
+  it('agents.inject 作为消息追加（不改系统提示词），且不污染下一轮', async () => {
     const rt = await makeRuntime([textScript, textScript])
     const { session_id } = await rt.sessions.create({ cwd: '/repo/web' })
     const { agent_id } = await rt.agents.create({ session_id })
@@ -589,14 +596,16 @@ describe('A. 装配的接线正确性', () => {
     await sendAndWait(rt, agent_id, '第一轮')
     await sendAndWait(rt, agent_id, '第二轮')
 
-    const systems = rt.sessions
+    const headers = rt.sessions
       .sessionServiceFor(session_id)
       .events()
       .filter((event) => event.type === 'request/header')
       .map((event) => event.data.header.system)
-    expect(systems).toHaveLength(2)
-    expect(systems[0]).toContain('宿主提示：a.txt 无法回退')
-    expect(systems[1]).not.toContain('宿主提示：a.txt 无法回退')
+    expect(headers).toHaveLength(2)
+    // 关键：注入**不**进系统提示词——两轮逐字相同，前缀缓存才不会被打断
+    expect(headers[0]).not.toContain('宿主提示：a.txt 无法回退')
+    expect(headers[1]).not.toContain('宿主提示：a.txt 无法回退')
+    expect(headers[0]).toBe(headers[1])
   })
 
   it('P7-01：上下文来源预计算、限于工作区并写入请求审计', async () => {
@@ -700,6 +709,37 @@ describe('A. 装配的接线正确性', () => {
     expect(assembled.system).toContain('edit')
     expect(assembled.tools.some((tool) => tool.name === 'submit_plan')).toBe(false)
     expect(assembled.tools.some((tool) => tool.name === 'request_plan_change')).toBe(false)
+  })
+
+  /*
+   * 提示缓存的前缀稳定性（docs/09 上下文工程）。
+   *
+   * 供应商按**前缀**命中缓存。系统提示词里只要有一个每步都变的东西，
+   * 缓存就止步于那个位置，**其后的整段对话历史每一步都要全价重算**——
+   * 这是真实踩过的坑：曾经在系统提示词末尾注入完整 ISO 时间戳，
+   * 结果同一会话两次装配有 9 个字符不同，整段历史每步都在重算。
+   *
+   * 这条用例的意义是：任何"每次装配生成新内容"的注入都会在这里变红。
+   */
+  it('P11-18：同一会话两次装配的系统提示词逐字相同（否则缓存前缀每步失效）', async () => {
+    const rt = await makeRuntime([textScript])
+    const { session_id } = await rt.sessions.create({ cwd: home, title: '前缀稳定性' })
+    const first = await rt.ctx.get('systemPrompt').assemble({ sessionId: session_id })
+    await new Promise((resolve) => setTimeout(resolve, 1100))
+    const second = await rt.ctx.get('systemPrompt').assemble({ sessionId: session_id })
+
+    if (first.system !== second.system) {
+      let i = 0
+      while (i < first.system.length && i < second.system.length && first.system[i] === second.system[i]) i += 1
+      throw new Error(
+        `系统提示词不稳定：第 ${i} 个字符起不同\n` +
+          `A: ${JSON.stringify(first.system.slice(Math.max(0, i - 60), i + 40))}\n` +
+          `B: ${JSON.stringify(second.system.slice(Math.max(0, i - 60), i + 40))}`,
+      )
+    }
+    expect(first.system).toBe(second.system)
+    // 工具 schema 同样参与前缀，必须稳定
+    expect(JSON.stringify(first.tools)).toBe(JSON.stringify(second.tools))
   })
 
   it('P7-04：子代理继承组合快照，创建独立会话且只能看到只读工具', async () => {

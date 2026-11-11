@@ -13,6 +13,7 @@ import {
   type CompactionRangeOptions,
   type CompactionSummarizer,
 } from './compaction-summarizer.ts'
+import { applySpillToSurface } from '@lcode/spill-local'
 
 /** 上下文用量达到窗口的 90% 时，在下一个步边界自动压缩。 */
 export const AUTO_COMPACTION_RATIO = 0.9
@@ -44,6 +45,32 @@ export function registerContextRecovery(input: ContextRecoveryOptions): Disposer
   ): Promise<CompactionResult | undefined> => {
     const plan = chooseCompactionRange(session, range)
     if (plan === undefined) return undefined
+    /*
+     * prune / spill 在这里**按需**运行（docs/09 §3.2.5）。
+     *
+     * 它们不再监听 `agent/tool-result-appended` 主动触发：每结果替换会改写
+     * 下一步请求的历史，让提供方前缀缓存从那个位置起失效（实测单轮浪费
+     * 800K tokens）。压缩本来就是"接受一次缓存失效，换取更小的上下文"，
+     * 把这两层合并进同一个时点，失效只发生一次。
+     *
+     * 失败不阻断：外置是优化，磁盘坏了就保留原文。
+     */
+    try {
+      const prune = input.ctx.get('compactionPrune')
+      for (const item of session.events()) {
+        if (item.type !== 'tool/result') continue
+        const callId = item.data.message?.toolCallId
+        if (typeof callId !== 'string' || callId === '') continue
+        // callId 形如 `read-1` / `call_xxx`：取前缀作为工具名，与原监听器行为一致
+        const toolName = callId.split('-')[0] ?? ''
+        prune.prune({ session, sourceEventSeq: item.seq, toolName })
+      }
+      // spill：把剩余的超长工具结果外置（applySpillToSurface 异步写盘）
+      const spill = input.ctx.get('spill')
+      applySpillToSurface({ sessionId, session, spill })
+    } catch {
+      // 服务不可用或磁盘失败：保留原文，压缩流程继续
+    }
     const summarize = input.summarize ?? createModelCompactionSummarizer({
       ctx: input.ctx,
       ...(range.keepRecentTurns === undefined

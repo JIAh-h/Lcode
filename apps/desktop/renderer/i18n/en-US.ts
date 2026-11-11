@@ -531,8 +531,8 @@ export const EN: Readonly<Record<string, string>> = {
   '（没有输出）': '(no output)',
   超时: 'Timed out',
   已中止: 'Aborted',
-  '这一轮没能跑起来。请检查模型配置（密钥、接口地址、模型名）。':
-    'This turn couldn’t run. Check the model configuration — API key, endpoint, and model name.',
+  '这一轮没能跑起来。常见原因：模型额度耗尽（403）、密钥无效或无权限（401）、接口地址或模型名不对。可在 设置 → 模型 用「测试连接」确认。':
+    'This turn couldn’t run. Common causes: the model’s quota is exhausted (403), the key is invalid or lacks access (401), or the endpoint/model name is wrong. You can confirm under Settings → Model with “Test connection”.',
   你: 'You',
   过程记录: 'Process log',
   '当前环境没有主进程桥，无法新建对话': 'No main-process bridge — cannot start a conversation',
@@ -783,6 +783,29 @@ export const EN: Readonly<Record<string, string>> = {
     'Use as an orchestration session (can dispatch workers, but doesn’t execute itself)',
   '勾选后这次会话只做调度：可以派发 worker，但不能自己改文件或执行命令':
     'When checked, this session only dispatches: it can hand tasks to workers but cannot edit files or run commands itself',
+  '需要拆分或并行的任务用它；单点问答用普通会话更省。':
+    'Use it for work that splits or runs in parallel; a one-off question is cheaper in a normal chat.',
+  '已勾选：接下来读代码、跑命令类的问题都会派给 worker 执行，由一个独立会话完成。':
+    'Checked: questions that need to read code or run commands will be handed to a separate worker session.',
+  '编排模型 ·': 'Orchestration model ·',
+  '缓存 {pct}': 'Cache {pct}',
+  '{used} tok': '{used} tok',
+  用量明细: 'Token usage',
+  查看用量明细: 'View token usage',
+  累计输入: 'Total input',
+  其中缓存读取: 'of which cached',
+  其中未缓存输入: 'of which uncached',
+  累计输出: 'Total output',
+  缓存命中率: 'Cache hit rate',
+  模型未报告: 'Not reported',
+  '这个模型没有回报缓存用量，因此无法计算命中率。':
+    'This model does not report cache usage, so hit rate cannot be computed.',
+  '缓存命中的输入按供应商折扣计价；未命中部分按原价。':
+    'Cached input is billed at the provider’s discount; the rest at full price.',
+  '提示缓存命中率：{pct}%（命中 {cached} / 输入 {input} tokens）。命中部分按供应商折扣计价。':
+    'Prompt cache hit rate: {pct}% ({cached} cached of {input} input tokens). Cached tokens are billed at the provider’s discount rate.',
+  '这个会话是编排调度会话：它自己用「设置 → 模型 → 编排模型」，worker 才用默认模型。要改请去设置页。':
+    'This is an orchestration session: it runs on the model set under Settings → Model → Orchestration model; workers use the default model. Change it in Settings.',
   编排档位: 'Orchestration mode',
   新建编排会话时: 'New orchestration sessions',
   编排关闭: 'Off',

@@ -235,6 +235,107 @@ describe('P11-03 Router 不持有执行工具（§3.2）', () => {
     // 但必须能派发
     expect(tools).toContain('dispatch_worker')
   })
+
+  /*
+   * 提示层收窄**不等于**执行层拦住。
+   *
+   * 真实事故：Router 的请求头里工具表只有 6 个白名单工具，模型仍然调用了
+   * `shell` 36 次、`read` 1 次，而系统照常执行了——因为工具执行按名字从
+   * 注册表全量解析，没有任何一层校验角色。于是 Router 自己把活干完、一次没派发。
+   */
+  it('P11-19：Router 直接调用未授权工具时，执行期被拒绝（不靠提示层自觉）', async () => {
+    const rt = await makeRuntime([reply('不该执行到这里')], 'auto')
+    const { session_id } = await rt.sessions.create({ cwd: home, title: 'Router 越权' })
+    rt.sessionRoles.setRole(session_id, 'router')
+
+    const registry = rt.ctx.get('tools')
+    // 参数必须合法：注册表先校验参数、再进 `tools/pre-execute`，
+    // 用非法参数只会拿到 ET-INVALID_ARGS，测不到角色闸门。
+    const result = await registry.execute(
+      { callId: 'call-1', name: 'read', arguments: JSON.stringify({ path: 'README.md' }) },
+      { signal: new AbortController().signal, scope: { sessionId: session_id, agentId: session_id } },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('ET-DENIED')
+    // 拒绝理由要能指导模型下一步（去派 worker），而不是一句"没权限"
+    const meta = result.meta as { readonly diagnostic?: string } | undefined
+    expect(String(meta?.diagnostic ?? '')).toContain('dispatch_worker')
+  })
+
+  it('P11-19：worker 直接调用 dispatch_worker 时，执行期被拒绝（防三层结构）', async () => {
+    const rt = await makeRuntime([reply('worker')], 'auto')
+    const { session_id } = await rt.sessions.create({ cwd: home, title: 'worker 越权' })
+    rt.sessionRoles.setRole(session_id, 'worker')
+
+    const result = await rt.ctx.get('tools').execute(
+      { callId: 'call-2', name: 'dispatch_worker', arguments: JSON.stringify({ task: '偷偷再派一个' }) },
+      { signal: new AbortController().signal, scope: { sessionId: session_id, agentId: session_id } },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('ET-DENIED')
+  })
+
+  it('P11-19：普通会话调用 dispatch_worker 也被拒绝（没有 Router 身份就没有汇报回路）', async () => {
+    const rt = await makeRuntime([reply('普通')], 'auto')
+    const { session_id } = await rt.sessions.create({ cwd: home, title: '普通会话' })
+    const result = await rt.ctx.get('tools').execute(
+      { callId: 'call-3', name: 'dispatch_worker', arguments: JSON.stringify({ task: 'x' }) },
+      { signal: new AbortController().signal, scope: { sessionId: session_id, agentId: session_id } },
+    )
+    expect(result.ok).toBe(false)
+    expect(result.error?.code).toBe('ET-DENIED')
+  })
+
+  /*
+   * 侧栏刷新与残留清理（docs/26 §4.2 / §7.6）。
+   *
+   * 真实事故：worker 在服务层创建、不经过任何 IPC handler，宿主不知道它诞生了，
+   * 表现为"worker 跑完才出现在侧栏"；失败 worker 留在列表里，与新 worker 混在一起。
+   */
+  it('P11-20：派发即落 worker/session-created（宿主据此刷新侧栏）', async () => {
+    const rt = await makeRuntime([reply('worker 好了'), reply('router 收到')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+
+    const receipt = await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '通知验证' })
+    // 事件应当**立刻**存在（不等 worker 跑完）
+    const created = rt.sessions
+      .sessionServiceFor(routerSession)
+      .events()
+      .find((e) => e.type === 'worker/session-created')
+    expect(created).toBeDefined()
+    expect((created as { data: { workerSessionId: string } }).data.workerSessionId).toBe(receipt.workerSessionId)
+
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+    await rt.sessions.delete({ session_id: receipt.workerSessionId }).catch(() => {})
+  }, 20000)
+
+  it('P11-20：失败 worker 自动软删（进回收站，可恢复），completed 的保留', async () => {
+    const rt = await makeRuntime([reply('这次成了'), reply('router 收到')], 'auto')
+    const { session_id: routerSession } = await rt.sessions.create({ cwd: home, title: 'Router' })
+    rt.sessionRoles.setRole(routerSession, 'router')
+
+    /*
+     * 制造一次必败的 worker：把默认模型清掉（EL-NO_MODEL_CONFIGURED）。
+     * `set('')` 不在契约里，所以直接用引擎层的开关——改回一个不存在的 provider 名。
+     */
+    await rt.ctx.get('agentDefaultModel').set({ provider: 'nonexistent-provider', model: 'nope' })
+
+    const receipt = await rt.orchestration.dispatch({ routerSessionId: routerSession, task: '会失败的' })
+    await waitForEvent(rt, routerSession, 'worker/completed', 8000)
+    const completed = rt.sessions
+      .sessionServiceFor(routerSession)
+      .events()
+      .find((e) => e.type === 'worker/completed')
+    expect((completed as { data: { outcome: string } }).data.outcome).toBe('failed')
+
+    // 失败 worker：软删（回收站可恢复）
+    const items = (await rt.sessions.list({ limit: 20 })).items
+    const failed = items.find((i) => i.session_id === receipt.workerSessionId)
+    expect(failed?.deleted_at).not.toBeNull()
+
+    await rt.sessions.delete({ session_id: receipt.workerSessionId }).catch(() => {})
+  }, 20000)
 })
 
 describe('P11-07 并发上限（§7.5）', () => {

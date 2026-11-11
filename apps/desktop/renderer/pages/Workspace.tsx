@@ -353,6 +353,15 @@ export function WorkspacePage() {
   const [text, setText] = useState('')
   const [events, setEvents] = useState<readonly SessionEvent[]>([])
   const [meta, setMeta] = useState<SessionMeta | null>(null)
+  /**
+   * 编排会话的 Router 模型（docs/26 §3.2）。
+   *
+   * 只在 `meta.role === 'router'` 时取一次并传给输入区：这样界面上显示的
+   * 就是 Router 真正在跑的模型，而不是"这次对话的默认模型"（worker 才用后者）。
+   */
+  const [orchestrationRouterModel, setOrchestrationRouterModel] = useState<
+    { provider: string; model: string } | undefined
+  >(undefined)
   const [queued, setQueued] = useState<readonly QueuedMessage[]>([])
   /** 会话是否处于"上翻离开底部"状态（「回到底部」按钮放进输入框上方的状态条） */
   const [jumpVisible, setJumpVisible] = useState(false)
@@ -481,6 +490,29 @@ export function WorkspacePage() {
       .then((state) => setAgentPreset(state?.preset ?? null))
       .catch(() => setAgentPreset(null))
   }, [sessionId])
+  /* Router 会话：把设置里的编排模型读出来，让输入区显示"实际在用的模型" */
+  useEffect(() => {
+    if (meta?.role !== 'router') {
+      setOrchestrationRouterModel(undefined)
+      return
+    }
+    const orch = (globalThis as unknown as {
+      lcode?: { orchestration?: { get(): Promise<unknown> } }
+    }).lcode?.orchestration
+    if (orch === undefined) return
+    void orch
+      .get()
+      .then((value) => {
+        const stored = value as { routerModel?: { provider?: string; model?: string } | null } | null
+        const model = stored?.routerModel
+        setOrchestrationRouterModel(
+          model !== null && model !== undefined && typeof model.provider === 'string' && typeof model.model === 'string'
+            ? { provider: model.provider, model: model.model }
+            : undefined,
+        )
+      })
+      .catch(() => setOrchestrationRouterModel(undefined))
+  }, [meta?.role, sessionId])
   useEffect(() => {
     dismissedPlanSeq.current = null
     setReviewPlanSeq(null)
@@ -835,6 +867,7 @@ export function WorkspacePage() {
                 onClearQueued={clearQueued}
                 usedTokens={usage?.usedTokens ?? 0}
                 contextWindowTokens={usage?.contextWindowTokens ?? null}
+                orchestrationModel={meta?.role === 'router' ? orchestrationRouterModel : undefined}
                 onCompact={sessionId === undefined ? undefined : () => setCompactOpen(true)}
                 onSlashCommand={(name, _args) => {
                   if (sessionId === undefined) return false

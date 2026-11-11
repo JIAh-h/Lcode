@@ -34,6 +34,7 @@ function makeAdapter(opts: {
   baseUrl?: string
   apiKeyRef?: string
   overrides?: () => { readonly baseUrl?: string | undefined; readonly apiKeyRef?: string | undefined } | undefined
+  promptCache?: boolean
 }): OpenAiCompatibleAdapter {
   return new OpenAiCompatibleAdapter({
     id: 'custom',
@@ -42,6 +43,7 @@ function makeAdapter(opts: {
     apiKeyRef: opts.apiKeyRef ?? 'CUSTOM_API_KEY',
     credentials: opts.credentials ?? credential('sk-secret-value'),
     fetch: opts.fetch,
+    ...(opts.promptCache === undefined ? {} : { promptCache: opts.promptCache }),
     ...(opts.overrides === undefined ? {} : { overrides: opts.overrides }),
   })
 }
@@ -544,6 +546,43 @@ describe('① 流式翻译：SSE → StreamChunk', () => {
     ])
   })
 
+  /*
+   * 显式缓存（docs/09 §3.2.3）。
+   *
+   * 隐式缓存"不保证命中"（官方原话），实测同一请求连发 5 次会掉到 0。
+   * 显式 `cache_control` 能拿到 5 分钟内确定命中、命中价 10%。
+   */
+  it('promptCache 开启时给系统消息打 cache_control；关闭时不打', async () => {
+    const capture = async (promptCache: boolean): Promise<unknown> => {
+      let sent: unknown
+      const adapter = makeAdapter({
+        promptCache,
+        fetch: (async (_url: string, init?: RequestInit) => {
+          sent = JSON.parse(String(init?.body))
+          return sse([{ choices: [{ delta: { content: 'ok' } }] }, { choices: [{ delta: {}, finish_reason: 'stop' }] }])
+        }) as typeof globalThis.fetch,
+      })
+      const call = await adapter.prepareCall({ provider: 'custom', model: 'm' }, { signal: new AbortController().signal })
+      await collect(
+        adapter.stream(
+          { ...call, request: { ...call.request, body: { system: '稳定前缀', messages: [{ role: 'user', content: [{ type: 'text', text: '你好' }] }], tools: [] } } },
+          new AbortController().signal,
+        ),
+      )
+      return sent
+    }
+
+    const withCache = (await capture(true)) as { messages: { role: string; content: unknown }[] }
+    expect(withCache.messages[0]).toEqual({
+      role: 'system',
+      content: [{ type: 'text', text: '稳定前缀', cache_control: { type: 'ephemeral' } }],
+    })
+
+    const withoutCache = (await capture(false)) as { messages: { role: string; content: unknown }[] }
+    // 关闭时必须保持原来的纯字符串形状——不支持的网关看到嵌套结构可能直接 400
+    expect(withoutCache.messages[0]).toEqual({ role: 'system', content: '稳定前缀' })
+  })
+
   it('usage 带上（含缓存命中），随 done 一起给出', async () => {
     const adapter = makeAdapter({
       fetch: (async () =>
@@ -559,6 +598,44 @@ describe('① 流式翻译：SSE → StreamChunk', () => {
     })
     const done = chunks.find((c) => c.type === 'done') as { usage?: unknown }
     expect(done.usage).toMatchObject({ input: 120, output: 8 })
+  })
+
+  it('**usage 在 finish_reason 之后的独立分片里也要拿到**（DashScope / OpenAI 标准形状）', async () => {
+    /*
+     * 这是真实踩过的坑，也是"缓存命中率看不到"的根因：
+     *
+     * 设置了 `stream_options.include_usage: true` 之后，OpenAI 兼容实现（含百炼
+     * DashScope）会把 usage 放在 **finish_reason 之后的那个分片**里，而且那个分片
+     * `choices` 是空数组：
+     *
+     *   {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":null}
+     *   {"choices":[],"usage":{"prompt_tokens":63,...,"prompt_tokens_details":{"cached_tokens":42}}}
+     *
+     * 旧实现在看到 finish_reason 时立刻 return，第二个分片根本没读——
+     * 于是所有 qwen 请求的 token 统计与缓存命中一律为 0。
+     */
+    const adapter = makeAdapter({
+      fetch: (async () =>
+        sse([
+          { choices: [{ delta: { content: 'hi' } }], usage: null },
+          { choices: [{ delta: {}, finish_reason: 'stop' }], usage: null },
+          {
+            choices: [],
+            usage: { prompt_tokens: 63, completion_tokens: 21, prompt_tokens_details: { cached_tokens: 42 } },
+          },
+        ])) as typeof globalThis.fetch,
+    })
+    const call = await adapter.prepareCall({ provider: 'custom', model: 'm' }, { signal: new AbortController().signal })
+    const chunks = (await collect(adapter.stream(call, new AbortController().signal))) as {
+      type: string
+      usage?: unknown
+    }[]
+    expect(chunks.find((c) => c.type === 'usage')).toMatchObject({
+      usage: { input: 63, output: 21, cacheRead: 42 },
+    })
+    // done 必须带上它——引擎优先取 done 里的 usage
+    const done = chunks.find((c) => c.type === 'done') as { usage?: unknown }
+    expect(done.usage).toMatchObject({ input: 63, output: 21, cacheRead: 42 })
   })
 
   it('**每个分片都带 `usage: null` 也不能崩**（DeepSeek 的真实形状）', async () => {

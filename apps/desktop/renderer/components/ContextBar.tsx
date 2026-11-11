@@ -63,6 +63,9 @@ export function ContextBar({
   readonly onCompactRequest: () => void
   readonly onOpenSettings: () => void
 }) {
+  /** 用量明细弹窗（纯展示，无动作） */
+  const [usageOpen, setUsageOpen] = useState(false)
+  /** 上下文占用弹窗（含压缩动作） */
   const [open, setOpen] = useState(false)
   const [undoing, setUndoing] = useState(false)
   const [branches, setBranches] = useState<readonly string[]>([])
@@ -72,16 +75,24 @@ export function ContextBar({
   const rootRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    // `/context` 打开的是**上下文占用**（含压缩入口），不是用量明细
     if (openSignal > 0) setOpen(true)
   }, [openSignal])
 
+  /* 两个弹窗各自关闭：点外面或 Esc 时都收起来（不开的那次直接返回） */
   useEffect(() => {
-    if (!open) return
+    if (!usageOpen && !open) return
     const close = (event: MouseEvent): void => {
-      if (rootRef.current !== null && !rootRef.current.contains(event.target as Node)) setOpen(false)
+      if (rootRef.current !== null && !rootRef.current.contains(event.target as Node)) {
+        setUsageOpen(false)
+        setOpen(false)
+      }
     }
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key === 'Escape') {
+        setUsageOpen(false)
+        setOpen(false)
+      }
     }
     document.addEventListener('mousedown', close)
     document.addEventListener('keydown', onKey)
@@ -89,7 +100,7 @@ export function ContextBar({
       document.removeEventListener('mousedown', close)
       document.removeEventListener('keydown', onKey)
     }
-  }, [open])
+  }, [usageOpen, open])
 
   useEffect(() => {
     setBranches([])
@@ -153,6 +164,21 @@ export function ContextBar({
   const percent = usage?.percent ?? null
   const used = usage?.usedTokens ?? 0
   const windowTokens = usage?.contextWindowTokens ?? null
+  /*
+   * 缓存命中率：**只在模型真的报告过时才算**。
+   *
+   * `cacheReported` 为假说明这个模型不回传 `cached_tokens`——此时显示 0% 是误导，
+   * 会把"模型不支持"说成"我们没命中"。所以整块隐藏。
+   */
+  const inputTokens = usage?.measurement.observedInputTokens ?? 0
+  const cachedTokens = usage?.measurement.cachedInputTokens ?? 0
+  const outputTokens = usage?.measurement.observedOutputTokens ?? 0
+  /** 会话累计 token（输入+输出）——弹窗顶部的"用了多少" */
+  const totalTokens = inputTokens + outputTokens
+  const cachePercent =
+    usage?.measurement.cacheReported === true && inputTokens > 0
+      ? Math.round((cachedTokens / inputTokens) * 100)
+      : null
   const surface = usage?.measurement.surfaceTokens ?? 0
   const system = usage?.measurement.systemTokens ?? 0
   const tools = usage?.measurement.toolSchemaTokens ?? 0
@@ -247,9 +273,55 @@ export function ContextBar({
         ) : null}
       </div>
       <div className="cmright">
+        {/*
+         * 会话用量（docs/09 §3.2.3）：**纯展示**，不含任何动作。
+         *
+         * 与右侧「上下文占用」分开：那个弹窗里有「压缩上下文」这类**有副作用的动作**，
+         * 而这里只是"这段会话花了多少、省了多少"。混在一起会让用户以为点这个就能压缩。
+         */}
         <button
           type="button"
-          className={'cmusage' + (percent !== null && percent >= 80 ? ' warn' : '')}
+          className={'cmusage' + (usageOpen ? ' open' : '')}
+          aria-expanded={usageOpen}
+          title={t('查看用量明细')}
+          onClick={() => setUsageOpen((value) => !value)}
+        >
+          {totalTokens > 0 && <span className="cmusage-tok">{t('{used} tok', { used: formatTokens(totalTokens) })}</span>}
+          {cachePercent !== null && (
+            <span className={`cmusage-cache${cachePercent >= 80 ? ' good' : cachePercent >= 40 ? '' : ' low'}`}>
+              {t('缓存 {pct}', { pct: `${cachePercent}%` })}
+            </span>
+          )}
+        </button>
+        {usageOpen ? (
+          <div className="cmpop cmpop-usage" role="dialog" aria-label={t('用量明细')}>
+            <div className="cmpop-head">
+              <span>{t('用量明细')}</span>
+            </div>
+            {/*
+             * 缓存三项分开列：它们的**计价不同**（缓存读取只有原价的一小部分），
+             * 合成一个数就看不出省了多少。
+             */}
+            <div className="cmpop-rows">
+              <div className="cmrow cmrow-strong"><span>{t('累计输入')}</span><b>{formatTokens(inputTokens)}</b></div>
+              <div className="cmrow"><span>{t('其中缓存读取')}</span><b>{cachePercent === null ? '—' : formatTokens(cachedTokens)}</b></div>
+              <div className="cmrow"><span>{t('其中未缓存输入')}</span><b>{cachePercent === null ? '—' : formatTokens(Math.max(0, inputTokens - cachedTokens))}</b></div>
+              <div className="cmrow"><span>{t('累计输出')}</span><b>{formatTokens(outputTokens)}</b></div>
+              <div className="cmrow cmrow-strong">
+                <span>{t('缓存命中率')}</span>
+                <b>{cachePercent === null ? t('模型未报告') : `${cachePercent}%`}</b>
+              </div>
+            </div>
+            <div className="cmpop-note">
+              {cachePercent === null
+                ? t('这个模型没有回报缓存用量，因此无法计算命中率。')
+                : t('缓存命中的输入按供应商折扣计价；未命中部分按原价。')}
+            </div>
+          </div>
+        ) : null}
+        <button
+          type="button"
+          className={'cmusage' + (open ? ' open' : '') + (percent !== null && percent >= 80 ? ' warn' : '')}
           aria-expanded={open}
           title={t('查看上下文占用')}
           onClick={() => setOpen((value) => !value)}

@@ -851,7 +851,7 @@ export function SessionStream({
     return historyTurnFailed
   }, [events, failureEpoch, historyTurnFailed])
 
-  const shownError = error ?? (lastTurnFailed ? t('这一轮没能跑起来。请检查模型配置（密钥、接口地址、模型名）。') : null)
+  const shownError = error ?? (lastTurnFailed ? t('这一轮没能跑起来。常见原因：模型额度耗尽（403）、密钥无效或无权限（401）、接口地址或模型名不对。可在 设置 → 模型 用「测试连接」确认。') : null)
   const toolResults = useMemo(() => {
     const result = new Map<string, { readonly result: ToolCardResult; readonly seq: number }>()
     for (const event of events) {

@@ -181,6 +181,7 @@ export function ComposerBar({
   onClearQueued,
   usedTokens = 0,
   contextWindowTokens = null,
+  orchestrationModel,
   onCompact,
   initialImages,
   initialSkills,
@@ -219,6 +220,13 @@ export function ComposerBar({
   /** 当前上下文已用量；与草稿估算一起做发送前预警 */
   usedTokens?: number
   contextWindowTokens?: number | null
+  /**
+   * 编排会话的 Router 模型（docs/26 §3.2）。
+   *
+   * 给了它就把"模型选择器"换成只读的 `编排模型 · <model>` 标识：
+   * Router 跑的是设置页那一栏，worker 才用默认模型——两者不能混为一谈。
+   */
+  orchestrationModel?: { readonly provider: string; readonly model: string } | undefined
   /** 打开压缩预览（预警条上的按钮） */
   onCompact?: (() => void) | undefined
   /** 原位编辑：把原消息里的文件/图片/技能带进输入区，而不是静默丢掉 */
@@ -877,26 +885,45 @@ export function ComposerBar({
             void choosePermissionPreset(id as PermissionPreset).catch(() => toast(t('权限预设保存失败')))
           }}
         />
-        <PopMenu
-          // 没有模型时**不能显示空触发器**（一个光秃秃的 " ▾" 让人不知道那是什么）。
-          // 这种情形只出现在"一个模型都没配"——此时该引导去配置，而不是给个空菜单。
-          trigger={`${currentModelLabel === '' ? t('选择模型') : currentModelLabel} ▾`}
-          title="模型"
-          up
-          header="这次对话用哪个模型"
-          items={modelItems}
-          onSelect={(id) => {
-            if (id === 'manage') {
-              navigate('/settings', { state: { sec: 'providers' } })
-              return
-            }
-            // **必须走 chooseDefaultModel**：它会把选择回写主进程
-            // （`ctx.agentDefaultModel` 是权威）。以前这里只改渲染层镜像，
-            // 于是"界面上选好了、引擎那边还是空的"，发消息必报「还没有选择模型」。
+        {orchestrationModel === undefined ? (
+          <PopMenu
+            // 没有模型时**不能显示空触发器**（一个光秃秃的 " ▾" 让人不知道那是什么）。
+            // 这种情形只出现在"一个模型都没配"——此时该引导去配置，而不是给个空菜单。
+            trigger={`${currentModelLabel === '' ? t('选择模型') : currentModelLabel} ▾`}
+            title="模型"
+            up
+            header="这次对话用哪个模型"
+            items={modelItems}
+            onSelect={(id) => {
+              if (id === 'manage') {
+                navigate('/settings', { state: { sec: 'providers' } })
+                return
+              }
+              // **必须走 chooseDefaultModel**：它会把选择回写主进程
+              // （`ctx.agentDefaultModel` 是权威）。以前这里只改渲染层镜像，
+              // 于是"界面上选好了、引擎那边还是空的"，发消息必报「还没有选择模型」。
             void chooseDefaultModel(id).catch(() => undefined)
             toast(t('已切换模型：{name}', { name: prefs.models.find((m) => m.name === id)?.src ?? id }))
           }}
         />
+        ) : (
+          /*
+           * 编排会话：**显示 Router 实际在用的模型**，不给切换。
+           *
+           * 为什么不能沿用默认模型的触发器：Router 跑的是
+           * `orchestration.routerModel`（设置页那一栏），跟"这次对话用哪个模型"
+           * 是两件事。以前这里显示默认模型，用户会以为 Router 用的是它——
+           * 实际派出去的 worker 才用默认模型，两者被搞混。
+           */
+          <button
+            type="button"
+            className="modelchip-orch"
+            title={t('这个会话是编排调度会话：它自己用「设置 → 模型 → 编排模型」，worker 才用默认模型。要改请去设置页。')}
+            onClick={() => navigate('/settings', { state: { sec: 'providers' } })}
+          >
+            {t('编排模型')} · {orchestrationModel.model}
+          </button>
+        )}
         {onCancel !== undefined ? (
           <button type="button" className="sendcancel" title={t('取消')} aria-label={t('取消')} onClick={onCancel}>
             {t('取消')}

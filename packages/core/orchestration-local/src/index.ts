@@ -53,6 +53,17 @@ export interface OrchestrationProviderOptions {
   readonly heapPressureThreshold?: number | undefined
   /** 本 provider 负责的会话角色判定（Router 才能派发） */
   readonly roleOf: (sessionId: string) => 'router' | 'worker' | 'normal'
+  /**
+   * 失败/取消的 worker 会话**自动软删**（进回收站，可恢复）。
+   *
+   * 为什么默认开：失败的 worker 会话在侧栏只是一条死链接——没有完成结论、
+   * 也没有人回去续跑。留着只会和新 worker 混在一起（实测：一轮 403 失败留了
+   * 2 条残骸，加上新一轮的 3 个，用户看到 5 条分不清）。失败事件本身仍完整
+   * 落在 Router 日志里（`worker/completed` 带 error），审计不受影响。
+   *
+   * 宿主可以关掉它（测试想断言残留时）。
+   */
+  readonly archiveFailedWorkers?: boolean | undefined
 }
 
 /**
@@ -71,6 +82,8 @@ export function registerLocalOrchestration(
 ): { readonly service: OrchestrationService; readonly dispose: () => Promise<void> } {
   const workers = new Map<string, WorkerRecord>()
   let mode: OrchestrationMode = options.initialMode ?? 'observe'
+  /** 失败/取消的 worker 会话自动软删（默认开，理由见 options 注释） */
+  const archiveFailedWorkers = options.archiveFailedWorkers !== false
   let nextTaskSeq = 0
   /** 在途 worker 的运行 promise；dispose 时逐个等待，保证"关完就没有后续写入"。 */
   const inflightRuns = new Set<Promise<void>>()
@@ -336,6 +349,17 @@ export function registerLocalOrchestration(
      * worker 会很普通地出现在顶层，同时又是某人的子会话（实测就是这样）。
      */
     appendWorkerRole(options.sessions, created.session_id)
+    /*
+     * 告诉宿主"worker 会话已存在"（26 §4.2）。
+     *
+     * 侧栏的数据源是索引，宿主靠 `session.changed` 推送刷新——而 worker 是
+     * 服务层建的、不经过任何 IPC handler，宿主不知道。没有这条事件的话，
+     * worker 要等到下一次任何会话变动才冒出来（实测：跑完才出现在侧栏）。
+     */
+    appendToRouter(options.sessions, input.routerSessionId, {
+      type: 'worker/session-created',
+      data: { taskId, workerSessionId: created.session_id },
+    })
     const record: WorkerRecord = {
       taskId,
       workerSessionId: created.session_id,
@@ -441,6 +465,22 @@ export function registerLocalOrchestration(
     if (disposed) return
     writeCompleted(options.sessions, record.routerSessionId, completion)
     enqueueReport(record.routerSessionId, completion)
+    /*
+     * 失败/取消的 worker 自动进回收站（docs/26 §7.6）。
+     *
+     * 只在**明确失败或被取消**时做：completed 的 worker 里有真实产出，
+     * 用户可能要回去看它的完整调研过程，必须留在侧栏。
+     * 软删可恢复；审计事实（worker/completed 带 error）在 Router 日志里不受影响。
+     */
+    if (
+      archiveFailedWorkers &&
+      (completion.outcome === 'failed' || completion.outcome === 'cancelled') &&
+      record.workerSessionId !== ''
+    ) {
+      void options.sessions.delete({ session_id: record.workerSessionId }).catch(() => {
+        // 会话可能已被外部删除：忽略，收尾路径本就允许这种情况
+      })
+    }
   }
 
   /**
@@ -696,7 +736,7 @@ function appendToRouter(
   sessions: RuntimeSessionsService,
   routerSessionId: string,
   event: {
-    readonly type: 'worker/dispatched' | 'worker/completed' | 'worker/notified' | 'worker/reported'
+    readonly type: 'worker/dispatched' | 'worker/completed' | 'worker/notified' | 'worker/reported' | 'worker/session-created'
     readonly data: unknown
   },
 ): void {

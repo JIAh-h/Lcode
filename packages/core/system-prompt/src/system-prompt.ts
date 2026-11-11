@@ -10,8 +10,19 @@ import type { ToolRegistry, ToolSchema } from '@lcode/tools'
 export interface SystemPromptService {
   /** 注册一个静态段落（返回 disposer） */
   section(id: string, content: string, opts?: { readonly order?: number; readonly scope?: ScopeKey }): Disposer
-  /** 注册一个动态上下文（每次装配时求值；求值必须是纯函数且不得阻塞） */
-  context(id: string, fn: (ctx: AssembleCtx) => string | Promise<string>, opts?: { readonly order?: number }): Disposer
+  /**
+   * 注册一个动态上下文（每次装配时求值；求值必须是纯函数且不得阻塞）。
+   *
+   * `volatile: true` 表示**这段每次都可能变**（任务清单、注入内容…）。
+   * 它不会进入 `system`，而是单独放进 `AssembledPrompt.volatile`，
+   * 由引擎拼到**消息尾部**——这样 `system` 逐字稳定，前缀缓存不会被它打断。
+   * 详见 docs/09 §3.2.2。
+   */
+  context(
+    id: string,
+    fn: (ctx: AssembleCtx) => string | Promise<string>,
+    opts?: { readonly order?: number; readonly volatile?: boolean },
+  ): Disposer
   /** 声明变量的取值来源 */
   variable(name: string, resolve: (ctx: AssembleCtx) => string): Disposer
   /** 追加/收窄工具 schema（收窄是叠加的，不可放宽）。会话级策略可读取装配上下文。 */
@@ -32,7 +43,16 @@ export interface AssembleInput {
 }
 
 export interface AssembledPrompt {
+  /** 稳定段：逐字不变才能吃到前缀缓存 */
   readonly system: string
+  /**
+   * 易变段（可能每次装配都不同）。
+   *
+   * **不进 `system`**：引擎把它拼到消息尾部，避免改写系统提示词而让
+   * 提供方前缀缓存从第一个 token 起失效（docs/09 §3.2.2）。
+   * 为空时表示没有易变内容，请求形状与以前完全一致。
+   */
+  readonly volatile: string
   readonly tools: readonly ToolSchema[]
 }
 
@@ -46,6 +66,8 @@ interface ContextEntry {
   id: string
   fn: (ctx: AssembleCtx) => string | Promise<string>
   order: number
+  /** 易变段：不进 system，由引擎拼到消息尾部 */
+  volatile: boolean
 }
 
 /** 内存实现 */
@@ -74,8 +96,12 @@ export class InMemorySystemPromptService implements SystemPromptService {
     }
   }
 
-  context(id: string, fn: (ctx: AssembleCtx) => string | Promise<string>, opts?: { readonly order?: number }): Disposer {
-    this.contexts.set(id, { id, fn, order: opts?.order ?? this.orderCounter++ })
+  context(
+    id: string,
+    fn: (ctx: AssembleCtx) => string | Promise<string>,
+    opts?: { readonly order?: number; readonly volatile?: boolean },
+  ): Disposer {
+    this.contexts.set(id, { id, fn, order: opts?.order ?? this.orderCounter++, volatile: opts?.volatile === true })
     const myEntry = this.contexts.get(id)!
     return () => {
       if (this.contexts.get(id) === myEntry) this.contexts.delete(id)
@@ -116,8 +142,11 @@ export class InMemorySystemPromptService implements SystemPromptService {
     // 动态上下文（P3：求值不得有副作用——调用方责任，这里只按序追加）
     const contexts = [...this.contexts.values()].sort((a, b) => a.order - b.order || 0)
     const dynamicParts: string[] = []
+    const volatileParts: string[] = []
     for (const entry of contexts) {
-      dynamicParts.push(await entry.fn(ctx))
+      const text = await entry.fn(ctx)
+      // 易变段单独收：它不进 system，否则每变一次就打断整段前缀缓存
+      ;(entry.volatile ? volatileParts : dynamicParts).push(text)
     }
     if (dynamicParts.length > 0) {
       system = [system, ...dynamicParts].filter((s) => s.length > 0).join('\n\n')
@@ -146,7 +175,7 @@ export class InMemorySystemPromptService implements SystemPromptService {
       all = narrowed
     }
 
-    return { system, tools: all }
+    return { system, volatile: volatileParts.filter((s) => s.length > 0).join('\n\n'), tools: all }
   }
 }
 

@@ -707,7 +707,13 @@ export class LocalSessionsApi implements RuntimeSessionsService, HistoryApi {
       meta = this.metaFromIndex(sessionId)
     }
     if (meta === null) throw notFound(sessionId)
-    return { last_seq: meta.last_seq, header: meta, log_revision: meta.log_revision ?? '' }
+    /*
+     * `role` 必须跟着 meta 一起回去。
+     *
+     * 界面要用它决定"这个会话的模型是被编排模型接管，还是走默认模型"；
+     * 不给的话渲染层只能再发一次 `list` 去查，多一次 IPC 且容易与 meta 不一致。
+     */
+    return { last_seq: meta.last_seq, header: meta, log_revision: meta.log_revision ?? '', role: meta.role ?? 'normal' }
   }
 
   async rename(input: RenameSessionInput): Promise<RenameSessionResult> {

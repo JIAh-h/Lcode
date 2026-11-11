@@ -1,4 +1,7 @@
 import type { PlatformSandboxCapabilities, ResolvedSandboxPolicy, SandboxReleaseResult, SandboxService, SandboxStatus, SandboxWrapResult } from '@lcode/sandbox'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 
 /** 原生桥自检的最小证明。四项中缺任何一项，都不能把命令当作受保护执行。 */
@@ -115,12 +118,26 @@ export function createWindowsSandboxBridge(options: WindowsSandboxBridgeOptions)
           degradationReason: proof?.reason ?? (prepared.stderr.trim() || 'Windows 原生 helper 未能完成工作区预检。'),
         }
       }
-      // helper 自己继承 Node 已设置好的 cwd / env；所以这里仅写 argv，不把环境变量
-      // 或路径参数拼进 shell 字符串。
+      /*
+       * 环境块透传（docs/09 §3.2.6）。
+       *
+       * helper 由 Electron 主进程启动，继承的是**主进程**的精简 PATH——
+       * 用户装的 node / pnpm / git 往往在 shell 的 PATH 里而不在这里。
+       * 实测：沙箱里跑 `node --version` 报"不是内部或外部命令"，而宿主明明有 node。
+       * 把当前 `process.env` 写成 UTF-16LE 环境块文件（CreateProcessW 标准格式），
+       * helper 用 `--env-file` 读出后显式传给 CreateProcessW。
+       */
+      const envFile = writeEnvFile()
       return {
         enforced: true,
         mechanism: MECHANISM,
-        wrappedArgv: [candidate, '--run', '--workspace', policy.workspaceRoot, '--network', policy.allowNetwork === true ? 'allow' : 'deny', '--mode', policy.mode, '--', ...argv],
+        wrappedArgv: [
+          candidate, '--run', '--workspace', policy.workspaceRoot,
+          '--network', policy.allowNetwork === true ? 'allow' : 'deny',
+          '--mode', policy.mode,
+          ...(envFile === undefined ? [] : ['--env-file', envFile]),
+          '--', ...argv,
+        ],
       }
     },
     async wrapPty(argv, policy): Promise<SandboxWrapResult> {
@@ -292,6 +309,37 @@ function defaultHelperPaths(): readonly string[] {
   result.push(`${process.cwd()}\\packages\\sandbox\\sandbox-win32\\native\\lcode-sandbox-win32.exe`)
   result.push(`${process.cwd()}\\native\\lcode-sandbox-win32.exe`)
   return result
+}
+
+/**
+ * 把当前 `process.env` 写成 **CreateProcessW 标准格式**的 UTF-16LE 环境块文件：
+ * `KEY=VALUE\0` 逐条排列，末尾再补一个 `\0`。
+ *
+ * 写在 home 下的临时目录（而不是 tmp）：helper 以当前用户身份运行，读得到；
+ * 每次 wrap 覆盖同一文件，避免堆积。
+ */
+let envFilePath: string | undefined
+function writeEnvFile(): string | undefined {
+  try {
+    if (envFilePath === undefined) {
+      envFilePath = join(tmpdir(), 'lcode-sandbox-env', `env-block-${process.pid}.bin`)
+      mkdirSync(dirname(envFilePath), { recursive: true })
+    }
+    const parts: string[] = []
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value === undefined) continue
+      // 环境块里不允许出现 \0（它会提前终结条目）；出现就丢弃该条
+      if (key.includes('\0') || value.includes('\0')) continue
+      parts.push(`${key}=${value}`)
+    }
+    // 末尾双 \0 是格式要求
+    const block = Buffer.from(parts.join('\0') + '\0\0', 'utf16le')
+    writeFileSync(envFilePath, Buffer.concat([Buffer.from([0xff, 0xfe]), block]))
+    return envFilePath
+  } catch {
+    // 写不出环境文件就退回旧行为（继承 helper 环境）：node 可能找不到，但不至于无法执行
+    return undefined
+  }
 }
 
 async function invoke(subprocess: SandboxHelperSubprocess, argv: readonly string[]): Promise<{ readonly stdout: string; readonly stderr: string }> {

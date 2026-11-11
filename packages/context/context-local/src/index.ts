@@ -55,11 +55,21 @@ export function registerLocalContextSources(input: {
   /*
    * 稳定内容按固定顺序放前面，时间单独放最后一段。
    *
-   * 供应商的提示缓存按**前缀**命中；把每秒都变的 ISO 时间塞进仓库摘要中间，
-   * 会让同一轮里每一次工具续步都改变整段动态上下文。时间放最后只影响尾巴。
+   * 供应商的提示缓存按**前缀**命中。曾经的写法是每次装配生成完整 ISO 时间戳
+   * （`new Date().toISOString()`），当时的理由是"时间放最后只影响尾巴"——**这是错的**：
+   * 时间在系统提示词末尾，它一变，缓存前缀就止步于此，**其后的整段对话历史
+   * 每一个工具续步都要全价重算**。实测（同一会话间隔 1.2s 装配两次）：
+   * 1088 字的系统提示词只有末尾 9 个字符不同，也就是每一步都在整段重算。
+   *
+   * 现在只放**日期**：同一自然日内完全不变，跨天才会失效一次。
+   * 需要精确时间让模型自己跑一次 `date`——一次工具调用远比每步丢掉前缀便宜。
    */
   const unregisterPrompt = input.systemPrompt.context('runtime-context', ({ sessionId }) => snapshots.get(sessionId ?? '')?.content ?? '', { order: 900 })
-  const unregisterTime = input.systemPrompt.context('runtime-time', () => `### Local time\n${new Date().toISOString()}`, { order: 999 })
+  const unregisterTime = input.systemPrompt.context(
+    'runtime-time',
+    () => `### Local date\n${new Date().toISOString().slice(0, 10)}`,
+    { order: 999 },
+  )
   const unregisterStep = input.ctx.on('agent/pre-step', async ({ agentId }) => {
     const agent = input.ctx.get('agents').get(asAgentId(agentId))
     if (agent === undefined) return

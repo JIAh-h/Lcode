@@ -5,7 +5,9 @@
 #include <shellapi.h>
 
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -548,7 +550,7 @@ std::wstring quote(const std::wstring& arg) {
  * 完全访问：不套 AppContainer/ACL，只保留 Job Object 做进程树回收。
  * 文件与网络边界由策略/审批决定，而不是 OS 沙箱。
  */
-int runWithJobOnly(const std::wstring& workspace, const std::vector<std::wstring>& target) {
+int runWithJobOnly(const std::wstring& workspace, const wchar_t* environment, const std::vector<std::wstring>& target) {
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
   limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -567,7 +569,7 @@ int runWithJobOnly(const std::wstring& workspace, const std::vector<std::wstring
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
   const BOOL launched = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, TRUE,
-                                       CREATE_SUSPENDED, nullptr, workspace.c_str(), &startup, &process);
+                                       CREATE_SUSPENDED, const_cast<LPVOID>(static_cast<const void*>(environment)), workspace.c_str(), &startup, &process);
   if (!launched) {
     std::wcerr << L"无法启动目标程序: " << lastError() << std::endl;
     CloseHandle(job);
@@ -590,8 +592,8 @@ int runWithJobOnly(const std::wstring& workspace, const std::vector<std::wstring
   return static_cast<int>(exitCode);
 }
 
-int runSandboxed(const std::wstring& workspace, bool allowNetwork, SandboxMode mode, const std::vector<std::wstring>& target) {
-  if (mode == SandboxMode::FullAccess) return runWithJobOnly(workspace, target);
+int runSandboxed(const std::wstring& workspace, bool allowNetwork, SandboxMode mode, const wchar_t* environment, const std::vector<std::wstring>& target) {
+  if (mode == SandboxMode::FullAccess) return runWithJobOnly(workspace, environment, target);
   CapabilitySet networkCapabilities;
   std::wstring networkReason;
   if (allowNetwork && !addInternetClientCapability(&networkCapabilities, &networkReason)) {
@@ -650,7 +652,7 @@ int runSandboxed(const std::wstring& workspace, bool allowNetwork, SandboxMode m
   PROCESS_INFORMATION process{};
   const BOOL launched = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, TRUE,
                                        EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED,
-                                       nullptr, workspace.c_str(), &startup.StartupInfo, &process);
+                                       const_cast<LPVOID>(static_cast<const void*>(environment)), workspace.c_str(), &startup.StartupInfo, &process);
   if (!launched) {
     std::wcerr << L"无法在 AppContainer 中启动目标程序: " << lastError() << std::endl;
     DeleteProcThreadAttributeList(attributes); CloseHandle(job); FreeSid(sid); return 10;
@@ -703,18 +705,104 @@ int wmain() {
   std::wstring workspace;
   std::wstring modeValue = L"workspace-write";
   bool allowNetwork = false;
+  /*
+   * 目标进程的环境块（docs/09 §3.2.6）。
+   *
+   * helper 由 Electron 主进程启动，继承的是**主进程**的精简 PATH——
+   * 用户安装的 node / pnpm / git 往往在 shell 的 PATH 里而不在这里。
+   * 传 nullptr 等于继承 helper 环境，于是沙箱里 `node` "不是内部或外部命令"。
+   * 宿主把 `process.env` 写成 UTF-16 环境块文件传进来（--env-file），这里读出。
+   * 不传则维持旧行为（继承 helper 环境）。
+   */
+  std::wstring envFile;
   size_t targetStart = args.size();
   for (size_t i = 1; i < args.size(); ++i) {
     if (args[i] == L"--workspace" && i + 1 < args.size()) workspace = args[++i];
     else if (args[i] == L"--network" && i + 1 < args.size()) allowNetwork = args[++i] == L"allow";
     else if (args[i] == L"--mode" && i + 1 < args.size()) modeValue = args[++i];
+    else if (args[i] == L"--env-file" && i + 1 < args.size()) envFile = args[++i];
     else if (args[i] == L"--") { targetStart = i + 1; break; }
   }
   if (workspace.empty()) { usage(); return 64; }
+  // 读环境块文件（UTF-16LE，标准 CreateProcessW 格式：KEY=VALUE\0 … \0\0）
+  std::wstring envBlock;
+  if (!envFile.empty()) {
+    std::ifstream in(envFile.c_str(), std::ios::binary);
+    if (in) {
+      std::ostringstream ss;
+      ss << in.rdbuf();
+      const std::string raw = ss.str();
+      if (raw.size() >= 2 && static_cast<unsigned char>(raw[0]) == 0xFF && static_cast<unsigned char>(raw[1]) == 0xFE) {
+        envBlock.assign(reinterpret_cast<const wchar_t*>(raw.data() + 2), (raw.size() - 2) / sizeof(wchar_t));
+      }
+    }
+    // 读不出就留空：保持旧行为（继承 helper 环境），不因缺文件而拒绝执行
+  }
+  if (!envBlock.empty()) {
+    /*
+     * 用**注册表**的机器+用户 PATH 覆盖 env 块里的 PATH（docs/09 §3.2.6）。
+     *
+     * 为什么：宿主传来的 env 是 Electron 主进程的 PATH——它常常精简到没有
+     * 用户装的 node / pnpm / git。注册表的 PATH 才是"用户 shell 会看到的那个"。
+     * 最小块实验也证明：机器 PATH 存在时，沙箱里的 node / pnpm 都能用。
+     *
+     * 失败就保留 env 原样：注册表读不到时执行仍可行，只是 PATH 可能不全。
+     */
+    std::wstring machinePath;
+    std::wstring userPath;
+    /*
+     * 注册表 PATH 是 **REG_EXPAND_SZ**（含 `%JAVA_HOME%` 这类未展开变量）。
+     * 两个坑，都实测踩过：
+     * 1. 用 RRF_RT_REG_SZ 读会把未展开字面量混进环境块，CreateProcessW 直接
+     *    失败（exit 10）。必须用 RRF_RT_REG_EXPAND_SZ 让系统展开。
+     * 2. 展开后的实际长度比首次查询大，所以两段式读取（先问大小、再取值）
+     *    要按**返回的 got** 裁剪，不能复用首次的 size。
+     */
+    const auto readPathValue = [](HKEY root, const wchar_t* subkey) -> std::wstring {
+      DWORD size = 0;
+      if (RegGetValueW(root, subkey, L"Path", RRF_RT_REG_EXPAND_SZ, nullptr, nullptr, &size) != ERROR_SUCCESS || size == 0) return L"";
+      // 多留一个 wchar_t 的余量，防止展开后超长截断
+      std::vector<wchar_t> buffer(size / sizeof(wchar_t) + 256, L'\0');
+      DWORD got = static_cast<DWORD>(buffer.size() * sizeof(wchar_t));
+      if (RegGetValueW(root, subkey, L"Path", RRF_RT_REG_EXPAND_SZ, nullptr, buffer.data(), &got) != ERROR_SUCCESS) return L"";
+      const size_t chars = got / sizeof(wchar_t);
+      return std::wstring(buffer.data(), wcsnlen(buffer.data(), chars));
+    };
+    machinePath = readPathValue(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment");
+    userPath = readPathValue(HKEY_CURRENT_USER, L"Environment");
+    if (!machinePath.empty() || !userPath.empty()) {
+      std::wstring combined = machinePath;
+      if (!userPath.empty()) {
+        if (!combined.empty() && combined.back() != L';') combined += L';';
+        combined += userPath;
+      }
+      // 在 env 块里就地替换 PATH 条目
+      std::wstring rebuilt;
+      size_t pos = 0;
+      bool replaced = false;
+      while (pos < envBlock.size()) {
+        size_t end = envBlock.find(L'\0', pos);
+        if (end == std::wstring::npos) break;
+        const std::wstring entry = envBlock.substr(pos, end - pos);
+        const size_t eq = entry.find(L'=');
+        if (!replaced && eq != std::wstring::npos && _wcsicmp(entry.substr(0, eq).c_str(), L"PATH") == 0) {
+          rebuilt += L"PATH=" + combined + L'\0';
+          replaced = true;
+        } else {
+          rebuilt += entry + L'\0';
+        }
+        pos = end + 1;
+      }
+      rebuilt += L'\0';
+      envBlock = rebuilt;
+    }
+  }
   const SandboxMode mode = parseMode(modeValue);
   if (isProbe) { printProbe(probe(workspace)); return 0; }
   if (isPrepare) { printProbe(prepare(workspace, allowNetwork, mode)); return 0; }
   if (isRevoke) { printRelease(revokeWorkspace(workspace)); return 0; }
   if (targetStart >= args.size()) { usage(); return 64; }
-  return runSandboxed(workspace, allowNetwork, mode, std::vector<std::wstring>(args.begin() + static_cast<std::ptrdiff_t>(targetStart), args.end()));
+  return runSandboxed(workspace, allowNetwork, mode,
+                      envBlock.empty() ? nullptr : envBlock.c_str(),
+                      std::vector<std::wstring>(args.begin() + static_cast<std::ptrdiff_t>(targetStart), args.end()));
 }

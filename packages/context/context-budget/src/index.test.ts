@@ -16,8 +16,29 @@ describe('context-budget', () => {
     expect(Object.isFrozen(snapshot)).toBe(true)
   })
 
-  it('usage 之后新增的消息按估算补进实测基线', () => {
-    const session = new InMemorySessionStore(asSessionId('budget-delta'))
+  /*
+   * 缓存命中统计（docs/09 §3.2.3）。
+   *
+   * 关键区分：模型**没回传** cached_tokens 时不能当成 0%——那会把"这个模型
+   * 不支持"误报成"我们没命中"。所以单独给 cacheReported 供 UI 判断。
+   */
+  it('累加缓存命中，并区分"未报告"与"命中 0"', () => {
+    const without = new InMemorySessionStore(asSessionId('no-cache-field'))
+    without.append({ type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'a' }] }, usage: { input: 100, output: 10 } } })
+    const a = measure({ session: without, system: 's', tools: [] })
+    expect(a.cacheReported).toBe(false)
+    expect(a.cachedInputTokens).toBe(0)
+
+    const withCache = new InMemorySessionStore(asSessionId('with-cache'))
+    withCache.append({ type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'a' }] }, usage: { input: 100, output: 10, cacheRead: 80 } } })
+    withCache.append({ type: 'assistant/message', data: { turn: 2, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: 'b' }] }, usage: { input: 50, output: 5, cacheRead: 40 } } })
+    const b = measure({ session: withCache, system: 's', tools: [] })
+    expect(b.cacheReported).toBe(true)
+    expect(b.cachedInputTokens).toBe(120)
+    expect(b.observedInputTokens).toBe(150)
+  })
+
+  it('usage 之后新增的消息按估算补进实测基线', () => {    const session = new InMemorySessionStore(asSessionId('budget-delta'))
     session.append({ type: 'assistant/message', data: { turn: 1, step: 1, message: { role: 'assistant', content: [{ type: 'text', text: '旧回答' }] }, usage: { input: 100, output: 10 } } })
     session.append({ type: 'user/message', data: { role: 'user', content: [{ type: 'text', text: '新的提问' }] } })
     const snapshot = measure({ session, system: 's', tools: [] })

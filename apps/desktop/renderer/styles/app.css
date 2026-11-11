@@ -149,6 +149,18 @@ body.resizing { cursor: col-resize; user-select: none; }
 .cmusage.warn { color: #B45309; }
 .cmring { position: relative; width: 12px; height: 12px; border-radius: 50%; background: conic-gradient(currentColor calc(var(--pct) * 1%), var(--border-subtle) 0); }
 .cmring::after { content: ''; position: absolute; inset: 3px; border-radius: 50%; background: var(--bg-elevated); }
+/*
+ * 会话用量（docs/09 §3.2.3）：**纯展示**，与右侧「上下文占用」分开。
+ * 后者弹窗里有「压缩上下文」这类动作，混在一起会让人以为点这个能压缩。
+ */
+.cmusage.open { background: var(--bg-inset); color: var(--text-primary); }
+.cmusage-tok { padding-right: 7px; border-right: 1px solid var(--border-subtle); color: var(--text-secondary); }
+.cmusage-cache.good { color: #3F7D4F; }
+.cmusage-cache.low { color: #B45309; }
+/* 用量弹窗不需要压缩那套宽度与留白 */
+.cmpop-usage { width: 240px; }
+/* 弹窗里的强调行：累计输入与命中率是用户最关心的两个数 */
+.cmrow-strong { color: var(--text-primary); font-weight: 600; }
 /* 输入区「技能」右侧面板（Qoder 同位置）：搜索 + 多选 + 管理入口 */
 .skillpick { display: flex; align-items: flex-start; gap: 8px; width: 100%; padding: 5px 6px; border: none; border-radius: 6px; background: transparent; color: var(--text-primary); text-align: left; cursor: pointer; }
 .skillpick:hover { background: var(--bg-inset); }
@@ -1071,6 +1083,18 @@ body.noside .side { display: none; }
 .orchestratetoggle { display: flex; align-items: center; gap: 7px; margin-top: var(--s3); font-size: 12px; color: var(--text-secondary); cursor: pointer; user-select: none; }
 .orchestratetoggle input { width: 13px; height: 13px; accent-color: var(--text-primary); cursor: pointer; margin: 0; }
 .orchestratetoggle:hover { color: var(--text-primary); }
+/* 判据提示：常驻一行说明"什么时候用它"；勾选后追加一句"接下来会发生什么" */
+.orchestratehint { margin-top: 5px; color: var(--text-muted); font-size: 11.5px; line-height: 16px; }
+.orchestratehint-warn { display: block; margin-top: 3px; color: var(--text-secondary); }
+.orchestratehint-warn::before { content: '· '; }
+
+/*
+ * 编排会话的模型标识：**只读**（不是选择器）。
+ * Router 用设置页那一栏的模型，worker 才用默认模型——两者是两件事，
+ * 所以这里不给切换入口，点它跳去设置页。
+ */
+.modelchip-orch { display: inline-flex; align-items: center; height: 24px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--bg-inset); color: var(--text-secondary); font-size: 11.5px; cursor: pointer; }
+.modelchip-orch:hover { color: var(--text-primary); border-color: var(--text-secondary); }
 
 /* ── 编排：侧栏的 Router 标记与 worker 归属（docs/26 §4.4） ── */
 /* 角色徽标：小、方、低调——它是"这是什么会话"的提示，不该抢标题的注意力 */

@@ -62,8 +62,9 @@ export const SQLITE_PRAGMAS: readonly string[] = [
  * |---|---|
  * | 1 | 初始 15 表 + FTS |
  * | 2 | `sessions.role`：会话角色投影（docs/26 §4.4） |
+ * | 3 | `steps.cache_read_tokens`：提示缓存命中量（docs/09 §3.2.1） |
  */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 /** 本版本迁移的可读名（写进 `schema_migrations.name`，用于日志） */
 export const SCHEMA_NAME = '0001-initial-schema'

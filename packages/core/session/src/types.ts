@@ -503,6 +503,20 @@ export interface SessionEventMap {
     readonly reason?: string | undefined
   }
   /**
+   * worker 会话已经创建（26 §4.2）。
+   *
+   * 为什么要有独立事件：侧栏的数据源是索引，而索引靠宿主监听会话变化来刷新。
+   * worker 是编排 provider **在服务层**建的（不走任何 IPC handler），宿主不知道
+   * 它诞生了——实测表现为"worker 跑完才出现在侧栏"。有了这条事件，宿主
+   * 监听它并推送 `session.changed`，worker 建出来立刻可见。
+   *
+   * 落在 **Router** 的日志里：与 worker/dispatched 同处，回放时一段日志讲清全貌。
+   */
+  'worker/session-created': {
+    readonly taskId: string
+    readonly workerSessionId: string
+  }
+  /**
    * worker 主动回传（26 §5.6）。
    *
    * 与 `worker/completed` 的分工：这个表示"我还在做，但有事要说"，

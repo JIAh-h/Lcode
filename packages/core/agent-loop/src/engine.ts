@@ -823,6 +823,19 @@ export class TurnEngine {
     // 屏蔽的轮次整轮丢弃；历史技能块剥离；附件引用在发出前解析成真实内容
     const items = deriveRequestItems(input.session.events(), { activeFromSeq: input.activeFromSeq });
     const messages = await this.hydrateAttachments(items.map((item) => item.message));
+    /*
+     * 易变上下文（任务清单 / 本轮注入）**追加在消息末尾**，不改系统提示词。
+     *
+     * 为什么这样：提供方按**前缀**缓存。系统提示词一变，缓存就从第一个 token 起
+     * 失效——后面整段对话历史每一步都要全价重算（实测：todo_write 一变，
+     * 变化点落在 1051/1074，等于 98% 的位置）。把它挪到末尾，之前的历史仍命中。
+     *
+     * 独立成一条 user 消息而不是拼进最后一条：拼接会让那条消息内容随之下变，
+     * 而消息本身也是缓存前缀的一部分。
+     */
+    if (assembled.volatile !== '') {
+      messages.push({ role: 'user', content: [{ type: 'text', text: assembled.volatile }] });
+    }
 
     const prepared = await adapter.prepareCall(toCallSelection(input.selection), {
       signal: input.signal,

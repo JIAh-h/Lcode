@@ -41,43 +41,99 @@ export function createLocalSpillStore(home: string): SpillStore {
   }
 }
 
-/** 第二层零模型成本处理：外置原文并以 locator 替换当前可见结果。 */
+/**
+ * 第二层零模型成本处理：外置原文并以 locator 替换可见结果。
+ *
+ * ## 触发时机（docs/09 §3.2.5，2026-11-11 修正）
+ *
+ * **只在压缩流程中按需运行，不再每结果主动触发。**
+ *
+ * 曾经的实现挂在 `agent/tool-result-appended` 上：任何一个超过 4000 字符的
+ * 工具结果都会立刻触发 spill/prune，用 `surfaceOp: replace` 改写历史。
+ * 看似无害（"结果刚写入、还没发出去"），**实际不是**：工具结果总是写在
+ * 两请求之间，改写它=改写下一步请求的历史；再下一次请求里，这个位置
+ * 已经被替换过——提供方的前缀缓存从那个位置起全部失效。
+ *
+ * 实测（真实会话 36 次请求）：回退后每次请求命中 99%，随后 6 次 spill/prune
+ * 改写让命中率永远卡在 4~7%；单轮浪费 800K tokens。
+ *
+ * 现在的定位与 DSH 一致：spill 是**压缩策略的一部分**，只由压缩流程调用
+ * （手动压缩 / 上下文占用达到窗口阈值自动压缩）。平时大结果原样留在上下文里——
+ * 它们是前缀的一部分，反而省钱；真到窗口吃紧时由压缩一次性处理。
+ */
 export function registerLocalSpill(input: { readonly ctx: Context; readonly home: string; readonly thresholdChars?: number | undefined }): Disposer {
   const store = createLocalSpillStore(input.home)
-  const threshold = input.thresholdChars ?? 4_000
   const unregisterService = input.ctx.set('spill', store)
-  const unregisterEvent = input.ctx.on('agent/tool-result-appended', async ({ sessionId, session, sourceEventSeq, tool }) => {
-    if (tool.name === 'read') return
-    const source = session.events().find((event) => event.seq === sourceEventSeq)
-    if (source?.type !== 'tool/result') return
-    const text = source.data.message.content
-    if (source.data.message.isError || typeof text !== 'string' || text.length <= threshold) return
-    try {
-      const saved = await store.save({ sessionId, text })
-      const visible = deriveVisibleSurfaceItems(session.events())
-      const index = visible.findIndex((item) => isDescendedFrom(session, item.sourceSeq, sourceEventSeq))
-      if (index < 0) return
-      session.append({
-        type: 'tool/result',
-        data: { ...source.data, message: { ...source.data.message, content: spillPreview(text, saved.locator) } },
-        surfaceOp: { op: 'replace', start: index, end: index + 1 },
-        sourceEventSeqs: [sourceEventSeq],
-      })
-      session.append({ type: 'spill/created', data: { locator: saved.locator, sourceEventSeq, originalChars: text.length, storedBytes: saved.bytes } })
-    } catch {
-      // spill 是 best-effort：磁盘失败时保留原有可见结果，不把已成功的工具调用变成失败。
-    }
-  })
   return () => {
-    unregisterEvent()
     unregisterService()
   }
 }
 
-function isDescendedFrom(session: SessionService, seq: number, sourceSeq: number): boolean {
-  if (seq === sourceSeq) return true
-  const event = session.events().find((candidate) => candidate.seq === seq)
-  return event?.sourceEventSeqs?.includes(sourceSeq) === true
+/**
+ * 把可见表面里"超过阈值的工具结果"替换成 locator 预览。
+ *
+ * 由**压缩流程**调用（docs/09 §3.2.5）：原来挂在每结果事件上主动触发，
+ * 会改写下一步请求的历史，让前缀缓存从那个位置起失效（实测单轮浪费
+ * 800K tokens）。压缩本来就要接受一次缓存失效，合并到同一时点只失效一次。
+ *
+ * 返回替换发生的可见位置（-1 表示一条都没替换）。
+ */
+export function applySpillToSurface(input: {
+  readonly sessionId: string
+  readonly session: SessionService
+  readonly spill: SpillStore
+  readonly thresholdChars?: number | undefined
+}): number {
+  const threshold = input.thresholdChars ?? 4_000
+  const visible = deriveVisibleSurfaceItems(input.session.events())
+  let lastReplaced = -1
+  for (const [index, item] of visible.entries()) {
+    // 只处理工具结果消息（role=user + 顶层 toolCallId 的那种）
+    const message = item.message as {
+      readonly toolCallId?: unknown
+      readonly isError?: unknown
+      readonly turn?: unknown
+      readonly step?: unknown
+      readonly content?: unknown
+    }
+    if (typeof message.toolCallId !== 'string' || message.toolCallId === '') continue
+    if (message.toolCallId.startsWith('read')) continue // 防止 read→spill→read 循环
+    if (typeof message.content !== 'string') continue
+    if (message.isError === true) continue
+    if (message.content.length <= threshold) continue
+    if (message.content.includes('lcode://spill/')) continue // 已经是 spill 预览
+    const text = message.content
+    const turn = typeof message.turn === 'number' ? message.turn : 0
+    const step = typeof message.step === 'number' ? message.step : 0
+    void input.spill
+      .save({ sessionId: input.sessionId, text })
+      .then((saved) => {
+        input.session.append({
+          type: 'tool/result',
+          data: {
+            turn,
+            step,
+            message: {
+              role: 'user',
+              ...(item.message as { toolCallId: string; isError: boolean }),
+              content: spillPreview(text, saved.locator),
+            },
+          },
+          surfaceOp: { op: 'replace', start: index, end: index + 1 },
+          sourceEventSeqs: [item.sourceSeq],
+        })
+        // 审计事件：回放时能看出"这条结果被外置过、原文在哪"
+        input.session.append({
+          type: 'spill/created',
+          data: { locator: saved.locator, sourceEventSeq: item.sourceSeq, originalChars: text.length, storedBytes: saved.bytes },
+        })
+      })
+      .catch(() => {
+        // best-effort：单条失败保留原文
+      })
+    lastReplaced = index
+  }
+  return lastReplaced
 }
 
 function parseLocator(locator: string): string {
