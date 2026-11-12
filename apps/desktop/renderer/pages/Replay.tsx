@@ -150,7 +150,18 @@ export function ReplayPage() {
   if (sessionId === undefined) return null
   return (
     <main className="page replay">
-      <h2>{t('回放 · {name}', { name: meta?.title || sessionId })}</h2>
+      <div className="replay-head">
+        <button
+          type="button"
+          className="replay-back"
+          title={t('返回会话')}
+          aria-label={t('返回会话')}
+          onClick={() => navigate(`/sessions/${sessionId}`)}
+        >
+          ← {t('返回')}
+        </button>
+        <h2>{t('回放 · {name}', { name: meta?.title || sessionId })}</h2>
+      </div>
       {provenance !== null && (
         <p className="hint" title={provenance.file}>
           {t('导入自 {file} · {bytes} 字节 · SHA-256 {hash} · {time}', {

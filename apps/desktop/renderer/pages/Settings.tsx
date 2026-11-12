@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { CONTEXT_WINDOW_STEP, FALLBACK_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '@lcode/model-api'
+import { CONTEXT_WINDOW_PROBE_MAX, CONTEXT_WINDOW_STEP, FALLBACK_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '@lcode/model-api'
 import { Seg, Select, Switch, SwitchRow, TextArea, TextInput } from '../components/controls.tsx'
+import { syncWindowOverlayTheme } from '../store/overlayTheme.ts'
 import { ConfirmDialog } from '../components/ConfirmDialog.tsx'
 import { PopMenu } from '../components/PopMenu.tsx'
 import { toast } from '../components/toast.ts'
@@ -122,8 +123,14 @@ function AppearanceSection() {
               options={['浅色', '深色', '跟随系统']}
               value={theme === 'dark' ? '深色' : theme === 'light' ? '浅色' : '跟随系统'}
               onChange={(v) => {
-                setTheme(v === '深色' ? 'dark' : 'light')
-                if (v !== '跟随系统') document.documentElement.dataset.theme = v === '深色' ? 'dark' : 'light'
+                const next = v === '深色' ? 'dark' : v === '浅色' ? 'light' : null
+                setTheme(next === 'dark' ? 'dark' : 'light')
+                if (next !== null) {
+                  document.documentElement.dataset.theme = next
+                  syncWindowOverlayTheme(next)
+                }
+                // 「跟随系统」暂不支持自动联动（windowControlsOverlay 只在 Windows 下有 CSS 媒体查询，
+                // 深浅切换需主进程 nativeTheme 监听）；此处先保持手动。
               }}
             />
           </div>
@@ -678,12 +685,14 @@ function AddModelModal({
     return null
   })()
   /*
-   * 滑块最大值 = 供应商返回的模型窗口。
-   * DashScope 原生目录的 `model_info.context_window`（1M）优先；没有才回落 128K。
+   * 滑块范围：
+   * - 供应商报了窗口 → 以它为上限（窗口就是权威）
+   * - 供应商没报（自建网关常见）→ 上限延伸到 **1M**，让用户能往大调；
+   *   默认值仍是 128K（宁大勿小的兜底，见 model-api 的 FALLBACK_CONTEXT_WINDOW）
    */
-  const windowMax = Math.max(providerMax ?? FALLBACK_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW)
+  const windowMax = providerMax ?? CONTEXT_WINDOW_PROBE_MAX
   const windowMin = Math.min(MIN_CONTEXT_WINDOW, windowMax)
-  const windowValue = Math.min(windowMax, Math.max(windowMin, ctxWindow ?? windowMax))
+  const windowValue = Math.min(windowMax, Math.max(windowMin, ctxWindow ?? FALLBACK_CONTEXT_WINDOW))
   const nodes = windowNodes(windowMax).filter((value) => value > windowMin && value <= windowMax)
 
   const modelQuery = modelId.trim().toLowerCase()
@@ -1133,7 +1142,7 @@ function AddModelModal({
               </div>
               <div className="ctxwin-hint">
                 {providerMax === null
-                  ? t('供应商没报窗口上限，暂按 128K。')
+                  ? t('供应商没报窗口上限，暂按 128K。自建网关常见：若知道模型真实窗口，拖动滑块调整（可到 1M）。')
                   : t('供应商返回的模型上限（{n}）。', { n: formatWindowTokens(providerMax) })}
                 {' '}
                 {t('点节点切换常用窗口，输出上限用供应商默认值。')}

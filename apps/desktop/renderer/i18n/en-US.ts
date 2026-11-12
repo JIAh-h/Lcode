@@ -531,8 +531,8 @@ export const EN: Readonly<Record<string, string>> = {
   '（没有输出）': '(no output)',
   超时: 'Timed out',
   已中止: 'Aborted',
-  '这一轮没能跑起来。常见原因：模型额度耗尽（403）、密钥无效或无权限（401）、接口地址或模型名不对。可在 设置 → 模型 用「测试连接」确认。':
-    'This turn couldn’t run. Common causes: the model’s quota is exhausted (403), the key is invalid or lacks access (401), or the endpoint/model name is wrong. You can confirm under Settings → Model with “Test connection”.',
+  '本轮运行失败，当前请求额度已用尽':
+    'This turn failed — the current request’s quota is exhausted.',
   你: 'You',
   过程记录: 'Process log',
   '当前环境没有主进程桥，无法新建对话': 'No main-process bridge — cannot start a conversation',

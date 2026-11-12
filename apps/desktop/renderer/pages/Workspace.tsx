@@ -19,13 +19,6 @@ import { agentPresetLabel, getAgentPreset } from '../store/agentPresetSync.ts'
 import type { AgentPresetId } from '../store/agentPresetSync.ts'
 
 type Tab = 'changes' | 'files' | 'tasks'
-type Change = {
-  readonly path: string
-  readonly kind: string
-  readonly additions: number
-  readonly deletions: number
-  readonly seq: number
-}
 
 function record(value: unknown): Record<string, unknown> | null {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
@@ -35,29 +28,6 @@ function record(value: unknown): Record<string, unknown> | null {
 function isSessionGone(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err)
   return message.includes('ES-SESSION_NOT_FOUND') || message.includes('会话不存在或日志缺失')
-}
-
-function changesFrom(events: readonly SessionEvent[]): readonly Change[] {
-  const changes: Change[] = []
-  for (const event of events) {
-    if (event.type !== 'tool/result') continue
-    const data = record(event.data)
-    const meta = record(data?.['meta'])
-    const raw = meta?.['changes']
-    if (meta?.['card'] !== 'diff' || !Array.isArray(raw)) continue
-    for (const value of raw) {
-      const item = record(value)
-      if (typeof item?.['path'] !== 'string' || typeof item['kind'] !== 'string') continue
-      changes.push({
-        path: item['path'],
-        kind: item['kind'],
-        additions: typeof item['additions'] === 'number' ? item['additions'] : 0,
-        deletions: typeof item['deletions'] === 'number' ? item['deletions'] : 0,
-        seq: event.seq,
-      })
-    }
-  }
-  return changes
 }
 
 function planActiveFrom(events: readonly SessionEvent[]): boolean {
@@ -237,7 +207,6 @@ function GitFileRow({ workspace, file }: { readonly workspace: string; readonly 
 function RightPanel({
   tab,
   setTab,
-  changes,
   workspace,
   sessionId,
   gitStatus,
@@ -248,7 +217,6 @@ function RightPanel({
 }: {
   readonly tab: Tab
   readonly setTab: (tab: Tab) => void
-  readonly changes: readonly Change[]
   readonly workspace: string | null
   readonly sessionId: string
   readonly gitStatus: WorkspaceGitStatus | null
@@ -257,8 +225,6 @@ function RightPanel({
   readonly onRefreshGit: () => void
   readonly width: number
 }) {
-  const [openFile, setOpenFile] = useState<string | null>(changes[0]?.path ?? null)
-  const changedFileCount = useMemo(() => new Set(changes.map((change) => change.path)).size, [changes])
   const markers = useMemo(() => {
     const map = new Map<string, FileMarker>()
     for (const file of gitStatus?.files ?? []) map.set(file.path, { kind: file.kind, label: gitStatusLabel(file) })
@@ -279,22 +245,10 @@ function RightPanel({
       </div>
       {tab === 'tasks' ? <TaskPanel sessionId={sessionId} /> : tab === 'changes' ? (
         <div className="rpanel">
-          <div className="rscope">
-            <span className="chip">{t('事件投影')}</span> {t('{n} 个文件改动', { n: changedFileCount })}
-          </div>
-          {changes.length === 0 && <div className="pickhint">{t('当前会话还没有记录文件变更')}</div>}
-          {changes.map((change) => (
-            <div className={'fitem' + (openFile === change.path ? ' open' : '')} key={`${change.seq}-${change.path}`}>
-              <div className="frow" onClick={() => setOpenFile(openFile === change.path ? null : change.path)}>
-                <span className="fn">{change.path}</span>
-                <span className="fs">
-                  <span className="add">+{change.additions}</span> <span className="del">-{change.deletions}</span>
-                </span>
-              </div>
-              {openFile === change.path && <pre className="fdiff mono">{JSON.stringify(change, null, 2)}</pre>}
-            </div>
-          ))}
-
+          {/*
+           * 事件投影区已移除（用户反馈：它只是 tool-result 的 JSON dump，
+           * 没有可读价值；真正有用的是下面的 Git 工作区与 diff 查看）。
+           */}
           <div className="rscope gitscope">
             <span className="chip">{t('Git 工作区')}</span>
             <span className="gitsummary">
@@ -337,7 +291,11 @@ function RightPanel({
 export function WorkspacePage() {
   const { sessionId } = useParams()
   const navigate = useNavigate()
-  const [panelOpen, setPanelOpen] = useState(true)
+  /*
+   * 右侧面板默认收起：它是查看器（变更/文件/任务），不是常驻布局。
+   * 需要时点顶栏的 toggle 展开；宽度仍由 useResizablePanel 记忆。
+   */
+  const [panelOpen, setPanelOpen] = useState(false)
   const rightPanel = useResizablePanel({
     storageKey: 'lcode.layout.rightWidth',
     defaultWidth: 288,
@@ -461,7 +419,6 @@ export function WorkspacePage() {
     }
   }, [sessionId, reloadEpoch])
 
-  const changes = useMemo(() => changesFrom(events), [events])
   /** 最近一次 todo_write 的整表快照（last-write-wins）：输入框上方的任务清单条 */
   const todos = useMemo(() => {
     let latest: readonly TodoItem[] = []
@@ -661,9 +618,23 @@ export function WorkspacePage() {
       return
     }
     if (composerAction === 'resume') {
-      void api.resume(sessionId).then(() => notifySessionChanged()).catch((err: unknown) => {
-        toast(err instanceof Error ? err.message : t('继续失败'))
-      })
+      void api
+        .resume(sessionId)
+        .then((result) => {
+          /*
+           * 暂停状态是引擎的**内存态**：重启应用后 `suspended` 已丢失，
+           * `resumeTurn` 会返回 false——此时“继续”按钮看似点了没反应。
+           * 如实告诉用户，并指引直接重发（原任务上下文都在历史里）。
+           */
+          const record = result as { resumed?: boolean }
+          if (record?.resumed === false) {
+            toast(t('没有可继续的暂停任务（重启应用后暂停状态会丢失）。直接在下方重新描述任务即可，历史上下文都在。'))
+          }
+          notifySessionChanged()
+        })
+        .catch((err: unknown) => {
+          toast(err instanceof Error ? err.message : t('继续失败'))
+        })
     }
   }
 
@@ -825,7 +796,7 @@ export function WorkspacePage() {
           {/* 会话区与输入框之间的常驻状态条：编排在途 + 本轮芯片 + 回到底部 */}
           <div className="turnstrip">
             <OrchestrationBar sessionId={sessionId} />
-            <TurnStatusBar todos={todos} changes={changes} />
+            <TurnStatusBar todos={todos} />
             {jumpVisible ? (
               <button
                 type="button"
@@ -920,7 +891,6 @@ export function WorkspacePage() {
             <RightPanel
               tab={tab}
               setTab={setTab}
-              changes={changes}
               workspace={meta?.workspace ?? null}
               sessionId={sessionId}
               gitStatus={gitStatus}

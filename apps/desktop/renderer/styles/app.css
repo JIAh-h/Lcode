@@ -510,7 +510,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 .gdiff-part + .gdiff-part { border-top: 1px solid var(--border-subtle); }
 .gdiff-parthead { padding: 3px 8px; border-bottom: 1px solid var(--border-subtle); background: var(--bg-panel); color: var(--text-muted); font-size: 10.5px; }
 .gdiff-body { overflow-x: auto; font-family: var(--font-mono); font-size: 11px; line-height: 17px; }
-.gline { display: grid; grid-template-columns: 32px 32px 14px minmax(0, 1fr); white-space: pre; }
+/*
+ * 代码列用 max-content：长行撑开 gdiff-body 的滚动宽度，横向滑块才会出现。
+ * 之前是 minmax(0, 1fr)——列被压回容器宽度，长行静默截断，永远滚不了。
+ */
+.gline { display: grid; grid-template-columns: 32px 32px 14px minmax(max-content, 1fr); white-space: pre; }
 .gline .old, .gline .new { padding-right: 4px; color: var(--text-muted); text-align: right; user-select: none; }
 .gline .mark { color: var(--text-muted); text-align: center; }
 .gline .code { padding-right: 6px; }
@@ -575,6 +579,11 @@ body.resizing { cursor: col-resize; user-select: none; }
 
 .page { max-width: 760px; margin: 0 auto; padding: var(--s7) var(--s6); display: flex; flex-direction: column; gap: var(--s5); }
 .page h2 { font-size: 18px; }
+/* 回放页标题行：左侧返回按钮 + 标题（回放是独立路由，必须能回会话） */
+.replay-head { display: flex; align-items: center; gap: 10px; }
+.replay-head h2 { margin: 0; }
+.replay-back { flex: none; padding: 3px 9px; border: 1px solid var(--border-subtle); border-radius: var(--r2); background: var(--bg-panel); color: var(--text-secondary); font-size: 12.5px; cursor: pointer; }
+.replay-back:hover { background: var(--bg-inset); color: var(--text-primary); }
 .page p { font-size: 13px; color: var(--text-secondary); }
 .page-actions { display: flex; gap: var(--s3); }
 .recovery-summary, .fork-detail { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s4); border: 1px solid var(--border-subtle); border-radius: var(--r3); font-size: 12.5px; background: var(--bg-panel); }
@@ -877,10 +886,19 @@ body.noside .side { display: none; }
 .sessionstream { flex: 1; overflow-y: auto; padding: 8px 0 24px; display: flex; flex-direction: column; gap: 24px; }
 .ssempty { color: var(--text-muted); font-size: 13px; padding: 32px 0; text-align: center; }
 .ssmore { align-self: center; margin-bottom: 4px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border-subtle); background: var(--bg-inset); color: var(--text-secondary); font-size: 11.5px; cursor: pointer; }
-.sserror { color: var(--danger); font-size: 12.5px; padding: 8px 12px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-canvas); }
+/* 轮失败提示：渲染为流末尾的 assistant 气泡（ss-error），不再是顶部横幅。
+   注意 --danger 变量没有定义过（历史遗留的引用），这里用确定的红色。 */
+.sserror { color: #DC2626; font-size: 12.5px; padding: 8px 12px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-canvas); }
+.ss-assistant.ss-error .ssbody { color: #DC2626; font-weight: 500; }
 /* 问与答靠方位区分：提问靠右，执行与回复靠左，不再显示角色标签 */
-.ssmsg { display: flex; flex-direction: column; }
-.ss-user { align-self: flex-end; max-width: 74%; }
+.ssmsg { display: flex; flex-direction: column; position: relative; }
+/*
+ * 用户气泡按内容收缩（docs/10）：输入少时不应出现大片右侧留白。
+ * 根因：Markdown 根容器 .md 是 display:flex，作为块级盒子默认撑满可用宽度，
+ * 一路把 .ssbody（气泡背景）撑到 max-width: 74%。加 fit-content 逆转。
+ */
+.ss-user { align-self: flex-end; max-width: 74%; width: fit-content; }
+.ss-user .ssbody { display: inline-block; }
 .ss-assistant { align-self: stretch; }
 .ssbody { font-size: 13.5px; line-height: 21px; color: var(--text-primary); white-space: pre-wrap; word-break: break-word; }
 .ss-user .ssbody { background: var(--bg-inset); padding: 9px 13px; border-radius: 12px; }
@@ -908,7 +926,12 @@ body.noside .side { display: none; }
 /* 最新一条提问的悬停操作：编辑 / 复制 */
 .jumpbottom { flex: none; width: 28px; height: 28px; display: grid; place-items: center; border: 1px solid var(--border-subtle); border-radius: 50%; background: var(--bg-elevated); color: var(--text-secondary); box-shadow: var(--sh-1); cursor: pointer; }
 .jumpbottom:hover { background: var(--bg-inset); color: var(--text-primary); }
-.ss-actions { display: flex; justify-content: flex-end; gap: 2px; opacity: 0; transition: opacity 0.12s ease; }
+/*
+ * 消息操作按钮行：悬浮覆盖，**不占布局宽度**。
+ * 之前作为普通 flex 子项参与 .ss-user 的 fit-content 计算——4 个按钮 ~102px
+ * 成了气泡的最小宽度，短输入（"你好"）右侧必然留白，且两条相同消息宽度不一。
+ */
+.ss-actions { position: absolute; right: 0; bottom: -22px; display: flex; justify-content: flex-end; gap: 2px; opacity: 0; transition: opacity 0.12s ease; z-index: 5; background: var(--bg-canvas); border-radius: var(--r1); }
 .ssmsg:hover .ss-actions, .ss-actions:focus-within { opacity: 1; }
 .ss-icon { width: 24px; height: 24px; display: grid; place-items: center; border: 0; border-radius: var(--r1); background: transparent; color: var(--text-muted); cursor: pointer; }
 .ss-icon:hover { background: var(--bg-inset); color: var(--text-primary); }
@@ -1049,6 +1072,44 @@ body.noside .side { display: none; }
 .toolcard-summary { min-width: 0; flex: 1; overflow: hidden; color: var(--text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .toolcard-chevron { flex: none; color: var(--text-muted); font-size: 13px; }
 .toolcard-content { min-width: 0; padding: 0 10px 10px; border-top: 1px solid var(--border-subtle); }
+/*
+ * 会话内 diff 要能横向滚动：toolcard-content 的 min-width: 0 会把内容压回容器宽，
+ * 显式让 diff 区块按内容撑开（自己的 overflow-x 接管滑动）。
+ */
+.turn-process .tool-diff { max-width: 100%; min-width: 0; overflow-x: auto; }
+/*
+ * 状态条悬浮弹窗里"每个文件的 diff"（docs/10）。
+ * 与右侧 Git 工作区的 gdiff 同一套观感：每段改动独立横向滑动看完整行。
+ */
+.turnchip-row-wrap { border-radius: var(--r2); }
+.turnchip-row-wrap .turnchip-row { cursor: pointer; }
+.turnchip-chevron { color: var(--text-muted); font-size: 10px; transition: transform 0.15s; }
+.turnchip-chevron.open { transform: rotate(90deg); }
+.hunkview-wrap { max-height: 200px; margin: 4px 0 6px; overflow: auto; border: 1px solid var(--border-subtle); border-radius: 5px; background: var(--bg-canvas); }
+.hunkview { min-width: max-content; }
+.hunkview-line { display: flex; font-family: var(--font-mono); font-size: 11px; line-height: 16px; white-space: pre; }
+.hunkview-line.del { background: var(--diff-del-bg); color: var(--diff-del-fg); }
+.hunkview-line.add { background: var(--diff-add-bg); color: var(--diff-add-fg); }
+.hunkview-mark { flex: none; width: 16px; text-align: center; opacity: 0.7; user-select: none; }
+.hunkview-code { padding-right: 8px; }
+
+/*
+ * 「已编辑 N 个文件」卡片（docs/10，仿 DSH）：渲染在回复末尾，是**产物**展示位。
+ * 文件行悬停弹自适应 diff 弹窗——下方放不下翻转到上方；内部滚动看全量。
+ */
+.editfiles { margin-top: 10px; border: 1px solid var(--border-subtle); border-radius: 8px; background: var(--bg-canvas); overflow: visible; }
+.editfiles-head { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--border-subtle); font-size: 12px; color: var(--text-secondary); }
+.editfiles-nums { font-size: 11.5px; }
+.editfiles-list { display: flex; flex-direction: column; padding: 4px 4px 6px; }
+.editfiles-row { position: relative; display: flex; align-items: center; gap: 10px; padding: 4px 10px; border-radius: 5px; font-size: 12px; color: var(--text-secondary); }
+.editfiles-row:hover { background: var(--bg-inset); }
+.editfiles-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.edhover-pop { position: absolute; left: 12px; right: 12px; top: calc(100% + 4px); z-index: 60; display: flex; flex-direction: column; border: 1px solid var(--border-subtle); border-radius: 7px; background: var(--bg-elevated); box-shadow: var(--sh-2); }
+.editfiles-row.flip .edhover-pop { top: auto; bottom: calc(100% + 4px); }
+.edhover-head { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-bottom: 1px solid var(--border-subtle); font-size: 11px; color: var(--text-muted); }
+.edhover-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: pre; }
+.edhover-diff { max-height: 300px; overflow: auto; }
+.edhover-diff .gdiff-body { border-radius: 0; }
 .toolcard-pending { padding: 10px 0; color: var(--text-muted); font-size: 12px; }
 .toolcard-pre { max-width: 100%; max-height: 320px; margin: 8px 0 0; overflow: auto; color: var(--text-primary); font-size: 11.5px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .toolcard-text { padding-top: 9px; color: var(--text-primary); font-size: 12px; }

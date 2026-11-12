@@ -363,6 +363,28 @@ function createMainWindow(): BrowserWindow {
 // ── IPC 白名单（骨架：与 preload 通道一一对应；契约见 21 §2.13） ──
 ipcMain.handle("app:get-version", () => app.getVersion());
 ipcMain.handle("app:get-theme", () => "light");
+/*
+ * 窗口控制按钮（最小化/最大化/关闭）的配色跟随主题。
+ *
+ * `titleBarOverlay` 是原生 Windows 绘制，不吃 CSS 变量——应用切深色后
+ * 按钮区还是浅色底，非常违和。渲染层每次切主题时调这个通道，
+ * 主进程用 `setTitleBarOverlay` 同步（仅 WCO overlay 模式支持）。
+ */
+const OVERLAY_THEMES = {
+  light: { color: "#F7F7F8", symbolColor: "#5A5A62" },
+  dark: { color: "#101012", symbolColor: "#a6a6ae" },
+} as const;
+ipcMain.handle("app:set-overlay-theme", (_event, theme: unknown) => {
+  const overlay = theme === "dark" ? OVERLAY_THEMES.dark : OVERLAY_THEMES.light;
+  const win = BrowserWindow.getAllWindows()[0];
+  try {
+    win?.setTitleBarOverlay(overlay);
+  } catch (error) {
+    // 非 overlay 模式（如 Linux）不支持：主题照切，按钮配色保持原生
+    console.warn("[overlay] setTitleBarOverlay 不可用:", error instanceof Error ? error.message : error);
+  }
+  return "ok";
+});
 ipcMain.handle("shell:open-settings", () => {
   // TODO(批次⑦)：路由到设置页
   return "ok";

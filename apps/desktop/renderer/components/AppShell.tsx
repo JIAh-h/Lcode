@@ -7,6 +7,7 @@ import { PopMenu } from './PopMenu.tsx'
 import { PanelSplitter, useResizablePanel } from './PanelSplitter.tsx'
 import { SessionActionsMenu } from './SessionActionsMenu.tsx'
 import { sessionBridge } from '../store/sessionBridge.ts'
+import { syncWindowOverlayTheme } from '../store/overlayTheme.ts'
 import type { SessionMeta } from '../store/sessionBridge.ts'
 
 /**
@@ -186,6 +187,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const toggleTheme = act(() => {
     const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'
     document.documentElement.dataset.theme = next
+    syncWindowOverlayTheme(next)
     toast(next === 'dark' ? t('已切换到深色主题') : t('已切换到浅色主题'))
   })
 

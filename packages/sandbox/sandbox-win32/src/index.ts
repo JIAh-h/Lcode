@@ -1,7 +1,4 @@
 import type { PlatformSandboxCapabilities, ResolvedSandboxPolicy, SandboxReleaseResult, SandboxService, SandboxStatus, SandboxWrapResult } from '@lcode/sandbox'
-import { mkdirSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
 import { ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 
 /** 原生桥自检的最小证明。四项中缺任何一项，都不能把命令当作受保护执行。 */
@@ -119,25 +116,24 @@ export function createWindowsSandboxBridge(options: WindowsSandboxBridgeOptions)
         }
       }
       /*
-       * 环境块透传（docs/09 §3.2.6）。
+       * 环境修正（docs/09 §3.2.6）。
        *
        * helper 由 Electron 主进程启动，继承的是**主进程**的精简 PATH——
        * 用户装的 node / pnpm / git 往往在 shell 的 PATH 里而不在这里。
        * 实测：沙箱里跑 `node --version` 报"不是内部或外部命令"，而宿主明明有 node。
-       * 把当前 `process.env` 写成 UTF-16LE 环境块文件（CreateProcessW 标准格式），
-       * helper 用 `--env-file` 读出后显式传给 CreateProcessW。
+       *
+       * 修正方式是**改主进程自己的 `process.env.PATH`**（把注册表的机器+用户 PATH
+       * 并进来），让 helper 继承修正后的环境。
+       *
+       * 为什么不给 CreateProcessW 传自定义环境块：AppContainer 模式下显式环境块
+       * 有严格的格式与权限约束，实测（多种大小/内容组合）总是失败（exit 10）。
+       * 改 process.env 是父子进程天然共享的通道，零风险。
        */
-      const envFile = writeEnvFile()
+      mergeRegistryPath()
       return {
         enforced: true,
         mechanism: MECHANISM,
-        wrappedArgv: [
-          candidate, '--run', '--workspace', policy.workspaceRoot,
-          '--network', policy.allowNetwork === true ? 'allow' : 'deny',
-          '--mode', policy.mode,
-          ...(envFile === undefined ? [] : ['--env-file', envFile]),
-          '--', ...argv,
-        ],
+        wrappedArgv: [candidate, '--run', '--workspace', policy.workspaceRoot, '--network', policy.allowNetwork === true ? 'allow' : 'deny', '--mode', policy.mode, '--', ...argv],
       }
     },
     async wrapPty(argv, policy): Promise<SandboxWrapResult> {
@@ -318,27 +314,43 @@ function defaultHelperPaths(): readonly string[] {
  * 写在 home 下的临时目录（而不是 tmp）：helper 以当前用户身份运行，读得到；
  * 每次 wrap 覆盖同一文件，避免堆积。
  */
-let envFilePath: string | undefined
-function writeEnvFile(): string | undefined {
+let mergedDone = false
+/**
+ * 把注册表的机器+用户 PATH 并进主进程 `process.env.PATH`（docs/09 §3.2.6）。
+ *
+ * Electron 主进程的 PATH 常常精简到没有用户装的 node / pnpm / git；
+ * 沙箱子进程继承它就会"找不到命令"。注册表的 PATH 是用户 shell 会看到的那个，
+ * `RegGetValue` 系列在 C++ 层对 REG_EXPAND_SZ 的展开有实测坑，所以放 Node 读
+ * （`child_process.execSync('reg query ...')` 拿到的是**已展开**的值）。
+ *
+ * 只合并一次（幂等）：合并后追加 `;LCODE_SANDBOX_ENV_MERGED` 标记防重复。
+ */
+function mergeRegistryPath(): void {
+  if (mergedDone) return
+  mergedDone = true
   try {
-    if (envFilePath === undefined) {
-      envFilePath = join(tmpdir(), 'lcode-sandbox-env', `env-block-${process.pid}.bin`)
-      mkdirSync(dirname(envFilePath), { recursive: true })
+    const read = (query: string): string => {
+      try {
+        const out = require('node:child_process').execSync(query, { encoding: 'utf8', timeout: 5000 })
+        const match = /REG_EXPAND_SZ\s+(.*)/s.exec(out) ?? /REG_SZ\s+(.*)/s.exec(out)
+        let value = (match?.[1] ?? '').trim()
+        // 展开 %VAR% 字面量（注册表 PATH 是 REG_EXPAND_SZ）
+        value = value.replace(/%([^%]+)%/g, (_: string, name: string) => process.env[name] ?? '')
+        return value
+      } catch {
+        return ''
+      }
     }
-    const parts: string[] = []
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value === undefined) continue
-      // 环境块里不允许出现 \0（它会提前终结条目）；出现就丢弃该条
-      if (key.includes('\0') || value.includes('\0')) continue
-      parts.push(`${key}=${value}`)
-    }
-    // 末尾双 \0 是格式要求
-    const block = Buffer.from(parts.join('\0') + '\0\0', 'utf16le')
-    writeFileSync(envFilePath, Buffer.concat([Buffer.from([0xff, 0xfe]), block]))
-    return envFilePath
+    const machine = read('reg query "HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment" /v Path')
+    const user = read('reg query "HKCU\\Environment" /v Path')
+    const extra = [machine, user].filter((p) => p !== '').join(';')
+    if (extra === '') return
+    const current = process.env.PATH ?? ''
+    // 幂等：已经合并过就不再叠加
+    if (current.includes('LCODE_SANDBOX_ENV_MERGED')) return
+    process.env.PATH = current === '' ? `${extra};LCODE_SANDBOX_ENV_MERGED` : `${current};${extra};LCODE_SANDBOX_ENV_MERGED`
   } catch {
-    // 写不出环境文件就退回旧行为（继承 helper 环境）：node 可能找不到，但不至于无法执行
-    return undefined
+    // 读不到注册表（罕见）：保留原 PATH，只是沙箱里可能找不到某些命令
   }
 }
 

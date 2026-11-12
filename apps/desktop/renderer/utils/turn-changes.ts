@@ -1,7 +1,15 @@
+/** 一个 diff 块：edit/write 工具的旧/新行（悬浮弹窗展开 diff 用） */
+export interface TurnChangeHunk {
+  readonly oldLines: readonly string[]
+  readonly newLines: readonly string[]
+}
+
 export interface TurnChange {
   readonly path: string
   readonly additions: number
   readonly deletions: number
+  /** diff 内容；来自 tool/result meta.hunks，可能缺（旧事件或非文件工具） */
+  readonly hunks?: readonly TurnChangeHunk[] | undefined
 }
 
 export interface TurnChangeSummary {

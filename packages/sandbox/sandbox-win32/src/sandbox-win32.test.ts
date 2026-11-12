@@ -71,7 +71,7 @@ describe('WindowsSandboxProvider', () => {
     await expect(bridge.wrap(['cmd.exe', '/c', 'echo ok'], policy)).resolves.toEqual({
       enforced: true,
       mechanism: 'AppContainer + Job Object',
-      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'workspace-write', '--env-file', expect.any(String), '--', 'cmd.exe', '/c', 'echo ok'],
+      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'workspace-write', '--', 'cmd.exe', '/c', 'echo ok'],
     })
   })
 
@@ -88,7 +88,7 @@ describe('WindowsSandboxProvider', () => {
     await expect(bridge.wrap(['cmd.exe', '/c', 'echo ok'], { ...policy, allowNetwork: true })).resolves.toEqual({
       enforced: true,
       mechanism: 'AppContainer + Job Object',
-      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'allow', '--mode', 'workspace-write', '--env-file', expect.any(String), '--', 'cmd.exe', '/c', 'echo ok'],
+      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'allow', '--mode', 'workspace-write', '--', 'cmd.exe', '/c', 'echo ok'],
     })
   })
 
@@ -105,7 +105,7 @@ describe('WindowsSandboxProvider', () => {
     await expect(bridge.wrapPty?.(['cmd.exe'], policy)).resolves.toEqual({
       enforced: true,
       mechanism: 'AppContainer + Job Object',
-      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'workspace-write', '--env-file', expect.any(String), '--', 'cmd.exe'],
+      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'workspace-write', '--', 'cmd.exe'],
     })
   })
 
@@ -201,7 +201,7 @@ describe('预设档位贯通', () => {
     await expect(bridge.wrap(['cmd.exe', '/c', 'dir'], { ...policy, mode: 'read-only' })).resolves.toEqual({
       enforced: true,
       mechanism: 'AppContainer + Job Object',
-      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'read-only', '--env-file', expect.any(String), '--', 'cmd.exe', '/c', 'dir'],
+      wrappedArgv: ['C:/lcode/lcode-sandbox-win32.exe', '--run', '--workspace', 'C:/repo/lcode', '--network', 'deny', '--mode', 'read-only', '--', 'cmd.exe', '/c', 'dir'],
     })
   })
 

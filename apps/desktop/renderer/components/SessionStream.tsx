@@ -10,6 +10,7 @@ import { Markdown } from './Markdown.tsx'
 import { toast } from './toast.ts'
 import { ToolCard, type ToolCardCall, type ToolCardResult } from './ToolCard.tsx'
 import { ApprovalCard, type ApprovalDecision } from './ApprovalCard.tsx'
+import { EditedFilesCard, type EditedFile, type EditedFileHunk } from './EditedFilesCard.tsx'
 import { ComposerBar, type Attachment, type ComposerSendInput, type ImageAttachment } from './ComposerBar.tsx'
 
 /**
@@ -851,7 +852,7 @@ export function SessionStream({
     return historyTurnFailed
   }, [events, failureEpoch, historyTurnFailed])
 
-  const shownError = error ?? (lastTurnFailed ? t('这一轮没能跑起来。常见原因：模型额度耗尽（403）、密钥无效或无权限（401）、接口地址或模型名不对。可在 设置 → 模型 用「测试连接」确认。') : null)
+  const shownError = error ?? (lastTurnFailed ? t('本轮运行失败，当前请求额度已用尽') : null)
   const toolResults = useMemo(() => {
     const result = new Map<string, { readonly result: ToolCardResult; readonly seq: number }>()
     for (const event of events) {
@@ -1292,7 +1293,6 @@ export function SessionStream({
       className="sessionstream"
       ref={scrollerRef}
     >
-      {shownError !== null && <div className="sserror">{shownError}</div>}
       {hiddenCount > 0 && (
         <button
           type="button"
@@ -1326,7 +1326,44 @@ export function SessionStream({
             .find(
               (event) => event.type === 'assistant/message' && blocksToText(event.data.message.content) !== '',
             ) ?? null
-        const process = block.events.filter((event) => final === null || event.seq !== final.seq)
+        /*
+         * 被编辑的文件是**产物**，不是过程（docs/10，仿 DSH）：
+         * edit/write 的 diff 卡片从"执行过程"里剔除，聚合后在回复末尾
+         * 用 EditedFilesCard 展示——悬停文件行弹出 diff（复用 Git 工作区观感）。
+         */
+        const editedFiles: EditedFile[] = []
+        const process = block.events.filter((event) => {
+          if (final !== null && event.seq === final.seq) return false
+          if (event.type !== 'tool/result') return true
+          const meta = (event.data as { readonly meta?: unknown }).meta
+          if (typeof meta !== 'object' || meta === null) return true
+          const record = meta as Record<string, unknown>
+          if (record['card'] !== 'diff' || !Array.isArray(record['changes'])) return true
+          const rawChanges = record['changes'] as readonly unknown[]
+          const rawHunks = record['hunks']
+          const hunks: EditedFileHunk[] = Array.isArray(rawHunks)
+            ? rawHunks.flatMap((value) => {
+                if (typeof value !== 'object' || value === null) return []
+                const hunk = value as Record<string, unknown>
+                const oldLines = Array.isArray(hunk['oldLines']) ? (hunk['oldLines'] as unknown[]).map((line) => String(line)) : []
+                const newLines = Array.isArray(hunk['newLines']) ? (hunk['newLines'] as unknown[]).map((line) => String(line)) : []
+                return oldLines.length > 0 || newLines.length > 0 ? [{ oldLines, newLines }] : []
+              })
+            : []
+          for (const value of rawChanges) {
+            if (typeof value !== 'object' || value === null) continue
+            const item = value as Record<string, unknown>
+            if (typeof item['path'] !== 'string' || typeof item['kind'] !== 'string') continue
+            editedFiles.push({
+              path: item['path'],
+              kind: item['kind'],
+              additions: typeof item['additions'] === 'number' ? item['additions'] : 0,
+              deletions: typeof item['deletions'] === 'number' ? item['deletions'] : 0,
+              ...(hunks.length === 0 ? {} : { hunks }),
+            })
+          }
+          return false
+        })
         const open = openBlocks[block.key] ?? blockRunning
         return (
           <div className="turn" key={block.key}>
@@ -1351,11 +1388,24 @@ export function SessionStream({
               <TurnProcessList events={process} running={blockRunning} renderEvent={renderProcessEvent} />
             )}
             {!editingTurn && final !== null ? renderMessage(final) : null}
+            {!editingTurn && editedFiles.length > 0 && <EditedFilesCard files={editedFiles} />}
           </div>
         )
       })}
       {/* 流式增量：`assistant/message` 一到就被清掉，避免与权威内容重复显示 */}
       {streamingActive && <StreamingAssistant store={streamStore} onGrow={scrollToBottomIfFollowing} />}
+      {/*
+       * 轮失败：**作为模型回复显示在流末尾**（docs/10）。
+       *
+       * 之前渲染在会话流顶部（sserror）——失败发生在几十步执行之后，
+       * 提示却在最上面，用户根本看不到。放在末尾：它就是"这一轮的回复"，
+       * 与普通气泡同款样式，滚动自然带到。
+       */}
+      {shownError !== null && (
+        <div className="ssmsg ss-assistant ss-error">
+          <div className="ssbody">{shownError}</div>
+        </div>
+      )}
     </div>
   )
 }

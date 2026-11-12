@@ -8,6 +8,8 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron'
 const api = {
   getVersion: (): Promise<string> => ipcRenderer.invoke('app:get-version'),
   getTheme: (): Promise<'light' | 'dark'> => ipcRenderer.invoke('app:get-theme'),
+  /** 主题变化时同步窗口控制按钮（最小化/最大化/关闭）的底色与图标色 */
+  setWindowOverlayTheme: (theme: 'light' | 'dark'): Promise<void> => ipcRenderer.invoke('app:set-overlay-theme', theme),
   openSettings: (): Promise<string> => ipcRenderer.invoke('shell:open-settings'),
   /** 界面语言：读取已落盘的偏好（首次启动为 null） */
   getLocale: (): Promise<string | null> => ipcRenderer.invoke('app:get-locale'),

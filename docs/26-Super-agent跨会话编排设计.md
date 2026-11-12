@@ -391,7 +391,7 @@ Router 不能把 worker 的完整日志读进来——那正是 Inline/Spill 要
 | 单会话 + 子代理（delegation-first） | 13.8 min | 29.0 min | 10.8M |
 
 **结论：跨会话编排是用 token 换 p95 延迟。** 因此：
-- 默认 `observe`（§7.4），用户显式切到 `auto` 才真正派发
+- 档位**按会话**解析（§7.4）：新建 Router 会话默认 `auto`，全局兜底值为 `observe`；只想预演派发时，应在设置里把「新建编排会话时」显式降为 `observe`
 - 设置页需要明示这一权衡
 - Lcode 本地优先、用户自付费用，这一条必须写进产品文案
 
@@ -501,8 +501,8 @@ IM 消息 / GitHub webhook / Slack 事件 / CI 回调
 | P11-03 | Router 会话类型（无执行工具 + 轻模型 + 派发工具） | P11-01 | Router 请求头里没有 shell/write；派发生效 |
 | P11-04 | 完成回传、Router 唤醒与自动汇报 | P11-02、P11-03 | worker 完成后 Router 自动开新一轮并汇报；200ms 内多个合并成一条；无产出的 worker 不主动开口 |
 | P11-05 | 审批归属门禁 + 派发深度门禁 | P11-03 | 违规实现使 `check:invariants` 变红；worker 内再派发 worker 被拒绝 |
-| P11-06 | 编排授权三档（`off`/`observe`/`auto`） | P11-04 | 默认 `observe`：落 `worker/dispatched` 但不创建会话、不调模型 |
-| P11-07 | 并发上限 `maxConcurrentWorkers`（默认 3，超限排队） | P11-04 | 第 4 个 worker 排队而非拒绝；可配置生效 |
+| P11-06 | 编排授权三档（`off`/`observe`/`auto`） | P11-04 | 档位按会话解析（§7.4）：`observe` 落 `worker/dispatched` 但不创建 worker 会话、不调用 worker 模型；新建 Router 会话默认 `auto`，全局兜底值为 `observe` |
+| P11-07 | 并发上限 `maxConcurrentWorkers`（默认 8，超限排队） | P11-04 | 第 9 个 worker 排队而非拒绝；可配置生效 |
 | P11-08 | Watchdog（只通知） | P11-04 | 卡死/失败静默可被检出并通知；**不产生任何派发** |
 | P11-09 | CLI `lcode superagent` | P11-04 | 端到端：一条命令跑通 Router + N worker |
 
@@ -514,7 +514,7 @@ IM 消息 / GitHub webhook / Slack 事件 / CI 回调
 
 | 风险 | 影响 | 缓解 |
 | --- | --- | --- |
-| Router 成为成本黑洞 | 用户账单失控 | 编排默认 `observe`（§7.4）；`maxConcurrentWorkers` 默认 8（§7.5）；Watchdog 报堆积 |
+| Router 成为成本黑洞 | 用户账单失控 | 档位按会话，新建 Router 默认 `auto`、全局兜底 `observe`（§7.4）；需要预演时显式降为 `observe`；`maxConcurrentWorkers` 默认 8（§7.5）；Watchdog 报堆积 |
 | **单进程共享堆**（方案 A 的固有代价） | 一个 worker 跑飞会拖垮主进程；多个 worker 同时流式时内存压力叠加 | §7.5.3 的堆水位排队；worker 完成后立即 `dispose` 释放镜像；后续如需强隔离，按 §7.5.1 评估方案 B |
 | 提示注入经 worker 汇报回流 | Router 被诱导派发恶意任务 | Router 无执行工具（§3.2）；worker 汇报按不可信数据容器注入（复用 `untrustedSection`） |
 | 事件族膨胀 | 维护成本 | worker 事件只进 `worker/*`，不复用 subagent；`ContextProvenance` 需同步扩展 |
@@ -557,3 +557,4 @@ IM 消息 / GitHub webhook / Slack 事件 / CI 回调
 | 2026-11-10 | v0.5 | §11.1 新增第 6 条：**不引入外部事件源**，保持「用户建 Router 会话 + 说任务 → Router 自主派发」。理由是目标场景为**不确定的个人任务**（无稳定预过滤信号），且本地优先桌面端无法常驻 webhook。据此补充两个必然影响：Router 无执行工具故小任务也必须派发；Router 的派发判断质量成为核心能力 |
 | 2026-11-10 | v0.6 | §7.4 **修正档位模型**：由"全局一档、默认 observe"改为**按会话定档**，新建 Router 会话默认 `auto`。原因：勾选 Router 本身就是人工的授权信号，再让全局 observe 拦一道会造成"勾了不动"的自相矛盾。同时明确 **Router 不执行任务是其定义而非限制**，不补执行能力 |
 | 2026-11-10 | v0.7 | 新增 §9.3：对照官方原型补齐 **Router ↔ Worker 双向信息流**——R→W 加 `scope`/`doneWhen` 与 `inject` 原语（含双账、注入回合收尾）；W→R 加 `report_to_router`（progress/question/done，求助绕过批处理立刻唤醒）与 `list_workers` 主动巡检。顺带修掉 `ConcreteAgentLoop.attach` 复用**已销毁引擎**的缺陷（worker 收尾释放 agent 后再 resume 必然失败） |
+| 2026-11-11 | v0.8 | **一致性修正，不改设计**：§10 P11-07 的并发上限由遗留的「默认 3 / 第 4 个排队」校正为 v0.3 已定且代码采用的「默认 8 / 第 9 个排队」；§9.2、§10 P11-06、§11 风险表同步 v0.6 的按会话定档模型——新建 Router 默认 `auto`，全局兜底 `observe`。同时明确 `observe` 不创建 worker 会话、不调用 **worker 模型**，但 Router 仍调用模型做判断 |
