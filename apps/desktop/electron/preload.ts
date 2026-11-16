@@ -283,6 +283,9 @@ const api = {
     activate: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.activate', input),
     deactivate: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.deactivate', input),
     uninstall: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.uninstall', input),
+    /** 内置能力的禁用列表（docs/30 §P2）；改动需重启生效 */
+    disabledList: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.disabled.list'),
+    disabledSet: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.disabled.set', input),
   },
   runtime: {
     composition: (): Promise<unknown> => ipcRenderer.invoke('lcode:runtime.composition'),

@@ -1,5 +1,7 @@
 import type { Context } from '@lcode/context'
 
+export * from './filter.ts'
+
 export type RuntimeDisposer = () => void | Promise<void>
 
 export interface InternalBundleEntry {

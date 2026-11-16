@@ -142,7 +142,7 @@ import { createPluginHost, InstalledPluginLifecycleService, PluginLifecycleManag
 import { createLocalSkillFilesystem } from '@lcode/skill-filesystem'
 import { registerSkillTools } from '@lcode/tool-skill'
 import { createLocalAgentPresets, type PresetSnapshot } from '@lcode/agent-presets'
-import { composeRuntimeProfile, type InternalBundleEntry, type RuntimeCompositionSnapshot, type RuntimeDisposer } from '@lcode/runtime-composition'
+import { applyBundleFilter, composeRuntimeProfile, type InternalBundleEntry, type RuntimeCompositionSnapshot, type RuntimeDisposer } from '@lcode/runtime-composition'
 import { registerLocalContextSources } from '@lcode/context-local'
 import { createSessionSearchTool } from '@lcode/tool-session-query'
 import { createLocalMemoryStore } from '@lcode/memory-local'
@@ -303,6 +303,8 @@ export interface PluginRuntimeService {
   deactivate(input: { readonly id: string; readonly version: string }): Promise<void>
   uninstall(input: { readonly id: string; readonly version: string }): Promise<void>
   inspect(): ReturnType<InstalledPluginLifecycleService['inspect']>
+  /** 只改启用意图、不启动 host；重启后由统一装配器拉起（docs/30 §P4 / §9.3） */
+  setEnabled(input: { readonly id: string; readonly version: string; readonly enabled: boolean }): Promise<void>
 }
 
 export interface RuntimeSkillService {
@@ -359,7 +361,37 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
   let extensionFacade: ExtensionFacade | undefined
   let compositionSnapshot: RuntimeCompositionSnapshot | undefined
   const profileId = options.profile ?? 'desktop-default'
-  const profileExtras = createOptionalCapabilityEntries(options, () => sessions)
+  /*
+   * 第三方插件的生命周期在**顶层**创建一次：
+   * - mountExtensionsBundle 把它绑进 ctx（提供 IPC facade）
+   * - profileExtras 里每个已启用插件生成一个 bundle entry，mount 即 activate
+   * 两处共享同一实例，第三方插件因此与内置能力走同一个 composeRuntimeProfile。
+   */
+  const pluginRegistry = new LocalPluginRegistry({ home: services.home, coreVersion: '0.1.0' })
+  const pluginLifecycle = new PluginLifecycleManager({
+    context: services.ctx,
+    // 延迟解析：顶层创建时 tooling 还没挂，tools/systemPrompt 尚不在 ctx
+    tools: () => services.ctx.get('tools'),
+    systemPrompt: () => services.ctx.get('systemPrompt'),
+    startHost: async ({ target, onRequest }) => await createPluginHost({
+      manifest: target.manifest,
+      argv: [process.execPath, pluginUtilityRunnerPath, target.entryPath],
+      cwd: options.workspaceRoot ?? process.cwd(),
+      workspace: { root: options.workspaceRoot ?? process.cwd(), trusted: services.ctx.get('workspaceTrust').isTrusted(options.workspaceRoot ?? process.cwd()) },
+      subprocess: services.ctx.get('subprocess'),
+      sandbox: {
+        policy: { mode: 'read-only', workspaceRoot: options.workspaceRoot ?? process.cwd(), allowNetwork: false },
+        wrap: async (argv) => await services.ctx.get('sandbox').wrap(argv, { mode: 'read-only', workspaceRoot: options.workspaceRoot ?? process.cwd(), allowNetwork: false }),
+      },
+      onRequest,
+    }),
+  })
+  const pluginLifecycleService = new InstalledPluginLifecycleService(pluginLifecycle, pluginRegistry)
+  const profileExtras = createOptionalCapabilityEntries(
+    options,
+    () => sessions,
+    { registry: pluginRegistry, lifecycleService: pluginLifecycleService },
+  )
   const profile = createBuiltinRuntimeProfile(
     profileId,
     (ctx) => {
@@ -414,7 +446,11 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
     },
     (ctx) => {
       if (sessions === undefined) throw new Error('内部组合缺少 sessions provider')
-      const mountedExtensions = mountExtensionsBundle(options, services, sessions, ctx)
+      const mountedExtensions = mountExtensionsBundle(options, services, sessions, ctx, {
+        registry: pluginRegistry,
+        lifecycleService: pluginLifecycleService,
+        lifecycle: pluginLifecycle,
+      })
       extensionFacade = mountedExtensions.facade
       return mountedExtensions.dispose
     },
@@ -430,7 +466,25 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
     },
     profileExtras,
   )
-  const composition = await composeRuntimeProfile(services.ctx, profile)
+  /*
+   * 配置驱动的过滤：按 `plugins.disabled` 移除内置 bundle。
+   *
+   * 必须在 `composeRuntimeProfile` **之前**——后者会按 requires 拓扑排序并
+   * 校验服务齐全，过滤后的列表交给它，缺依赖仍然会在装配期明确报错。
+   *
+   * 读配置用 `services.readSetting` 而不是 `ctx.get('settings')`：settings 服务
+   * 由宿主在 `createServices` 里持有，**没有挂进 composition 的 ctx**
+   * （实测 `ctx.get('settings')` 抛 service not registered）。
+   */
+  const filtered = applyBundleFilter(services.ctx, profile, {
+    readDisabled: () => {
+      // 键名与 runtime-composition 的 DISABLED_PLUGINS_KEY 一致
+      const value = services.readSetting('plugins.disabled')
+      if (!Array.isArray(value)) return []
+      return value.filter((item): item is string => typeof item === 'string' && item !== '')
+    },
+  })
+  const composition = await composeRuntimeProfile(services.ctx, filtered.profile)
   compositionSnapshot = composition.snapshot
   if (mounted === undefined) throw new Error('内部组合未能挂载 lcode-spine')
 
@@ -654,8 +708,13 @@ function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServic
 function createOptionalCapabilityEntries(
   options: AgentRuntimeOptions,
   getSessions: () => LocalSessionsApi | undefined,
+  plugins: {
+    readonly registry: LocalPluginRegistry
+    readonly lifecycleService: InstalledPluginLifecycleService
+  },
 ): readonly InternalBundleEntry[] {
   const entries: InternalBundleEntry[] = []
+  entries.push(...createPluginBundleEntries(plugins))
   if (options.web !== undefined) {
     const web = options.web
     entries.push({
@@ -736,11 +795,72 @@ function createOptionalCapabilityEntries(
   return entries
 }
 
+/**
+ * 第三方插件 → bundle entry（docs/30 §P4）。
+ *
+ * ## 这是统一加载器的最后一块
+ *
+ * 之前第三方插件走独立路径：mountExtensionsBundle 里"启用过的全部直接 activate"，
+ * 与内置能力的 composeRuntimeProfile 没有任何交集。现在每个已启用插件生成一个
+ * `InternalBundleEntry`，与内置 bundle 在**同一个拓扑排序**里装配：
+ *
+ * | 字段 | 取值 | 理由 |
+ * |---|---|---|
+ * | id | `plugin:<id>@<version>` | 命名空间区分内置/第三方；也是 `plugins.disabled` 的禁用键 |
+ * | requires | tools / systemPrompt / subprocess / sandbox / workspaceTrust | 插件宿主 activate 时要绑定的宿主服务；workspaceTrust 决定沙箱策略 |
+ * | provides | **空** | 插件贡献工具/提示段（注册到 tools/systemPrompt），**不提供 ctx 服务**——跨进程服务依赖会让装配复杂度陡增（docs/30 开放问题 2 的决策） |
+ * | mount | `lifecycleService.activate(...)` | 复用既有生命周期事务：失败自动回滚 |
+ *
+ * ## 失败语义
+ *
+ * 插件 activate 失败**不该炸掉整个应用**：一个坏插件不等价于内核损坏。
+ * mount 内部捕获并降级为告警——这与内置 bundle 相反（内置失败 = 装配失败），
+ * 因为内置能力是产品承诺，第三方插件不是。
+ */
+function createPluginBundleEntries(plugins: {
+  readonly registry: LocalPluginRegistry
+  readonly lifecycleService: InstalledPluginLifecycleService
+}): readonly InternalBundleEntry[] {
+  const entries: InternalBundleEntry[] = []
+  for (const plugin of plugins.registry.list({ includeBuiltin: false })) {
+    if (plugin.state !== 'enabled') continue
+    const key = `${plugin.id}@${plugin.version}`
+    entries.push({
+      id: `plugin:${key}`,
+      requires: ['tools', 'systemPrompt', 'subprocess', 'sandbox', 'workspaceTrust'],
+      provides: [],
+      mount: async () => {
+        /*
+         * activate 内部会判断 client-only（contributes 只有 client）并跳过
+         * host 启动——沙箱下 host 握手必超时（26s/次），而 client-only 插件的
+         * host 半是空的，根本不需要进程。详见 InstalledPluginLifecycleService。
+         */
+        try {
+          await plugins.lifecycleService.activate({ id: plugin.id, version: plugin.version })
+          return () => {
+            // composeRuntimeProfile 逆序 dispose 时会调用；deactivate 内部幂等
+            void plugins.lifecycleService.deactivate({ id: plugin.id, version: plugin.version }).catch(() => undefined)
+          }
+        } catch (error) {
+          console.warn(`[lcode] 插件 ${key} 启动失败（不影响其余能力）：`, error)
+          return () => undefined
+        }
+      },
+    })
+  }
+  return entries
+}
+
 function mountExtensionsBundle(
   options: AgentRuntimeOptions,
   services: DesktopServices,
   sessions: LocalSessionsApi,
   ctx: DesktopServices['ctx'],
+  injected: {
+    readonly registry: LocalPluginRegistry
+    readonly lifecycleService: InstalledPluginLifecycleService
+    readonly lifecycle: PluginLifecycleManager
+  },
 ): { readonly facade: ExtensionFacade; readonly dispose: Disposer } {
   const workspaceRoot = options.workspaceRoot ?? process.cwd()
   // Skills 与 preset 都是本地只读声明；启用后的插件生命周期则始终走受控 utility host。
@@ -762,25 +882,19 @@ function mountExtensionsBundle(
     ],
   })
   const unregisterPresets = ctx.set('presets', localPresets)
-  const registry = new LocalPluginRegistry({ home: services.home, coreVersion: '0.1.0' })
-  const lifecycle = new PluginLifecycleManager({
-    context: ctx,
-    tools: ctx.get('tools'),
-    systemPrompt: ctx.get('systemPrompt'),
-    startHost: async ({ target, onRequest }) => await createPluginHost({
-      manifest: target.manifest,
-      argv: [process.execPath, pluginUtilityRunnerPath, target.entryPath],
-      cwd: workspaceRoot,
-      workspace: { root: workspaceRoot, trusted: ctx.get('workspaceTrust').isTrusted(workspaceRoot) },
-      subprocess: ctx.get('subprocess'),
-      sandbox: {
-        policy: { mode: 'read-only', workspaceRoot, allowNetwork: false },
-        wrap: async (argv) => await ctx.get('sandbox').wrap(argv, { mode: 'read-only', workspaceRoot, allowNetwork: false }),
-      },
-      onRequest,
-    }),
-  })
-  const lifecycleService = new InstalledPluginLifecycleService(lifecycle, registry)
+  /*
+   * registry / lifecycleService 由 createAgentRuntime 顶层创建后**注入**进来：
+   * 第三方插件的 bundle entry（profileExtras，见 createOptionalCapabilityEntries）
+   * 也要拿到同一个 lifecycleService 去 activate——它们与内置能力在
+   * composeRuntimeProfile 里做同一次拓扑排序，不能有两套生命周期。
+   */
+  const registry = injected.registry
+  const lifecycleService = injected.lifecycleService
+  /*
+   * lifecycle 由宿主注入（从 lifecycleService 取回）——这里只负责把
+   * ctx/tools/systemPrompt 绑定到 startHost。注入路径见 createAgentRuntime。
+   */
+  const lifecycle = injected.lifecycle
   const unregisterPlugins = ctx.set('plugins', lifecycleService)
   const facade: ExtensionFacade = {
     plugins: {
@@ -790,6 +904,12 @@ function mountExtensionsBundle(
       async deactivate(input) { await lifecycleService.deactivate(input) },
       async uninstall(input) { await lifecycleService.uninstall(input) },
       inspect: () => lifecycleService.inspect(),
+      /*
+       * 只改启用意图、**不启动 host**（docs/30 §9.3 的规避路径）：
+       * host 激活在沙箱下有既有问题，而 client 半（渲染层）不需要 host。
+       * 重启后由装配器按 enabled 状态生成 bundle entry 并尝试 activate。
+       */
+      setEnabled: async (input) => { await registry.setEnabled(input) },
     },
     skills: { catalog: () => skills.catalog(), load: (id) => skills.load(id) },
     presets: {
@@ -802,11 +922,12 @@ function mountExtensionsBundle(
       },
     },
   }
-  for (const plugin of registry.list().filter((entry) => entry.state === 'enabled')) {
-    void lifecycleService.activate(plugin).catch((error: unknown) => {
-      console.warn(`[lcode] 插件 ${plugin.id}@${plugin.version} 未能恢复：`, error)
-    })
-  }
+  /*
+   * 已启用插件的激活**不再在这里做**：它们现在是 bundle entry（见
+   * createPluginBundleEntries），由 composeRuntimeProfile 统一调度。
+   * 这里保留循环会双重 activate——PluginLifecycleManager 对同 key 幂等，
+   * 但失败告警会打两遍，且绕过了装配顺序。
+   */
   return {
     facade,
     dispose: async () => {

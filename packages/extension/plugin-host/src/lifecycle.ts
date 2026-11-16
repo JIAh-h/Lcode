@@ -23,8 +23,16 @@ export type PluginHostStarter = (input: PluginHostStarterInput) => Promise<Plugi
 
 export interface PluginLifecycleManagerOptions {
   readonly context: Context
-  readonly tools: ToolRegistry
-  readonly systemPrompt: SystemPromptService
+  /**
+   * tools / systemPrompt **延迟解析**。
+   *
+   * 之前是直接收实例：顶层创建 manager 时这两个服务还没挂（tooling bundle
+   * 在 composeRuntimeProfile 里更晚才 mount），`ctx.get('tools')` 直接抛
+   * service not registered。改成 getter 后，解析推迟到第一次 activate——
+   * 那时组合已完成，服务必然在。
+   */
+  readonly tools: () => ToolRegistry
+  readonly systemPrompt: () => SystemPromptService
   readonly startHost: PluginHostStarter
 }
 
@@ -197,7 +205,7 @@ export class PluginLifecycleManager {
         return result
       },
     }
-    this.#track(record, this.options.tools.register(tool))
+    this.#track(record, this.options.tools().register(tool))
     return null
   }
 
@@ -206,7 +214,7 @@ export class PluginLifecycleManager {
     if (!(record.target.manifest.contributes.promptSections ?? []).includes(params.id)) {
       throw undeclared(`Prompt section ${params.id} is not declared in the plugin manifest`)
     }
-    this.#track(record, this.options.systemPrompt.section(params.id, params.content, params.order === undefined ? undefined : { order: params.order }))
+    this.#track(record, this.options.systemPrompt().section(params.id, params.content, params.order === undefined ? undefined : { order: params.order }))
     return null
   }
 
@@ -257,6 +265,23 @@ export class InstalledPluginLifecycleService {
 
   async activate(input: { readonly id: string; readonly version: string }): Promise<ActivePlugin> {
     const target = await this.installations.activationSource(input)
+    /*
+     * **client-only 插件不需要 host 进程**（docs/30 §9.3）：
+     * contributes 里只有 client（渲染层入口），host 的 activate 是空的——
+     * 为它起 utility host 只会白等一个注定超时的握手（沙箱下 electron.exe
+     * 无法在 AppContainer 里跑，实测每次 26 秒）。
+     *
+     * 判据：contributes.tools / promptSections / services 全空。
+     * 有任何一项 host 贡献才真正启动 host。
+     */
+    const contributes = target.manifest.contributes
+    const hostNeeded = (contributes.tools?.length ?? 0) > 0
+      || (contributes.promptSections?.length ?? 0) > 0
+      || (contributes.services?.length ?? 0) > 0
+    if (!hostNeeded) {
+      await this.installations.setEnabled({ ...input, enabled: true })
+      return { id: target.manifest.id, version: target.manifest.version, state: 'active' }
+    }
     const active = await this.lifecycle.activate(target)
     try {
       await this.installations.setEnabled({ ...input, enabled: true })

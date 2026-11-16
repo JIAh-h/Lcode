@@ -2969,6 +2969,29 @@ function PluginSection() {
   const [plugins, setPlugins] = useState<readonly PluginEntry[]>([])
   const [busy, setBusy] = useState<string | undefined>()
   const [uninstalling, setUninstalling] = useState<PluginEntry | null>(null)
+  /*
+   * 内置能力开关（docs/30 §P2）。
+   *
+   * 粒度是 **bundle**（不是单个工具）：composeRuntimeProfile 按 bundle 装配，
+   * 一个 bundle 提供多个服务，拆到单个工具去关会破坏 requires 依赖。
+   * 改动后需重启：services 是进程启动时装配的，运行中替换会留下半套状态。
+   */
+  const [bundleIds, setBundleIds] = useState<readonly string[]>([])
+  const [disabledBundles, setDisabledBundles] = useState<readonly string[]>([])
+  const [togglingBundle, setTogglingBundle] = useState<string | undefined>()
+  useEffect(() => {
+    void Promise.all([
+      /*
+       * IPC 返回 RuntimeComposition 的**可序列化部分**：`{ profile, entries }`
+       * （dispose 函数过不了结构化序列化）。entries 直接在顶层，不在 snapshot 里。
+       */
+      window.lcode.runtime.composition() as Promise<{ entries?: readonly { id: string }[] }>,
+      window.lcode.plugins.disabledList() as Promise<unknown>,
+    ]).then(([composition, disabled]) => {
+      setBundleIds((composition.entries ?? []).map((item) => item.id))
+      setDisabledBundles(Array.isArray(disabled) ? disabled as string[] : [])
+    }).catch(() => undefined)
+  }, [])
   useEffect(() => {
     void window.lcode.runtime.builtinPlugins()
       .then((value) => {
@@ -3011,6 +3034,21 @@ function PluginSection() {
       setBusy(undefined)
     }
   }
+  const toggleBundle = async (id: string): Promise<void> => {
+    setTogglingBundle(id)
+    const next = disabledBundles.includes(id)
+      ? disabledBundles.filter((item) => item !== id)
+      : [...disabledBundles, id]
+    try {
+      await window.lcode.plugins.disabledSet({ disabled: next })
+      setDisabledBundles(next)
+      toast(t('已保存，重启应用后生效'))
+    } catch (error) {
+      toast(error instanceof Error ? error.message : t('保存失败'))
+    } finally {
+      setTogglingBundle(undefined)
+    }
+  }
   const uninstall = async (): Promise<void> => {
     if (uninstalling === null) return
     const plugin = uninstalling
@@ -3041,7 +3079,7 @@ function PluginSection() {
   return (
     <>
       <h2>{t('插件')}</h2>
-      <div className="sub">{t('内置插件随模式在代码中启用，这里只能查看，不提供开关。')}</div>
+      <div className="sub">{t('系统与所有会话共用；内置能力可在此关闭，改动后重启生效。')}</div>
 
       <div className="sect">
         <div className="sh2">
@@ -3085,6 +3123,26 @@ function PluginSection() {
           <div className="bplug-note">{t('正在读取内置插件…')}</div>
         ) : (
           <div className="bplug-grid">{globalPlugins.map(renderCard)}</div>
+        )}
+        {bundleIds.length > 0 && (
+          <div className="bundle-toggles">
+            <div className="picklab">{t('内置能力开关（改动后重启生效）')}</div>
+            {bundleIds.map((id) => {
+              const off = disabledBundles.includes(id)
+              return (
+                <label className="bundle-toggle" key={id}>
+                  <input
+                    type="checkbox"
+                    checked={!off}
+                    disabled={togglingBundle === id}
+                    onChange={() => void toggleBundle(id)}
+                  />
+                  <span>{id}</span>
+                  {off && <em className="bundle-off">{t('已禁用')}</em>}
+                </label>
+              )
+            })}
+          </div>
         )}
       </div>
 

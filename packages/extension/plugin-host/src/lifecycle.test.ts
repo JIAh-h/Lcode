@@ -108,8 +108,8 @@ function harness() {
   const prompt = createSystemPromptService(tools)
   const manager = new PluginLifecycleManager({
     context,
-    tools,
-    systemPrompt: prompt,
+    tools: () => tools,
+    systemPrompt: () => prompt,
     startHost: async ({ target, onRequest }) => await createPluginHost({
       manifest: target.manifest,
       argv: [process.execPath, runnerPath, target.entryPath],

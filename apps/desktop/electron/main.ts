@@ -1607,6 +1607,34 @@ function publicPlugins(rt: AgentRuntime) {
 ipcMain.handle('lcode:plugins.list', async () => publicPlugins(await agentRuntime()));
 ipcMain.handle('lcode:plugins.inspect', async () => (await agentRuntime()).plugins.inspect());
 
+/*
+ * 内置能力的启用开关（docs/30 §P2）。
+ *
+ * 只暴露"哪些 bundle id 被禁用"这一项，而不是整个 settings —— 后者包含
+ * 凭据引用、模型配置等敏感信息，不该让渲染层随便读。
+ *
+ * 键名与 runtime-composition 的 DISABLED_PLUGINS_KEY 一致；在这里写字符串常量
+ * 而不是 import，是为了不让 Electron 主进程额外依赖那个包（装配发生在 bundle 层）。
+ */
+const DISABLED_BUNDLES_KEY = 'plugins.disabled';
+
+ipcMain.handle('lcode:plugins.disabled.list', async () => {
+  const rt = await agentRuntime();
+  const found = rt.ctx.get('settings').get(DISABLED_BUNDLES_KEY);
+  const value = found?.value;
+  return Array.isArray(value) ? value.filter((item: unknown): item is string => typeof item === 'string') : [];
+});
+
+ipcMain.handle('lcode:plugins.disabled.set', async (_event, input: unknown) => {
+  const record = (input ?? {}) as { disabled?: unknown };
+  if (!Array.isArray(record.disabled) || !record.disabled.every((item) => typeof item === 'string')) {
+    throw new Error('disabled 必须是字符串数组');
+  }
+  const rt = await agentRuntime();
+  await rt.ctx.get('settings').set(DISABLED_BUNDLES_KEY, record.disabled);
+  return { ok: true, note: '设置已保存，重启应用后生效' };
+});
+
 /**
  * 渲染层加载 client 插件的结果回传（只为可观测性）。
  *
