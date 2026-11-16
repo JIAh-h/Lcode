@@ -1,0 +1,24 @@
+{
+  "$schema": "https://lcode.dev/schema/plugin-1.json",
+  "id": "acme.dusk-theme",
+  "name": "暮色主题",
+  "version": "0.1.0",
+  "engines": { "lcode": "^0.1.0" },
+  "entry": "./src/index.js",
+  "activation": { "events": ["session/created"] },
+  "permissions": {},
+  "contributes": {
+    "client": {
+      "entry": "./src/client.js",
+      "slots": ["theme"]
+    }
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "canvas": { "type": "string", "description": "主背景色", "default": "#14141c" },
+      "text": { "type": "string", "description": "主要文字颜色", "default": "#e6e6ef" },
+      "accent": { "type": "string", "description": "强调色", "default": "#7c9cff" }
+    }
+  }
+}

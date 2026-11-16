@@ -51,6 +51,9 @@ function harness(opts: {
   hasChannel?: boolean
   preset?: '只读' | '工作区内修改' | '完全访问'
   workspaceRoot?: string
+  /** 模拟「最近任务」这类没有选工作区的会话 */
+  noWorkspace?: boolean
+  trustedWriteRoots?: readonly string[]
   sandbox?: SandboxService
   withMutationAuthority?: boolean
   webAllowlist?: {
@@ -96,6 +99,26 @@ function harness(opts: {
     inputSchema: { type: 'object', properties: {} },
     execute: () => {
       executed.push('noop')
+      return { ok: true }
+    },
+  })
+  /*
+   * 申报了意图但**不碰任何路径**的只读工具（`session_search` 就是这个形态）。
+   *
+   * 它和 `noop` 的区别很关键：`noop` 没 intent，策略钩子直接放行；
+   * 这个有 intent，会进入边界判定——如果没有"无路径即放行"这条例外，
+   * 它在无工作区的会话里会被误拒（实测踩过）。
+   */
+  tools.register({
+    name: 'query',
+    description: '只读检索',
+    inputSchema: { type: 'object', properties: { q: { type: 'string' } } },
+    describeAction: (parsed) => {
+      const p = parsed as { q: string }
+      return { summary: `检索 ${p.q}` }
+    },
+    execute: () => {
+      executed.push('query')
       return { ok: true }
     },
   })
@@ -152,8 +175,9 @@ function harness(opts: {
     ...(approval === undefined ? {} : { approval }),
     presets,
     ...(opts.sandbox === undefined ? {} : { sandbox: opts.sandbox }),
-    workspaceOf: () => opts.workspaceRoot ?? ROOT,
+    workspaceOf: () => (opts.noWorkspace === true ? undefined : (opts.workspaceRoot ?? ROOT)),
     getSession: () => session,
+    ...(opts.trustedWriteRoots === undefined ? {} : { trustedWriteRoots: opts.trustedWriteRoots }),
     ...(opts.withMutationAuthority === true
       ? { mutationAuthority: { grant: (grant) => { grants.push(grant) }, consume: () => undefined } }
       : {}),
@@ -237,6 +261,42 @@ describe('工作区内写：「标准」档放行，且**真的执行了**', () 
     const r = await run(h, 'write', { path: 'src/a.ts' })
     expect(r.ok).toBe(true)
     expect(h.executed).toEqual(['src/a.ts'])
+  })
+})
+
+/*
+ * 无工作区的会话（「最近任务」）+ 申报了意图但不碰路径的只读工具。
+ *
+ * 边界判定的是"能不能碰某个文件"，一个不碰文件的调用没有边界可越。
+ * 之前这里一刀切 deny，导致 `session_search` 这类工具在无工作区时被误拒。
+ */
+describe('无工作区：不碰路径的只读工具照常放行', () => {
+  it('有 intent 但 paths 为空 → 放行并执行', async () => {
+    const h = harness({ preset: '工作区内修改', noWorkspace: true })
+    const r = await run(h, 'query', { q: '缓存' })
+    expect(r.ok).toBe(true)
+    expect(h.executed).toEqual(['query'])
+  })
+
+  it('有 intent 且要写文件 → 仍按最保守方式拒绝（边界未知不放开）', async () => {
+    const h = harness({ preset: '工作区内修改', noWorkspace: true })
+    const r = await run(h, 'write', { path: 'src/a.ts' })
+    expect(r.ok).toBe(false)
+    expect(h.executed).toEqual([])
+  })
+
+  it('写可信目录（记忆）→ 放行', async () => {
+    const memoryRoot = normalizePath('/home/u/.lcode/memory')
+    const target = normalizePath('/home/u/.lcode/memory/USER.md')
+    const h = harness({
+      preset: '工作区内修改',
+      noWorkspace: true,
+      withMutationAuthority: true,
+      trustedWriteRoots: [memoryRoot],
+    })
+    const r = await run(h, 'write', { path: target })
+    expect(r.ok).toBe(true)
+    expect(h.executed).toEqual([target])
   })
 })
 

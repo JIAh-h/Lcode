@@ -543,6 +543,20 @@ export interface SessionEventMap {
     readonly reason?: string | undefined
   }
   /**
+   * 会话的 Agent 预设（docs/30 §6）。
+   *
+   * **创建时确定，之后不可变**：模式决定工具集（`creator` 多一个 `run_code`），
+   * 中途切换会让同一会话里"工具时有时无"，模型会反复重试已消失的工具。
+   *
+   * 设置页里的「Agent 预设」只决定**新会话的默认值**，不是这个事件的替代。
+   * 落盘是刻意的：重放时能解释这个会话当时用的是哪套工具。
+   */
+  'session/preset': {
+    readonly preset: 'standard' | 'creator'
+    /** 用户在新建时显式选的，还是按设置默认值来的 */
+    readonly source: 'user' | 'default'
+  }
+  /**
    * 编排授权档位变更（26 §7.4）。
    *
    * 落盘是刻意的：`observe` 下"本来会派发什么"必须可回放，

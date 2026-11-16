@@ -1,0 +1,12 @@
+{
+  "$schema": "https://lcode.dev/schemas/plugin/v1.json",
+  "id": "acme.hello-tool",
+  "name": "Hello Tool",
+  "version": "0.1.0",
+  "engines": { "lcode": "^0.1.0" },
+  "entry": "src/index.js",
+  "permissions": {},
+  "contributes": {
+    "tools": ["hello"]
+  }
+}

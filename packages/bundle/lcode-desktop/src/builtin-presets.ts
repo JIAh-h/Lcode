@@ -37,13 +37,13 @@ export const BUILTIN_AGENT_PRESETS: readonly BuiltinAgentPreset[] = [
   {
     id: 'standard',
     name: '标准模式（默认）',
-    description: '读写与命令工具全开，按当前权限预设执行。',
+    description: '用于处理日常任务与对话：读写文件、跑命令、检索。',
     plugins: [...STANDARD_PLUGINS],
   },
   {
     id: 'creator',
     name: '创造模式',
-    description: '在标准能力上增加代码运行器，便于编写/组合工具、技能与插件源码。',
+    description: '包含标准模式的全部能力，另加代码运行器与创作指导：用来造插件、技能与自定义模式。',
     plugins: [...STANDARD_PLUGINS, 'tool-code'],
   },
 ]

@@ -18,7 +18,56 @@ export interface PluginContributes {
   readonly tools?: readonly string[];
   readonly services?: readonly string[];
   readonly promptSections?: readonly string[];
+  /**
+   * 渲染层（client）扩展（docs/30 §9）。
+   *
+   * 插件有两半：host 那一半在 utility process 里跑（工具/提示词/事件），
+   * client 那一半在**渲染进程**里跑（界面、主题、面板）。没有这一半，
+   * 任何"改外观/加面板"的需求都只能靠改应用源码——那等于插件体系缺了一整块。
+   */
+  readonly client?: PluginClientContribution;
 }
+
+export interface PluginClientContribution {
+  /**
+   * client 入口：包内 `./` 开头的 `.js`（ESM）。
+   *
+   * 与 host 的 `entry` 分开声明而不是共用一个文件：两者的**运行环境不同**
+   * （一个有 Node 能力、一个只有浏览器 API），混在一起必然要用环境判断，
+   * 那会让插件作者很容易写出"在渲染层 require fs"这种在一边能跑、另一边崩的代码。
+   */
+  readonly entry: string;
+  /**
+   * 这个 client 插件要占用的**插槽**。
+   *
+   * 必须显式声明：加载器据此决定何时实例化，也据此渲染到界面上。
+   * 未声明的插槽不会被挂载——声明式比"插件自己找地方塞"更可控。
+   */
+  readonly slots: readonly PluginSlotId[];
+}
+
+/**
+ * 可用的界面插槽（由渲染层提供，插件只能往这些位置挂）。
+ *
+ * 做成**枚举**而不是自由字符串：插槽是宿主给的挂载点，插件不能凭空创造位置。
+ * 将来加新插槽是在这里加一项，插件作者读类型就知道有哪些可用。
+ */
+export type PluginSlotId =
+  /** 全局主题：可覆盖 CSS 变量、设置背景图 */
+  | "theme"
+  /** 侧边栏底部：小面板（统计、快捷入口） */
+  | "sidebar.bottom"
+  /** 会话流上方：横幅/提示条 */
+  | "conversation.top"
+  /** 设置页：整页自定义面板 */
+  | "settings.section"
+
+const PLUGIN_SLOT_IDS: readonly PluginSlotId[] = [
+  "theme",
+  "sidebar.bottom",
+  "conversation.top",
+  "settings.section",
+]
 
 export interface PluginActivation {
   readonly events?: readonly string[];
@@ -170,15 +219,50 @@ function namedRule(
 function optionalContributes(value: unknown): PluginContributes {
   if (value === undefined) return {};
   if (!isRecord(value)) throw manifestInvalid("contributes 必须是对象");
-  rejectUnknown(value, ["tools", "services", "promptSections"]);
+  rejectUnknown(value, ["tools", "services", "promptSections", "client"]);
   const tools = optionalStringArray(value, "tools");
   const services = optionalStringArray(value, "services");
   const promptSections = optionalStringArray(value, "promptSections");
+  const client = optionalClient(value.client);
   return {
     ...(tools !== undefined ? { tools } : {}),
     ...(services !== undefined ? { services } : {}),
     ...(promptSections !== undefined ? { promptSections } : {}),
+    ...(client !== undefined ? { client } : {}),
   };
+}
+
+/**
+ * `contributes.client`：渲染层入口 + 插槽声明。
+ *
+ * `entry` 的校验与 host 侧同口径（包内 `./` 开头的 `.js`）——两者都会被 `import()`，
+ * 允许绝对路径或 `..` 会让插件加载任意本机文件。
+ */
+function optionalClient(value: unknown): PluginClientContribution | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw manifestInvalid("contributes.client 必须是对象");
+  rejectUnknown(value, ["entry", "slots"]);
+  const entry = requiredString(value, "entry");
+  if (
+    !entry.startsWith("./") ||
+    entry.includes("\\") ||
+    entry.split("/").includes("..") ||
+    !entry.endsWith(".js")
+  ) {
+    throw manifestInvalid("contributes.client.entry 必须是包内的 ./*.js ESM 相对路径");
+  }
+  const raw = value.slots;
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw manifestInvalid("contributes.client.slots 必须是非空数组");
+  }
+  const slots: PluginSlotId[] = [];
+  for (const item of raw) {
+    if (typeof item !== "string" || !(PLUGIN_SLOT_IDS as readonly string[]).includes(item)) {
+      throw manifestInvalid(`未知的界面插槽：${String(item)}。可用值：${PLUGIN_SLOT_IDS.join(" / ")}`);
+    }
+    if (!slots.includes(item as PluginSlotId)) slots.push(item as PluginSlotId);
+  }
+  return { entry, slots };
 }
 
 function optionalJson(

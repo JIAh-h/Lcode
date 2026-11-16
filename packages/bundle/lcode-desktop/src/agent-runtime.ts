@@ -132,7 +132,7 @@ import { createLocalTerminal } from '@lcode/terminal-pty'
 import { createFsTools } from '@lcode/tool-fs'
 import type { SandboxService, ResolvedSandboxPolicy, SandboxWrapResult, SandboxMode } from '@lcode/sandbox'
 import { gcSandboxGrants, recordSandboxGrant } from './sandbox-grants.ts'
-import { createLocalAgentPresetSetting } from './agent-preset-setting.ts'
+import { createLocalAgentPresetSetting, registerSessionPresets } from './agent-preset-setting.ts'
 import { createLocalWebAllowlist } from './web-allowlist.ts'
 import { createLocalNetworkAudit } from './network-audit.ts'
 import { knobsOf, createLocalPermissionPresets, createLocalWorkspaceTrust, installPolicyHook } from '@lcode/permission-presets'
@@ -144,6 +144,7 @@ import { registerSkillTools } from '@lcode/tool-skill'
 import { createLocalAgentPresets, type PresetSnapshot } from '@lcode/agent-presets'
 import { composeRuntimeProfile, type InternalBundleEntry, type RuntimeCompositionSnapshot, type RuntimeDisposer } from '@lcode/runtime-composition'
 import { registerLocalContextSources } from '@lcode/context-local'
+import { createSessionSearchTool } from '@lcode/tool-session-query'
 import { createLocalMemoryStore } from '@lcode/memory-local'
 import { registerContextBudget } from '@lcode/context-budget'
 import type { TokenMeasurement } from '@lcode/context-budget'
@@ -511,6 +512,19 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
   const unregisterShell = tools.register(createShellTool({ shell: ctx.get('shell'), workspaceRoot, workspaceOf }))
   const unregisterTerminal = tools.register(createTerminalTool({ terminals: ctx.get('terminals'), workspaceRoot, workspaceOf }))
   const unregisterTodo = tools.register(createTodoWriteTool({ getSession: (sessionId: string) => sessions.sessionServiceFor(sessionId) }))
+  /*
+   * 跨会话检索（docs/29）：历史会话的全文检索。
+   *
+   * `sessions.search()` 早就实现了（FTS5 + 中文逐字分词），只是一直没有模型入口。
+   * 这里补上工具层，并在查询侧排除调用者自身——它的历史就在上下文里，
+   * 再搜一遍既浪费 token，又容易让模型把"刚说过的话"当成外部证据。
+   */
+  const unregisterSessionSearch = tools.register(createSessionSearchTool({
+    search: async (input) => {
+      const result = await sessions.search({ query: input.query, ...(input.limit === undefined ? {} : { limit: input.limit }) })
+      return result.items
+    },
+  }))
   const unregisterCodeSearch = options.codeSearch === undefined
     ? undefined
     : tools.register(createCodeSearchTool({
@@ -518,7 +532,7 @@ function mountToolingBundle(options: AgentRuntimeOptions, sessions: LocalSession
         workspaceOf,
         fallbackWorkspace: workspaceRoot,
       }))
-  return () => { unregisterCodeSearch?.(); unregisterTodo(); unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
+  return () => { unregisterSessionSearch(); unregisterCodeSearch?.(); unregisterTodo(); unregisterTerminal(); unregisterShell(); unregisterPrompt(); unregisterTools() }
 }
 
 function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServices, sessions: LocalSessionsApi, mutationAuthority: ReturnType<typeof createFsMutationAuthority>, ctx: DesktopServices['ctx'], profile: () => RuntimeCompositionSnapshot): RuntimeDisposer {
@@ -540,6 +554,15 @@ function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServic
    * 角色服务必须先于编排 provider——后者要靠 roleOf 拦截"worker 再派发 worker"。
    */
   const sessionRoles = registerSessionRoles({ ctx, getSession: (id) => sessions.sessionServiceFor(id) })
+  /*
+   * 会话级 Agent 预设（docs/30 §6）：创建时确定、不可变。
+   *
+   * 与全局 `agentPreset` 分工：全局设置决定"新会话默认用哪个"，
+   * 这个事件决定"**这个**会话用哪个"——模式决定工具集（creator 多一个 run_code），
+   * 中途切换会让模型看到工具时有时无。
+   */
+  const sessionPresets = registerSessionPresets({ ctx, getSession: (id) => sessions.sessionServiceFor(id) })
+  ctx.set('sessionPreset', sessionPresets.service)
   const orchestration = registerLocalOrchestration({
     ctx,
     sessions,
@@ -804,7 +827,36 @@ function mountCodeRuntimeBundle(options: AgentRuntimeOptions, ctx: DesktopServic
     workspaceRoot,
   })
   const unregisterRuntime = ctx.set('codeRuntime', runtime)
-  const unregisterTool = ctx.get('tools').register(createCodeTool({ runtime, tools: ctx.get('tools') }))
+  /*
+   * `run_code` 永远注册；**它是否被模型看到，由 `sessionPreset` 的过滤链决定**
+   * （见 `registerSessionPresets` 里的 `systemPrompt.tools()`）。
+   *
+   * 为什么不在注册层按模式决定：`codeRuntime` 是**进程级**的一次挂载，
+   * 而模式是**会话级**的——同一进程里可以同时有一个创造模式会话和一个标准会话。
+   * 注册/注销只能表达"全进程有没有"，表达不了"这个会话有没有"。
+   *
+   * 执行期仍保留 `allowed`：过滤链在提示层，而工具执行走注册表按名字全量解析，
+   * 两者不是同一条路径（Router 白名单那次事故就是吃了这个亏）。
+   */
+  const allowed = (scope: unknown): boolean => {
+    const sessionId = typeof scope === 'object' && scope !== null
+      ? (scope as { readonly sessionId?: unknown }).sessionId
+      : undefined
+    if (typeof sessionId !== 'string' || sessionId === '') return true
+    try {
+      /*
+       * **执行期才解析服务**，不能在挂载时取：`codeRuntime` bundle 在
+       * `agent` bundle 之前挂载，而 `sessionPreset` 是在后者里注册的。
+       * 挂载时 `ctx.get('sessionPreset')` 会抛，落到 fallback 的 `true`，
+       * 表现就是"标准模式也能执行 run_code"（实测踩过）。
+       */
+      return ctx.get('sessionPreset').presetOf(sessionId) === 'creator'
+    } catch {
+      // 预设服务确实未挂载（纯测试环境）：保持可用
+      return true
+    }
+  }
+  const unregisterTool = ctx.get('tools').register(createCodeTool({ runtime, tools: ctx.get('tools'), allowed }))
   return () => {
     unregisterTool()
     unregisterRuntime()

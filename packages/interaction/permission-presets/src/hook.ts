@@ -156,8 +156,16 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
        */
       const trustedRoots = options.trustedWriteRoots ?? []
       const touched = payload.intent.paths ?? []
+      /*
+       * **没有申报任何路径的工具**（如 `session_search`、`todo_write`）不受工作区边界约束：
+       * 边界判定的是"能不能碰某个文件"，一个不碰文件的调用没有边界可越。
+       *
+       * 没有这一条时，纯检索类工具在无工作区的会话里会被误拒——它申报了 intent
+       * （`describeAction` 给了摘要），但 `paths` 是空的，一旦走下面的
+       * "全部路径都在可信目录内"判定就必然失败。
+       */
+      if (touched.length === 0) return next()
       const allTrusted = trustedRoots.length > 0
-        && touched.length > 0
         && touched.every((p) => trustedRoots.some((root) => isInsideWorkspace(canonicalPath(root), canonicalPath(resolve(expandHomePath(p.path))))))
       if (allTrusted) {
         const writes = touched.filter((p) => p.mode === 'write')

@@ -1,0 +1,7 @@
+{
+  "name": "acme-house-rules",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Lcode plugin template: a prompt section"
+}

@@ -2,6 +2,7 @@ import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { HashRouter } from 'react-router-dom'
 import { App } from './App.tsx'
+import { ClientPluginProvider } from './store/ClientPluginProvider.tsx'
 import { syncLocaleFromMain } from './i18n/index.ts'
 import './styles/app.css'
 
@@ -49,7 +50,13 @@ installDropGuard()
 createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <HashRouter>
-      <App />
+      {/*
+       * client 插件（docs/30 §9）包在最外层：插件的动态 import 只该发生一次，
+       * 所有插槽共享同一份实例（否则插件的模块级状态会出现多份副本）。
+       */}
+      <ClientPluginProvider>
+        <App />
+      </ClientPluginProvider>
     </HashRouter>
   </React.StrictMode>,
 )

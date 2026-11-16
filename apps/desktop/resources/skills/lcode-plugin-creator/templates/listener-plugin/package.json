@@ -1,0 +1,7 @@
+{
+  "name": "acme-session-logger",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Lcode plugin template: an event listener with a disposer"
+}

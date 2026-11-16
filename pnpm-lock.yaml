@@ -424,6 +424,9 @@ importers:
       '@lcode/tool-lsp':
         specifier: workspace:*
         version: link:../../lsp/tool-lsp
+      '@lcode/tool-session-query':
+        specifier: workspace:*
+        version: link:../../session-query/tool-session-query
       '@lcode/tool-shell':
         specifier: workspace:*
         version: link:../../shell/tool-shell
@@ -1467,6 +1470,12 @@ importers:
       '@types/better-sqlite3':
         specifier: ^9.6.0
         version: 9.6.0
+
+  packages/session-query/tool-session-query:
+    dependencies:
+      '@lcode/tools':
+        specifier: workspace:*
+        version: link:../../core/tools
 
   packages/settings/settings:
     dependencies:

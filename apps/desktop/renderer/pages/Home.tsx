@@ -5,6 +5,9 @@ import { ComposerBar, type ComposerSendInput } from '../components/ComposerBar.t
 import { toast } from '../components/toast.ts'
 import { t } from '../i18n/index.ts'
 import { notifySessionChanged, sessionBridge } from '../store/sessionBridge.ts'
+import type { AgentPresetId } from '../store/agentPresetSync.ts'
+import { agentPresetLabel, chooseAgentPreset, listAgentPresets, type AgentPresetOption } from '../store/agentPresetSync.ts'
+import { PopMenu } from '../components/PopMenu.tsx'
 
 /**
  * P1 首页（文档 19 §3.1，布局对齐 Codex）。
@@ -58,6 +61,9 @@ export function HomePage() {
    * 勾上之后模型可以派发 worker，但它自己**没有执行工具**（不能改文件、不能跑命令）。
    */
   const [asRouter, setAsRouter] = useState(false)
+  /** 新会话的 Agent 模式：standard（默认）或 creator（多一个 run_code） */
+  const [agentPreset, setAgentPreset] = useState<AgentPresetId>('standard')
+  const [agentPresets, setAgentPresets] = useState<readonly AgentPresetOption[]>([])
   /**
    * 勾选编排会话时，输入区显示的应该是 **Router 自己的模型**（设置里那一栏），
    * 而不是"新对话默认模型"——后者只有 worker 用。不显示的话，用户在勾选后
@@ -109,6 +115,19 @@ export function HomePage() {
       .catch(() => setProjects([]))
   }, [])
 
+  /* 可选模式清单（设置页里标记为"可选"的那些） */
+  useEffect(() => {
+    let alive = true
+    void listAgentPresets().then((result) => {
+      if (!alive) return
+      setAgentPresets(result.presets.filter((item) => item.available))
+      if (result.current?.preset !== undefined) setAgentPreset(result.current.preset)
+    })
+    return () => {
+      alive = false
+    }
+  }, [])
+
   /* 点击「选择项目」弹窗外部、或按 Esc 时收起（与 AppShell 菜单栏同一套交互） */
   useEffect(() => {
     const close = (e: MouseEvent) => {
@@ -158,6 +177,8 @@ export function HomePage() {
         ...(proj === null ? {} : { cwd: proj.path }),
         title,
         ...(asRouter ? { role: 'router' } : {}),
+        // Agent 模式在创建时确定：creator 多一个 run_code，用来写脚本 / 造插件（docs/30 §6）
+        ...(agentPreset === 'standard' ? {} : { preset: agentPreset }),
       })
       // 首句**在这里就发出去**：用户已经表达完了意图，没必要进去再发一次
       await api.agent.send({
@@ -243,7 +264,14 @@ export function HomePage() {
         ))}
       </div>
       <div className="hinput">
-        <div className="cin">
+        {/*
+         * 项目 + 模式：**输入框外的一行**。
+         *
+         * 放在 `.cin` 里面（旧布局）会把"这次在哪个目录做/用哪套工具"和"要说什么"
+         * 混成一体，视觉上像输入框的一部分。这两件事都属于"这一轮的前提"，
+         * 独立成行更好懂，也不会把气泡边框撑成两段。
+         */}
+        <div className="hinputmeta">
           <div className="projrow">
             {proj ? (
               <span className="proj" title={proj.path}>
@@ -306,6 +334,49 @@ export function HomePage() {
               </span>
             )}
           </div>
+          {/*
+           * Agent 模式：与项目选择同一行、同在输入框外，用下拉呈现。
+           *
+           * 用下拉而不是并排 chip：模式将来可能不止两个（DSH 就有四个），
+           * 平铺会把这一行撑成一排按钮，和"选择项目"抢注意力。
+           */}
+          {agentPresets.length > 1 ? (
+            <PopMenu
+              buttonClass="proj pick"
+              trigger={
+                <>
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M8 1.8l1.6 3.9 4.2.35-3.2 2.75.98 4.1L8 10.8l-3.58 2.1.98-4.1L2.2 6.05l4.2-.35L8 1.8z"
+                      stroke="currentColor"
+                      strokeWidth="1.2"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  {agentPresetLabel(agentPreset)}
+                  <span className="pm-chev" aria-hidden="true">▾</span>
+                </>
+              }
+              title="Agent 模式"
+              header="用哪套工具干活"
+              width={280}
+              items={agentPresets.map((item) => ({
+                id: item.id,
+                label: item.name,
+                hint: item.description,
+                checked: item.id === agentPreset,
+              }))}
+              onSelect={(id) => {
+                const next = id as AgentPresetId
+                if (next === agentPreset) return
+                setAgentPreset(next)
+                // 记住选择：下次新建会话按这个默认走（与设置页那个值同源）
+                void chooseAgentPreset(next).catch(() => undefined)
+              }}
+            />
+          ) : null}
+        </div>
+        <div className="cin">
           <ComposerBar
             value={text}
             onChange={setText}

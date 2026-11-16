@@ -1,0 +1,7 @@
+{
+  "name": "acme-hello-tool",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal Lcode plugin template: one tool"
+}

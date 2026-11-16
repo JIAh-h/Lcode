@@ -377,7 +377,14 @@ describe('A. 装配的接线正确性', () => {
       expect.objectContaining({ id: 'web-provider', requires: ['tools'], provides: ['web'] }),
       expect.objectContaining({ id: 'lsp-provider', requires: ['tools', 'subprocess', 'sandbox'], provides: ['lsp'] }),
     ]))
-    expect(rt.ctx.get('tools').schemas().map((tool) => tool.name)).toEqual(expect.arrayContaining(['web_fetch', 'web_search', 'lsp_query', 'run_code']))
+    const names = rt.ctx.get('tools').schemas().map((tool) => tool.name)
+    expect(names).toEqual(expect.arrayContaining(['web_fetch', 'web_search', 'lsp_query']))
+    /*
+     * `run_code` 在**注册表**里始终存在——模式是会话级的，注册是进程级的，
+     * 两者不是一条路径。它是否被模型看到由 `systemPrompt.tools()` 的过滤链决定
+     * （见 docs/30 §6 与 `registerSessionPresets`）。
+     */
+    expect(names).toContain('run_code')
   })
 
   it('引擎与 sessions 共用同一条日志：引擎写的事件 sessions 读得到', async () => {
@@ -693,6 +700,7 @@ describe('A. 装配的接线正确性', () => {
       'report_to_router',
       'request_plan_change',
       'run_code',
+      'session_search',
       'shell',
       'skill_list',
       'skill_load',

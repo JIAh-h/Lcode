@@ -1,0 +1,13 @@
+{
+  "$schema": "https://lcode.dev/schemas/plugin/v1.json",
+  "id": "acme.session-logger",
+  "name": "Session Logger",
+  "version": "0.1.0",
+  "engines": { "lcode": "^0.1.0" },
+  "entry": "src/index.js",
+  "activation": {
+    "events": ["session/end"]
+  },
+  "permissions": {},
+  "contributes": {}
+}

@@ -15,6 +15,8 @@ import { RecoveryPage } from './pages/Recovery.tsx'
 import { ForkPage } from './pages/Fork.tsx'
 import { ErrorPage } from './pages/Error.tsx'
 import { AskApprovalPage } from './pages/AskApproval.tsx'
+import { PluginSlot } from './store/clientPlugins.tsx'
+import { useClientPlugins } from './store/ClientPluginProvider.tsx'
 
 /**
  * 路由配置（文档 19：P1–P8 八屏映射）。
@@ -25,6 +27,7 @@ import { AskApprovalPage } from './pages/AskApproval.tsx'
  */
 export function App() {
   const { pathname } = useLocation()
+  const clientPlugins = useClientPlugins()
   /* 界面语言：在此订阅一次即可——语言变化会重渲染整棵子树（本仓库无 memo），
      各组件直接调 `t()` 就能拿到最新文案，不必各自加 hook（见 renderer/i18n）。 */
   useLocale()
@@ -36,6 +39,12 @@ export function App() {
   }, [])
   return (
     <AppShell>
+      {/*
+       * 主题插槽（docs/30 §9）挂在**所有页面之前**：它不产出可见节点，
+       * 只应用 CSS 变量与背景图。放在这里而不是某个页面里，
+       * 才能保证切页时皮肤不闪回默认色。
+       */}
+      <PluginSlot plugins={clientPlugins} slot="theme" />
       <ErrorBoundary resetKey={pathname}>
         <Routes>
           <Route path="/" element={<HomePage />} />

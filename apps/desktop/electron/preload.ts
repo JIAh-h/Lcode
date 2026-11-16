@@ -213,6 +213,15 @@ const api = {
     readUser: (): Promise<unknown> => ipcRenderer.invoke('lcode:memory.readUser'),
     writeUser: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:memory.writeUser', input),
   },
+  /**
+   * 渲染层插件（docs/30 §9）：已启用插件声明的 client 入口源码。
+   *
+   * 返回**源码字符串**而不是路径：渲染进程在 dev 走 http、生产走 file://，
+   * 而插件文件在 `~/.lcode/plugins/` 下，两种协议下直接 import 那个绝对路径都不行。
+   */
+  clientPlugins: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.clientBundles'),
+  /** 渲染层加载结果回传（只为可观测性：渲染进程的 console 不总会转发到终端） */
+  clientPluginsReport: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.clientReport', input),
   /** 输入框状态栏 / 右侧变更面板：工作区 Git 信息、状态与分支切换 */
   workspace: {
     gitInfo: (path: string): Promise<unknown> => ipcRenderer.invoke('lcode:workspace.gitInfo', path),

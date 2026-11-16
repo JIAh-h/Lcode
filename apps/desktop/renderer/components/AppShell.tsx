@@ -6,6 +6,8 @@ import { toast } from './toast.ts'
 import { PopMenu } from './PopMenu.tsx'
 import { PanelSplitter, useResizablePanel } from './PanelSplitter.tsx'
 import { SessionActionsMenu } from './SessionActionsMenu.tsx'
+import { PluginSlot } from '../store/clientPlugins.tsx'
+import { useClientPlugins } from '../store/ClientPluginProvider.tsx'
 import { sessionBridge } from '../store/sessionBridge.ts'
 import { syncWindowOverlayTheme } from '../store/overlayTheme.ts'
 import type { SessionMeta } from '../store/sessionBridge.ts'
@@ -72,6 +74,7 @@ const keyLabel = (key: string, shift = false): string =>
 export function AppShell({ children }: { children: ReactNode }) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
+  const clientPlugins = useClientPlugins()
   const [open, setOpen] = useState<string | null>(null)
   const [sessions, setSessions] = useState<readonly SessionMeta[]>([])
   const [nextCursor, setNextCursor] = useState<string | undefined>(undefined)
@@ -703,6 +706,8 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </button>
               )}
             </div>
+            {/* client 插件插槽（docs/30 §9）：侧边栏底部的小面板 */}
+            <PluginSlot plugins={clientPlugins} slot="sidebar.bottom" />
             <div className="acct">
               <div className="av">J</div>
               <div>

@@ -41,6 +41,55 @@ describe("parsePluginManifest", () => {
     });
   });
 
+  /* ── client 贡献（docs/30 §9）：渲染层插件 ── */
+
+  it("解析 client 贡献：入口 + 插槽", () => {
+    const manifest = parsePluginManifest({
+      ...base,
+      contributes: {
+        client: { entry: "./src/client.js", slots: ["theme", "sidebar.bottom"] },
+      },
+    });
+    expect(manifest.contributes.client).toEqual({
+      entry: "./src/client.js",
+      slots: ["theme", "sidebar.bottom"],
+    });
+  });
+
+  it("接受纯 client 插件（host 侧 entry 仍在，但可只放空 activate）", () => {
+    const manifest = parsePluginManifest({
+      ...base,
+      contributes: { client: { entry: "./client.js", slots: ["settings.section"] } },
+    });
+    expect(manifest.contributes.client?.slots).toEqual(["settings.section"]);
+    expect(manifest.contributes.tools).toBeUndefined();
+  });
+
+  it("client 插槽去重且保持声明顺序", () => {
+    const manifest = parsePluginManifest({
+      ...base,
+      contributes: {
+        client: { entry: "./c.js", slots: ["theme", "theme", "conversation.top"] },
+      },
+    });
+    expect(manifest.contributes.client?.slots).toEqual(["theme", "conversation.top"]);
+  });
+
+  it.each([
+    // client 入口必须是包内相对路径，与 host entry 同口径
+    { entry: "../outside.js", slots: ["theme"] },
+    { entry: "client.js", slots: ["theme"] },   // 缺 ./
+    { entry: "C:/abs.js", slots: ["theme"] },
+    { entry: "./c.ts", slots: ["theme"] },      // 必须 js
+    // 插槽必须来自枚举
+    { entry: "./c.js", slots: ["unknown.slot"] },
+    { entry: "./c.js", slots: [] },
+  ])("拒绝非法 client 声明：%j", (client) => {
+    expect(caught(() => parsePluginManifest({ ...base, contributes: { client } }))).toMatchObject({
+      code: ERROR_CODES.EX_MANIFEST_INVALID,
+    });
+  });
+
   it.each([
     [{ ...base, $schema: "https://lcode.dev/schema/plugin-999.json" }],
     [{ ...base, id: "Line Tools" }],

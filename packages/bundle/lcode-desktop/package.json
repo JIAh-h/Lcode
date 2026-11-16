@@ -27,6 +27,7 @@
     "@lcode/context-budget": "workspace:*",
     "@lcode/context-local": "workspace:*",
     "@lcode/memory-local": "workspace:*",
+    "@lcode/tool-session-query": "workspace:*",
     "@lcode/credentials": "workspace:*",
     "@lcode/credentials-local": "workspace:*",
     "@lcode/fs": "workspace:^",

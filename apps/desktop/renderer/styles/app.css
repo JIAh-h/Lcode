@@ -218,7 +218,14 @@ body.resizing { cursor: col-resize; user-select: none; }
 .proj .projx:hover { background: var(--border-subtle); color: var(--text-primary); }
 
 /* ── 首页「选择项目」（Codex 式：输入框左上角入口 + 下拉） ── */
-.projrow { display: flex; margin-bottom: var(--s3); }
+/*
+ * 输入框**上方**的元信息行：项目 + 模式。
+ *
+ * 这两件事都是"开始对话前要先定的前提"，与"要说什么"不同，所以放在 `.cin` 外面。
+ * 左对齐、彼此留间距，右侧留白——不铺满整行，避免看起来像又一个输入框。
+ */
+.hinputmeta { display: flex; align-items: center; gap: var(--s4); margin-bottom: var(--s3); padding: 0 var(--s1); flex-wrap: wrap; }
+.projrow { display: flex; align-items: center; }
 .pickwrap { position: relative; display: inline-block; text-align: left; }
 .proj.pick { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border-subtle); background: var(--bg-canvas); cursor: pointer; padding: 5px 12px; }
 .proj.pick:hover { border-color: var(--border-strong); color: var(--text-primary); }

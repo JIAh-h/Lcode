@@ -1606,6 +1606,113 @@ function publicPlugins(rt: AgentRuntime) {
 
 ipcMain.handle('lcode:plugins.list', async () => publicPlugins(await agentRuntime()));
 ipcMain.handle('lcode:plugins.inspect', async () => (await agentRuntime()).plugins.inspect());
+
+/**
+ * 渲染层加载 client 插件的结果回传（只为可观测性）。
+ *
+ * 渲染进程的 `console.warn` 在打包后不会进 dev 终端，排查"插件到底加载了没"
+ * 时看不到任何线索。让它们把结果发一份过来，主进程的 stderr 一定可见。
+ */
+ipcMain.handle('lcode:plugins.clientReport', (_event, input: unknown) => {
+  const record = (input ?? {}) as { loaded?: unknown; slots?: unknown };
+  const loaded = Array.isArray(record.loaded) ? record.loaded : [];
+  if (loaded.length === 0) {
+    console.warn('[lcode] 渲染层没有加载任何 client 插件');
+    return { ok: true };
+  }
+  console.info(`[lcode] 渲染层已加载 ${loaded.length} 个 client 插件：${loaded.map(String).join(', ')}`);
+  return { ok: true };
+});
+
+/**
+ * 渲染层插件（docs/30 §9）：把已启用插件的 client 入口**源码**交给渲染层。
+ *
+ * ## 为什么不给路径、让渲染层自己 import
+ *
+ * 渲染进程在开发态是 `http://localhost:5173`、生产态是 `file://`，两种协议的
+ * 跨源规则不同；插件的 client 入口在 `~/.lcode/plugins/<id>/` 下，直接 `import()`
+ * 一个本机绝对路径在 `file://` 下会被拦，在 http 下更不可能。所以统一走：
+ * 主进程读源码 → IPC 传给渲染层 → 渲染层用 Blob URL 动态 import。
+ *
+ * 这样路径与协议差异全部消化在主进程，渲染层只负责执行字节。
+ *
+ * ## 安全边界
+ *
+ * - 只回**已启用且状态为 active** 的插件；
+ * - 只读 manifest 里声明的 `contributes.client.entry`，不接受任意路径；
+ * - 源码大小设上限（4 MB）：一个 client 插件不该有几 MB 的 JS，
+ *   超了多半是打错了入口（比如指到了 node_modules 的 bundle）。
+ */
+const CLIENT_BUNDLE_MAX_BYTES = 4 * 1024 * 1024;
+
+/**
+ * 读取插件的用户配置（`config.json` 放在插件目录下）。
+ *
+ * 这是**当前最小的配置通道**：插件注册表还没有 config 存储（`plugins` 表
+ * 只记 manifest 与权限）。用一个约定文件名而不是引入一套存储，理由是
+ * 配置本来就是插件自己的数据，放它自己目录下最直白、也便于用户手改。
+ *
+ * 读不到或解析失败都返回空对象：配置缺失不该让插件整个不可用。
+ */
+function readPluginConfig(installPath: string): Record<string, unknown> {
+  try {
+    const file = join(installPath, 'config.json');
+    if (!existsSync(file)) return {};
+    const value = JSON.parse(readFileSync(file, 'utf8')) as unknown;
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  } catch (error) {
+    console.warn(`[lcode] 插件配置读取失败（${installPath}）：${String(error)}`);
+    return {};
+  }
+}
+ipcMain.handle('lcode:plugins.clientBundles', async () => {
+  const rt = await agentRuntime();
+  const bundles: {
+    id: string;
+    name: string;
+    version: string;
+    slots: readonly string[];
+    source: string;
+    config?: unknown;
+  }[] = [];
+  for (const entry of rt.plugins.list()) {
+    const client = entry.contributes.client;
+    /*
+     * 只排除**被用户停用**的插件；`installed` 仍然放行。
+     *
+     * 理由：`state` 反映的是 **host 那半**的激活结果，而 client 那半在渲染层跑，
+     * 两者互不依赖。要求 host 先激活成功才给 UI，会让"host 起不来但界面能用"
+     * 的插件整个失效——host 侧现在还有既有的沙箱问题（AppContainer 下
+     * electron 子进程无法启动），把两者绑一起等于 client 插件永远用不了。
+     */
+    if (client === undefined) continue;
+    // 与 host 侧同一条路径拼接规则；manifest 已保证 entry 是包内 ./ 相对路径
+    const file = join(entry.installPath, client.entry);
+    try {
+      const info = statSync(file);
+      if (!info.isFile() || info.size > CLIENT_BUNDLE_MAX_BYTES) {
+        console.warn(`[lcode] 跳过 ${entry.id} 的 client 入口（不是文件或超过 ${CLIENT_BUNDLE_MAX_BYTES} 字节）：${file}`);
+        continue;
+      }
+      bundles.push({
+        id: entry.id,
+        // PluginInfo 不带 name（那是 manifest 的展示字段）；用 id 足够区分，界面也能认出来
+        name: entry.id,
+        version: entry.version,
+        slots: client.slots,
+        source: readFileSync(file, 'utf8'),
+        // client 插件读 `globalThis.__lcodePluginConfig`；没配过就是空对象
+        config: readPluginConfig(entry.installPath),
+      });
+    } catch (error) {
+      // 入口缺失/读不了：跳过这个插件的 UI 部分，不影响它的 host 能力
+      console.warn(`[lcode] 读取 ${entry.id} 的 client 入口失败：${String(error)}`);
+    }
+  }
+  return bundles;
+});
 ipcMain.handle('lcode:runtime.composition', async () => (await agentRuntime()).composition);
 /** 沙箱状态：机制、降级原因与三项边界（设置页只读展示）。 */
 ipcMain.handle('lcode:sandbox.status', async () => (await agentRuntime()).ctx.get('sandbox').status());
@@ -1755,6 +1862,30 @@ ipcMain.handle(
      * 普通会话，却以为自己在用 Router。
      */
     const role = record["role"];
+    /*
+     * 会话级 Agent 预设（docs/30 §6）。
+     *
+     * 语义分工：
+     * - 设置页的「Agent 预设」= **新会话默认值**（可随时改，影响之后新建的会话）
+     * - 本会话的预设 = 创建时确定的**不可变**取值（模式决定工具集）
+     *
+     * 所以这里**不写全局设置**——那会把"这次的选择"变成"以后所有会话的默认"，
+     * 用户只是给这一个会话选了模式，没打算改默认。
+     */
+    const preset = record["preset"];
+    const explicitPreset = preset === "creator" || preset === "standard" ? preset : undefined;
+    const defaultPreset = (() => {
+      try {
+        return rt.ctx.get("agentPreset").get();
+      } catch {
+        return "standard" as const;
+      }
+    })();
+    rt.ctx.get("sessionPreset").setPreset(
+      result.session_id,
+      explicitPreset ?? defaultPreset,
+      explicitPreset === undefined ? "default" : "user",
+    );
     if (role === "router") {
       rt.sessionRoles.setRole(result.session_id, "router", "用户在新建时选择");
       /*
