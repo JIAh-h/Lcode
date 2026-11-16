@@ -1928,10 +1928,52 @@ ipcMain.handle(
   },
 );
 
+/**
+ * 记忆（docs/28）：读取当前生效的记忆、编辑用户记忆。
+ *
+ * 展示层要能回答"模型到底记住了什么"，所以 `read` 返回的是**真正会注入的文本**
+ * （已按行/字符上限裁剪），而不是原文——否则界面显示的内容与实际注入不一致，
+ * 用户会以为自己写的东西生效了，其实被截断了。
+ */
+ipcMain.handle("lcode:memory.read", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const rt = await agentRuntime();
+  const workspace = typeof record["workspace"] === "string" ? record["workspace"] : undefined;
+  return rt.ctx.get("memory").read({ home: rt.services.home, workspaceRoot: workspace });
+});
+
+ipcMain.handle("lcode:memory.readUser", async () => {
+  const rt = await agentRuntime();
+  return rt.ctx.get("memory").readUser({ home: rt.services.home });
+});
+
+ipcMain.handle("lcode:memory.writeUser", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const text = record["text"];
+  if (typeof text !== "string") throw new Error("text 必填");
+  const rt = await agentRuntime();
+  const result = rt.ctx.get("memory").writeUser({ home: rt.services.home, text });
+  // 记忆进系统提示词：写完后前缀会变，通知界面刷新（下次请求自然拿新内容）
+  pushToRenderer("lcode:session.changed", {});
+  return result;
+});
+
 /** 回收站：永久归档后的文件（只读列表；可整体清空） */
 ipcMain.handle("lcode:session.trash", async () =>
   (await agentRuntime()).sessions.listTrash(),
 );
+
+/**
+ * 各目录真实占用（设置页「记忆」分区用它显示会话日志体积）。
+ *
+ * 归档/永久归档、缓存与回收站清理已经各有归属：
+ * 会话菜单负责归档，`lcode:session.emptyTrash` 负责清空回收站。
+ * 这里只读取用量，不重复提供清理入口。
+ */
+ipcMain.handle("lcode:storage.usage", async () => {
+  const rt = await agentRuntime();
+  return rt.sessions.storageUsage();
+});
 
 ipcMain.handle("lcode:session.emptyTrash", async () => {
   const rt = await agentRuntime();

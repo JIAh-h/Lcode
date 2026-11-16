@@ -119,6 +119,8 @@ const api = {
     purge: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.purge', input),
     trash: (): Promise<unknown> => ipcRenderer.invoke('lcode:session.trash'),
     emptyTrash: (): Promise<unknown> => ipcRenderer.invoke('lcode:session.emptyTrash'),
+    /** 各目录的真实占用（设置页「记忆」分区） */
+    storageUsage: (): Promise<unknown> => ipcRenderer.invoke('lcode:storage.usage'),
     export: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.export', input),
     import: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.import', input),
     fork: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.fork', input),
@@ -199,6 +201,17 @@ const api = {
   workspaceTrust: {
     list: (): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.list'),
     set: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:workspace-trust.set', input),
+  },
+  /**
+   * 记忆（docs/28）：用户偏好 + 项目约定。
+   *
+   * `read` 返回的是**真正会注入系统提示词的文本**（已按 200 行 / 25KB 裁剪），
+   * 不是磁盘原文——界面要能回答"模型到底记住了什么"。
+   */
+  memory: {
+    read: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:memory.read', input),
+    readUser: (): Promise<unknown> => ipcRenderer.invoke('lcode:memory.readUser'),
+    writeUser: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:memory.writeUser', input),
   },
   /** 输入框状态栏 / 右侧变更面板：工作区 Git 信息、状态与分支切换 */
   workspace: {

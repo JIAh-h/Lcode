@@ -1,6 +1,7 @@
 import { canonicalPath, isInsideWorkspace } from '@lcode/fs'
 import type { ApprovalBasis, ApprovalPathImpact, Impact } from '@lcode/session'
 import type { SandboxMode } from '@lcode/sandbox'
+import { expandHomePath } from '@lcode/util'
 import { resolve } from 'node:path'
 import { knobsOf } from './permission-presets.ts'
 import type { PermissionPreset } from './permission-presets.ts'
@@ -70,6 +71,18 @@ export interface PolicyContext {
   readonly seenDomains?: ReadonlySet<string> | undefined
   /** 这是子代理发起的调用吗（子代理**不能直接问人**，12 §5.6） */
   readonly delegated?: boolean | undefined
+  /**
+   * **应用自己管理的可信目录**：写这些路径视为"工作区内"，不触发越界审批。
+   *
+   * 目前只有 `~/.lcode/memory/`（docs/28）。理由：它是 Lcode 自己的数据目录，
+   * 与 `~/.lcode/sessions/` 同级，内容生命周期由应用管理；而"记住用户偏好"
+   * 若每次都弹审批，用户会开始无脑点允许——那比不问更危险
+   * （12 §6「默认宽松、越界严格」是为了减少**无意义**的打断，不是增加）。
+   *
+   * 只放开**写**，且用与 `isInsideWorkspace` 同一套精确前缀判定；
+   * 不做模糊匹配，否则 `~/.lcode/memory-evil/` 就能绕过。
+   */
+  readonly trustedWriteRoots?: readonly string[] | undefined
 }
 
 /** 疑似凭据的路径（12 §9.3 ④） */
@@ -132,8 +145,21 @@ export function evaluate(intent: ActionIntent, ctx: PolicyContext): Verdict {
   // ① 写工作区**之外**的路径（12 §9.3 ①）
   const pathImpacts: ApprovalPathImpact[] = []
   for (const p of intent.paths ?? []) {
-    const abs = canonicalPath(resolve(workspaceRoot, p.path))
-    pathImpacts.push({ path: abs, mode: p.mode, outsideWorkspace: !isInsideWorkspace(workspaceRoot, abs) })
+    // `~` 展开必须与工具层同口径，否则策略层与执行层对同一条路径判定不一致
+    const abs = canonicalPath(resolve(workspaceRoot, expandHomePath(p.path)))
+    /*
+     * 应用自己管理的可信目录（目前只有 `~/.lcode/memory/`）：写它不算越界。
+     *
+     * 只对 **write** 生效；读仍然照常判定（可信目录里也不该有凭据，
+     * 但读的边界不应该因为"写放开"而顺带放开）。
+     */
+    const inTrustedWriteRoot = p.mode === 'write'
+      && (ctx.trustedWriteRoots ?? []).some((root) => isInsideWorkspace(canonicalPath(root), abs))
+    pathImpacts.push({
+      path: abs,
+      mode: p.mode,
+      outsideWorkspace: !inTrustedWriteRoot && !isInsideWorkspace(workspaceRoot, abs),
+    })
   }
   const outsideWrites = pathImpacts.filter((p) => p.mode === 'write' && p.outsideWorkspace)
   if (outsideWrites.length > 0) {

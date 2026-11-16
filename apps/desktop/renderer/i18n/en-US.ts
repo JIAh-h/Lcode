@@ -918,18 +918,45 @@ export const EN: Readonly<Record<string, string>> = {
   '打开不受信任的文件夹时，Lcode 会以只读模式启动，明确确认后才会获得写权限。':
     'Untrusted folders open in read-only mode; write access requires explicit confirmation.',
 
-  /* ── 设置：历史与保留 ── */
-  '历史与保留': 'History & retention',
-  '会话记录与回放数据都保存在本机，可随时清理。':
-    'Chats and replay data are stored locally and can be cleaned up anytime.',
-  保留策略: 'Retention',
-  会话记录: 'Chats',
-  永久保留: 'Keep forever',
-  '保留 1 年': 'Keep 1 year',
-  '保留 90 天': 'Keep 90 days',
-  '保留 30 天': 'Keep 30 days',
-  回放快照: 'Replay snapshots',
-  跟随会话: 'Follow the chat',
+  /* ── 设置：记忆 ── */
+  记忆: 'Memory',
+  用户记忆: 'User memory',
+  项目记忆: 'Project memory',
+  未设置: 'Not set',
+  '{n} 字 · {lines} 行': '{n} chars · {lines} lines',
+  '跟着你走，换项目也在：个人偏好、常用约定。保存在 ~/.lcode/memory/USER.md。':
+    'Follows you across projects: personal preferences and conventions. Stored in ~/.lcode/memory/USER.md.',
+  '例如：\n- 回答用中文，代码注释用英文\n- 提交信息用约定式提交':
+    'For example:\n- Answer in Chinese, code comments in English\n- Use conventional commits',
+  '用户记忆已保存，下次请求生效':
+    'User memory saved — it takes effect on the next request.',
+  '还没有用户记忆。': 'No user memory yet.',
+  '已注入系统提示词（{n} 字）': 'Injected into the system prompt ({n} chars)',
+  添加: 'Add',
+  '跟着仓库走，团队共享：工作区里的 AGENTS.md、CLAUDE.md 或 .lcode/instructions.md，内容会随会话自动注入。':
+    'Follows the repository and is shared with the team: AGENTS.md, CLAUDE.md or .lcode/instructions.md in the workspace are injected automatically.',
+  '当前没有项目记忆文件。': 'No project memory files in the current workspace.',
+  '模型在当前会话里能看到什么，以及你能怎么控制它。':
+    'What the model can see in the current session, and how you control it.',
+  记忆分层: 'Memory layers',
+  工作记忆: 'Working memory',
+  '长程记忆': 'Long-term memory',
+  '每一轮的输入、工具调用与结果都按序写进事件日志；模型看到的内容由日志派生，不存在第二份副本。':
+    'Each turn’s input, tool calls and results are appended to the event log in order; what the model sees is derived from that log — there is no second copy.',
+  '上下文接近窗口上限（90%）时自动压缩较早历史：先剪枝超长结果，再外置大结果，最后才用模型摘要重写。摘要也是事件，可撤销，原文永久保留。':
+    'When context nears 90% of the window, older history is compacted: prune oversized results, externalize large ones, then summarize with the model. The summary is also an event, reversible, and the originals are kept forever.',
+  '你能控制什么': 'What you control',
+  固定某一轮: 'Pin a turn',
+  压缩时不丢弃: 'Never dropped by compaction',
+  屏蔽某一轮: 'Mute a turn',
+  移出模型上下文: 'Removed from model context',
+  回退检查点: 'Rewind to checkpoint',
+  '连同工作区文件一起恢复': 'Restores workspace files too',
+  '这三个操作都在会话流里：把鼠标移到某一轮上即可看到按钮。':
+    'All three live in the session stream — hover a turn to see the buttons.',
+  '需要时可在「归档与回收站」里恢复；也可以用「分支出新会话」把某一轮之后的内容复制成新会话。':
+    'Restore them from “Archive & trash”; or fork a new session from any turn to copy what follows it.',
+  跨会话: 'Across sessions',
   '保留 7 天': 'Keep 7 days',
   空间占用: 'Disk usage',
   模型响应缓存: 'Model response cache',

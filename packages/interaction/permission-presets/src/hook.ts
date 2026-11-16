@@ -1,13 +1,13 @@
 import type { Context } from '@lcode/context'
 import type { ApprovalService } from '@lcode/approval'
-import { canonicalPath } from '@lcode/fs'
+import { canonicalPath, isInsideWorkspace } from '@lcode/fs'
 import type { FsMutationAuthority } from '@lcode/fs'
 import type { Impact, SessionService } from '@lcode/session'
 import '@lcode/sandbox'
 import type { SandboxService, SandboxStatus } from '@lcode/sandbox'
 import type { ToolActionIntent, ToolCall } from '@lcode/tools'
 import { withSandboxPolicy, withWebNetworkPolicy } from '@lcode/tools'
-import { ERROR_CODES } from '@lcode/util'
+import { ERROR_CODES, expandHomePath } from '@lcode/util'
 import { evaluate } from './policy.ts'
 import { knobsOf } from './permission-presets.ts'
 import type { PermissionPreset, PermissionPresetService } from './permission-presets.ts'
@@ -80,6 +80,13 @@ export interface PolicyHookOptions {
   /** 未明确可信的工作区只允许读取；此服务的持久化不属于工作区。 */
   readonly workspaceTrust?: WorkspaceTrustService | undefined
   /**
+   * 应用自己管理的可信写目录（docs/28）：写这些路径不触发越界审批。
+   *
+   * 目前由装配层注入 `~/.lcode/memory/`——它是应用自己的数据目录，
+   * "记住用户偏好"每次都弹审批只会训练用户无脑点允许。
+   */
+  readonly trustedWriteRoots?: readonly string[] | undefined
+  /**
    * 当前 OS 沙箱 Provider。它是可选依赖，便于纯策略测试；桌面运行时必须注入。
    * Provider 报告降级时，策略层决定审批或拒绝，不能继续把裸执行当作受保护执行。
    */
@@ -132,6 +139,38 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
 
     const workspaceRoot = workspaceOf(sessionId)
     if (workspaceRoot === undefined) {
+      /*
+       * 没有工作区 → 无法判定"工作区边界"，但**不能一刀切拒绝所有路径操作**。
+       *
+       * 应用自己管理的可信目录（`~/.lcode/memory/`，docs/28）不依赖工作区：
+       * 用户偏好跟着人走，在「最近任务」这种未选工作区的会话里也要能读写。
+       *
+       * 判定规则：
+       * - **全部路径都在可信目录内** → 放行（写操作还要签发一次性许可，否则
+       *   fs 执行层的 `consume` 会照样 ET-DENIED）；
+       * - **任何一条落在可信目录之外** → 仍按最保守方式拒绝。
+       *
+       * 注意这里对 **read 与 write 都生效**：只放写、不放读的话，模型会因为
+       * "先 read 确认没记过"这一步被拒而整个放弃（实测过：连续 ET-DENIED 之后
+       * 模型转去 try shell/glob，最后告诉用户"我写不进去"）。
+       */
+      const trustedRoots = options.trustedWriteRoots ?? []
+      const touched = payload.intent.paths ?? []
+      const allTrusted = trustedRoots.length > 0
+        && touched.length > 0
+        && touched.every((p) => trustedRoots.some((root) => isInsideWorkspace(canonicalPath(root), canonicalPath(resolve(expandHomePath(p.path))))))
+      if (allTrusted) {
+        const writes = touched.filter((p) => p.mode === 'write')
+        const authority = options.mutationAuthority
+        if (authority !== undefined && writes.length > 0) {
+          /*
+           * 必须签发一次性许可：fs-local 的 `consume` 会校验 `mutationAccess`。
+           * 路径按绝对路径规范化——这里没有工作区可作基准，而可信目录本身就是绝对路径。
+           */
+          authority.grant({ sessionId, callId: payload.call.callId, paths: writes.map((p) => canonicalPath(resolve(expandHomePath(p.path)))) })
+        }
+        return next()
+      }
       payload.deny = '拿不到这个会话的工作区根，无法判定路径边界（已按最保守方式拒绝）'
       return next()
     }
@@ -246,6 +285,7 @@ export function installPolicyHook(options: PolicyHookOptions): () => void {
         workspaceRoot,
         ...(options.seenCommands === undefined ? {} : { seenCommands: options.seenCommands }),
         seenDomains,
+        ...(options.trustedWriteRoots === undefined ? {} : { trustedWriteRoots: options.trustedWriteRoots }),
       },
     )
 

@@ -334,6 +334,9 @@ importers:
       '@lcode/mcp-local':
         specifier: workspace:*
         version: link:../../extension/mcp-local
+      '@lcode/memory-local':
+        specifier: workspace:*
+        version: link:../../memory/memory-local
       '@lcode/model-api':
         specifier: workspace:*
         version: link:../../api/model-api
@@ -1304,6 +1307,15 @@ importers:
       '@lcode/tools':
         specifier: workspace:*
         version: link:../../core/tools
+      '@lcode/util':
+        specifier: workspace:*
+        version: link:../../util
+
+  packages/memory/memory-local:
+    dependencies:
+      '@lcode/context':
+        specifier: workspace:*
+        version: link:../../core/context
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util

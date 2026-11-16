@@ -69,6 +69,34 @@ export interface OpenedSession {  readonly meta: SessionMeta
   readonly last_turn_errored?: boolean
 }
 
+/** 各目录占用（字节）。字段对齐 `storage.storageUsage()`。 */
+export interface StorageUsage {
+  readonly sessions: number
+  readonly trash: number
+  readonly cache: number
+  readonly exports: number
+  readonly index: number
+  readonly total: number
+}
+
+/** 记忆文件信息（设置页「记忆」分区） */
+export interface MemoryFileInfo {
+  readonly name: string
+  readonly path: string
+  readonly chars: number
+  readonly lines: number
+  readonly updatedAt: number
+  readonly truncated: boolean
+}
+
+/** 当前生效的记忆快照；`injected` 是真正会进系统提示词的文本 */
+export interface MemorySnapshot {
+  readonly user: MemoryFileInfo | null
+  readonly project: readonly MemoryFileInfo[]
+  readonly injected: string
+  readonly injectedChars: number
+}
+
 export interface SessionBridge {
   list(input?: { readonly limit?: number; readonly cursor?: string; readonly includeDeleted?: boolean }): Promise<{
     readonly items: readonly SessionMeta[]
@@ -76,6 +104,8 @@ export interface SessionBridge {
   }>
   trash(): Promise<{ readonly items: readonly TrashEntry[]; readonly total_bytes: number }>
   emptyTrash(): Promise<unknown>
+  /** 各目录真实占用（设置页「记忆」分区）；主进程尚未就绪时可能缺省 */
+  storageUsage?(): Promise<StorageUsage>
   create(input: unknown): Promise<{ readonly session_id: string; readonly last_seq: number }>
   open(sessionId: string): Promise<OpenedSession>
   delete(input: { readonly session_id: string }): Promise<unknown>

@@ -69,6 +69,33 @@ describe('工作区内：不问（「标准」的手感）', () => {
 })
 
 describe('工作区外写：一定问（12 §9.3 ①）', () => {
+  /*
+   * 应用可信目录（docs/28）：`~/.lcode/memory/` 的**写**不触发越界审批。
+   *
+   * 理由：那是应用自己的数据目录，"记住用户偏好"每次都弹审批只会训练用户
+   * 无脑点允许。但**只放开写**，且必须是精确前缀——所以下面三条分别守住
+   * "确实免审批"、"读不连带放开"、"相似名字的目录不能绕过"。
+   */
+  it('可信写目录内的写 → 放行，不判越界', () => {
+    const memoryRoot = abs('/home/u/.lcode/memory')
+    const v = evaluate(
+      { tool: 'write', summary: '写入用户记忆', paths: [{ path: abs('/home/u/.lcode/memory/USER.md'), mode: 'write' }] },
+      { ...base, trustedWriteRoots: [memoryRoot] },
+    )
+    expect(v.kind).toBe('allow')
+  })
+
+  it('名字相似的其他目录不能借可信目录绕过', () => {
+    const memoryRoot = abs('/home/u/.lcode/memory')
+    const v = evaluate(
+      { tool: 'write', summary: '写入', paths: [{ path: abs('/home/u/.lcode/memory-evil/x.md'), mode: 'write' }] },
+      { ...base, trustedWriteRoots: [memoryRoot] },
+    )
+    expect(v.kind).toBe('ask')
+    if (v.kind !== 'ask') throw new Error('unreachable')
+    expect(v.impact.paths?.[0]).toMatchObject({ outsideWorkspace: true })
+  })
+
   it('`标准` 档 → ask，且 impact 里 outsideWorkspace=true', () => {
     const v = evaluate(outsideWrite, base)
     expect(v.kind).toBe('ask')

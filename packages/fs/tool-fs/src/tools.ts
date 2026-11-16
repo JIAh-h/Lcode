@@ -1,6 +1,7 @@
 import { normalizePath } from '@lcode/fs'
 import type { FsService } from '@lcode/fs'
 import type { ToolDefinition } from '@lcode/tools'
+import { expandHomePath } from '@lcode/util'
 import { resolve } from 'node:path'
 
 /**
@@ -51,7 +52,8 @@ export interface ToolFsDeps {
 
 /** 把一个路径按工作区解析成绝对路径（POSIX 分隔符，与接口层判定口径一致） */
 function absolute(workspaceRoot: string, p: string): string {
-  return normalizePath(resolve(workspaceRoot, p))
+  // `~` 展开与策略层共用同一个实现：两边口径不一致会导致"放行了却写不进去"
+  return normalizePath(resolve(workspaceRoot, expandHomePath(p)))
 }
 
 export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {

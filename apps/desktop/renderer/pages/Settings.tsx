@@ -17,13 +17,13 @@ import { chooseAgentPreset, listAgentPresets } from '../store/agentPresetSync.ts
 import type { AgentPresetOption, AgentPresetState } from '../store/agentPresetSync.ts'
 import { sessionBridge } from '../store/sessionBridge.ts'
 import type { SessionMeta } from '../store/sessionBridge.ts'
-import type { TrashEntry } from '../store/sessionBridge.ts'
+import type { MemorySnapshot, TrashEntry } from '../store/sessionBridge.ts'
 import type { PermissionPreset } from '../store/uiPrefs.ts' // 模型条目类型 ModelEntry 也定义在 store/uiPrefs
 
 /**
  * P5 设置（按 Codex 布局 1:1 移植 webapp 原型）：
  * 顶部「← 返回工作台」+ 搜索框；左侧面包栏（分组导航）；右侧对应分区内容。
- * 分区：个人（常规/外观/键盘快捷键/账户）· 模型 · 权限（权限预设/工作区信任）· 记忆与历史（历史与保留/导出）。
+ * 分区：个人（常规/外观/键盘快捷键/账户）· 模型 · 权限（权限预设/工作区信任）· 记忆与历史（记忆/导出/归档与回收站）。
  */
 
 /* ───────── 通用小件 ───────── */
@@ -3153,68 +3153,238 @@ function PluginSection() {
   )
 }
 
-/* ───────── 分区：历史与保留 ───────── */
+/* ───────── 分区：记忆 ───────── */
 
-function HistorySection() {
-  const [storage, setStorage] = useState([
-    { label: '会话记录', size: '128 MB' },
-    { label: '回放快照', size: '96 MB' },
-    { label: '模型响应缓存', size: '512 MB' },
-    { label: '日志', size: '24 MB' },
-  ])
-  const [keepLogs, setKeepLogs] = useState('保留 90 天')
-  const [keepSnapshots, setKeepSnapshots] = useState('跟随会话')
+/*
+ * 「记忆」说明的是**模型能看到什么**，而不是磁盘占用（后者归「归档与回收站」）。
+ *
+ * 两层记忆的归属不同，这一点必须在界面上讲清楚：
+ * - 用户记忆：`~/.lcode/memory/USER.md`，跟着人走，换项目也在
+ * - 项目记忆：工作区里的 `AGENTS.md` / `CLAUDE.md` / `.lcode/instructions.md`，跟着仓库走
+ *
+ * 展示的是**真正会注入的文本**（主进程已按 200 行 / 25KB 裁剪），
+ * 而不是原文——否则用户以为自己写的生效了，其实被截断。
+ */
+function MemorySection() {
+  const [snapshot, setSnapshot] = useState<MemorySnapshot | null>(null)
+  const [userText, setUserText] = useState('')
+  const [editing, setEditing] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [stats, setStats] = useState<{ sessions: number; bytes: number } | null>(null)
+
+  const reload = useCallback(async (): Promise<void> => {
+    const memory = memoryBridge()
+    const bridge = sessionBridge()
+    if (memory !== undefined) {
+      try {
+        // 工作区取当前会话的？设置页没有会话上下文，这里读 HOME 级视角：
+        // 项目记忆由各会话所属工作区决定，页面上展示最近使用的工作区即可
+        const [snap, text] = await Promise.all([memory.read({}), memory.readUser()])
+        setSnapshot(snap)
+        setUserText(text)
+      } catch {
+        setSnapshot(null)
+      }
+    }
+    if (bridge !== undefined) {
+      try {
+        const [all, usage] = await Promise.all([bridge.list({ includeDeleted: true, limit: 500 }), bridge.storageUsage?.()])
+        setStats({
+          sessions: all.items.filter((item) => item.deleted_at === null).length,
+          bytes: usage?.sessions ?? 0,
+        })
+      } catch {
+        setStats(null)
+      }
+    }
+  }, [])
+
+  useEffect(() => {
+    void reload()
+  }, [reload])
+
+  const save = (): void => {
+    const memory = memoryBridge()
+    if (memory === undefined) return
+    setBusy(true)
+    void memory
+      .writeUser({ text: userText })
+      .then(async () => {
+        toast(t('用户记忆已保存，下次请求生效'))
+        setEditing(false)
+        await reload()
+      })
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('保存失败')))
+      .finally(() => setBusy(false))
+  }
+
   return (
     <>
-      <h2>{t('历史与保留')}</h2>
-      <div className="sub">{t('会话记录与回放数据都保存在本机，可随时清理。')}</div>
+      <h2>{t('记忆')}</h2>
+      <div className="sub">{t('模型在当前会话里能看到什么，以及你能怎么控制它。')}</div>
+
       <div className="sect">
-        <div className="sh2">{t('保留策略')}</div>
-        <div className="srow">
-          <div className="sl">{t('会话记录')}</div>
-          <div className="sr">
-            <div className="field">
-              <Select
-                value={keepLogs}
-                onChange={setKeepLogs}
-                options={['永久保留', '保留 1 年', '保留 90 天', '保留 30 天']}
+        <div className="sh2">
+          {t('用户记忆')}
+          <span className="src" style={{ marginLeft: 'auto', fontSize: 11 }}>
+            {snapshot?.user === null || snapshot?.user === undefined
+              ? t('未设置')
+              : t('{n} 字 · {lines} 行', { n: snapshot.user.chars, lines: snapshot.user.lines })}
+          </span>
+        </div>
+        <div className="pickhint">
+          {t('跟着你走，换项目也在：个人偏好、常用约定。保存在 ~/.lcode/memory/USER.md。')}
+        </div>
+        {editing ? (
+          <>
+            <div className="srow">
+              <textarea
+                className="memedit mono"
+                value={userText}
+                spellCheck={false}
+                onChange={(event) => setUserText(event.target.value)}
+                placeholder={t('例如：\n- 回答用中文，代码注释用英文\n- 提交信息用约定式提交')}
               />
             </div>
-          </div>
-        </div>
-        <div className="srow">
-          <div className="sl">{t('回放快照')}</div>
-          <div className="sr">
-            <div className="field">
-              <Select
-                value={keepSnapshots}
-                onChange={setKeepSnapshots}
-                options={['跟随会话', '保留 30 天', '保留 7 天']}
-              />
+            <div className="srow">
+              <div className="sr" style={{ flexDirection: 'row', gap: 8 }}>
+                <button className="btn primary" disabled={busy} onClick={save}>
+                  {busy ? t('保存中…') : t('保存')}
+                </button>
+                <button
+                  className="btn"
+                  disabled={busy}
+                  onClick={() => {
+                    setEditing(false)
+                    // 取消编辑：丢弃改动，重新拉原文
+                    void reload()
+                  }}
+                >
+                  {t('取消')}
+                </button>
+              </div>
             </div>
+          </>
+        ) : (
+          <>
+            {/*
+             * 非编辑态**直接显示内容**，而不是只给一个"83 字"。
+             *
+             * 这一页要回答的问题是"模型到底记住了我什么"，只显示字数等于没回答；
+             * 而且要能一眼看出有没有记错、有没有重复条目。
+             */}
+            {snapshot?.user === null || snapshot?.user === undefined ? (
+              <div className="srow">
+                <div className="sl">{t('还没有用户记忆。')}</div>
+                <button className="btn" onClick={() => setEditing(true)}>
+                  {t('添加')}
+                </button>
+              </div>
+            ) : (
+              <>
+                <div className="srow">
+                  <pre className="memview mono">{userText.trim()}</pre>
+                </div>
+                <div className="srow">
+                  <div className="sr">
+                    <span className="src">{t('已注入系统提示词，下一次请求生效。')}</span>
+                  </div>
+                  <button className="btn" onClick={() => setEditing(true)}>
+                    {t('编辑')}
+                  </button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="sect">
+        <div className="sh2">{t('项目记忆')}</div>
+        <div className="pickhint">
+          {t('跟着仓库走，团队共享：工作区里的 AGENTS.md、CLAUDE.md 或 .lcode/instructions.md，内容会随会话自动注入。')}
+        </div>
+        {snapshot === null || snapshot.project.length === 0 ? (
+          <div className="srow">
+            <div className="sl">{t('当前没有项目记忆文件。')}</div>
           </div>
+        ) : (
+          <div className="scroll-rows">
+            {snapshot.project.map((file) => (
+              <div className="srow" key={file.path}>
+                <div className="sl">{file.name}</div>
+                <div className="sr">
+                  <span className="src">
+                    {t('{n} 字 · {lines} 行', { n: file.chars, lines: file.lines })}
+                    {file.truncated ? ` · ${t('已截断')}` : ''}
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <div className="sect">
+        <div className="sh2">{t('记忆分层')}</div>
+        <div className="trow">
+          <span className="tp">{t('工作记忆')}</span>
+          <span className="tm">
+            {stats === null ? t('读取中…') : t('{n} 个活跃会话 · {size}', { n: stats.sessions, size: formatBytes(stats.bytes) })}
+          </span>
+        </div>
+        <div className="pickhint">
+          {t('每一轮的输入、工具调用与结果都按序写进事件日志；模型看到的内容由日志派生，不存在第二份副本。')}
+        </div>
+        <div className="trow">
+          <span className="tp">{t('长程记忆')}</span>
+          <span className="tm">{t('压缩摘要')}</span>
+        </div>
+        <div className="pickhint">
+          {t('上下文接近窗口上限（90%）时自动压缩较早历史：先剪枝超长结果，再外置大结果，最后才用模型摘要重写。摘要也是事件，可撤销，原文永久保留。')}
         </div>
       </div>
+
       <div className="sect">
-        <div className="sh2">{t('空间占用')}</div>
-        {storage.map((s, i) => (
-          <div className="trow" key={s.label}>
-            <span className="tp">{t(s.label)}</span>
-            <span className="tm">{s.size}</span>
-            <button
-              onClick={() => {
-                setStorage(storage.map((x, ix) => (ix === i ? { ...x, size: '0 MB' } : x)))
-                toast(t('已清理「{name}」（mock）', { name: t(s.label) }))
-              }}
-            >
-              {t('清理')}
-            </button>
-          </div>
-        ))}
+        <div className="sh2">{t('你能控制什么')}</div>
+        <div className="trow">
+          <span className="tp">{t('固定某一轮')}</span>
+          <span className="tm">{t('压缩时不丢弃')}</span>
+        </div>
+        <div className="trow">
+          <span className="tp">{t('屏蔽某一轮')}</span>
+          <span className="tm">{t('移出模型上下文')}</span>
+        </div>
+        <div className="trow">
+          <span className="tp">{t('回退检查点')}</span>
+          <span className="tm">{t('连同工作区文件一起恢复')}</span>
+        </div>
+        <div className="pickhint">{t('这三个操作都在会话流里：把鼠标移到某一轮上即可看到按钮。')}</div>
       </div>
-      <SaveBar />
     </>
   )
+}
+
+function memoryBridge(): {
+  read(input: { readonly workspace?: string | undefined }): Promise<MemorySnapshot>
+  readUser(): Promise<string>
+  writeUser(input: { readonly text: string }): Promise<unknown>
+} | undefined {
+  return (globalThis as unknown as {
+    lcode?: {
+      memory?: {
+        read(input: unknown): Promise<MemorySnapshot>
+        readUser(): Promise<string>
+        writeUser(input: unknown): Promise<unknown>
+      }
+    }
+  }).lcode?.memory as
+    | {
+        read(input: { readonly workspace?: string | undefined }): Promise<MemorySnapshot>
+        readUser(): Promise<string>
+        writeUser(input: { readonly text: string }): Promise<unknown>
+      }
+    | undefined
 }
 
 /* ───────── 分区：导出 ───────── */
@@ -3391,17 +3561,20 @@ function ArchiveSection() {
             <div className="sl">{t('没有归档的工作区。')}</div>
           </div>
         ) : (
-          workspaces.map((item) => (
-            <div className="srow" key={item.key}>
-              <div className="sl">{item.name}</div>
-              <div className="sr">
-                <span className="src">{item.key}</span>
+          /* 超过 5 条即内部滚动（固定行高 44px × 5），避免长列表把整页撑得很长 */
+          <div className="scroll-rows">
+            {workspaces.map((item) => (
+              <div className="srow" key={item.key}>
+                <div className="sl">{item.name}</div>
+                <div className="sr">
+                  <span className="src">{item.key}</span>
+                </div>
+                <button className="btn" disabled={busy !== null} onClick={() => restoreWorkspace(item.key)}>
+                  {t('恢复')}
+                </button>
               </div>
-              <button className="btn" disabled={busy !== null} onClick={() => restoreWorkspace(item.key)}>
-                {t('恢复')}
-              </button>
-            </div>
-          ))
+            ))}
+          </div>
         )}
       </div>
       <div className="sect">
@@ -3425,26 +3598,28 @@ function ArchiveSection() {
             <div className="sl">{t('没有归档的会话。')}</div>
           </div>
         ) : (
-          sessions.map((item) => (
-            <div className="srow" key={item.session_id}>
-              <div className="sl">{item.title || t('未命名会话')}</div>
-              <div className="sr">
-                <span className="src">
-                  {item.workspace ?? t('未设置工作区')} · {new Date(item.updated_at).toLocaleString()}
-                </span>
+          <div className="scroll-rows">
+            {sessions.map((item) => (
+              <div className="srow" key={item.session_id}>
+                <div className="sl">{item.title || t('未命名会话')}</div>
+                <div className="sr">
+                  <span className="src">
+                    {item.workspace ?? t('未设置工作区')} · {new Date(item.updated_at).toLocaleString()}
+                  </span>
+                </div>
+                <button className="btn" disabled={busy !== null} onClick={() => restoreSession(item.session_id)}>
+                  {t('恢复')}
+                </button>
+                <button
+                  className="btn danger"
+                  disabled={busy !== null}
+                  onClick={() => setPurgeTarget({ kind: 'one', id: item.session_id, title: item.title })}
+                >
+                  {t('删除')}
+                </button>
               </div>
-              <button className="btn" disabled={busy !== null} onClick={() => restoreSession(item.session_id)}>
-                {t('恢复')}
-              </button>
-              <button
-                className="btn danger"
-                disabled={busy !== null}
-                onClick={() => setPurgeTarget({ kind: 'one', id: item.session_id, title: item.title })}
-              >
-                {t('删除')}
-              </button>
-            </div>
-          ))
+            ))}
+          </div>
         )}
       </div>
       <div className="sect">
@@ -3464,13 +3639,15 @@ function ArchiveSection() {
             <div className="sl">{t('回收站是空的。')}</div>
           </div>
         ) : (
-          trash.map((item) => (
-            <div className="srow" key={item.path}>
-              <div className="trash-label" title={item.label || t('未命名会话')}>
-                {item.label || t('未命名会话')}
+          <div className="scroll-rows">
+            {trash.map((item) => (
+              <div className="srow" key={item.path}>
+                <div className="trash-label" title={item.label || t('未命名会话')}>
+                  {item.label || t('未命名会话')}
+                </div>
               </div>
-            </div>
-          ))
+            ))}
+          </div>
         )}
       </div>
       {purgeTarget !== null && (
@@ -3526,7 +3703,7 @@ const SECTIONS: { g?: string; id?: string; label?: string }[] = [
   { id: 'trust', label: '工作区信任' },
   { id: 'network', label: '网络访问' },
   { g: '记忆与历史' },
-  { id: 'history', label: '历史与保留' },
+  { id: 'memory', label: '记忆' },
   { id: 'export', label: '导出' },
   { id: 'archive', label: '归档与回收站' },
 ]
@@ -3559,8 +3736,8 @@ function SectionBody({ id }: { id: string }) {
       return <TrustSection />
     case 'network':
       return <NetworkAccessSection />
-    case 'history':
-      return <HistorySection />
+    case 'memory':
+      return <MemorySection />
     case 'export':
       return <ExportSection />
     case 'archive':

@@ -26,6 +26,13 @@ export const EXPORTS_DIR = 'exports'
 export const CACHE_DIR = 'cache'
 /** 超大工具结果的落盘内容（22 §2.1；硬删会话时一并清除） */
 export const SPILL_DIR = 'spill'
+/**
+ * 跨项目的**用户记忆**（`<home>/memory/`）。
+ *
+ * 与 `AGENTS.md`（项目记忆，在工作区里、随仓库提交）分开：用户记忆跟着人走，
+ * 换项目也在；项目记忆跟着仓库走，团队共享。
+ */
+export const MEMORY_DIR = 'memory'
 
 function processEnv(): Record<string, string | undefined> {
   return typeof process !== 'undefined' && typeof process.env === 'object' && process.env !== null
@@ -53,6 +60,25 @@ export function normalizePath(input: string): string {
     p = stripped === '' ? '/' : /^[A-Za-z]:$/.test(stripped) ? stripped + '/' : stripped
   }
   return p
+}
+
+/**
+ * 展开路径开头的 `~`（用户主目录）。
+ *
+ * 模型会原样使用 `~/.lcode/memory/USER.md` 这类路径，而 `resolve()` 会把 `~`
+ * 当成普通目录名。策略层与工具层必须用**同一套展开**，否则两边判定的路径
+ * 不一致：策略层放行了、执行层却写到了别处（或反过来）。
+ *
+ * 只处理开头处的 `~` / `~/` / `~\`；`a/~/b` 中间的不算主目录语义。
+ */
+export function expandHomePath(input: string, env: Record<string, string | undefined> = processEnv()): string {
+  if (!input.startsWith('~')) return input
+  if (input !== '~' && !input.startsWith('~/') && !input.startsWith('~\\')) return input
+  const homeRaw = env['HOME'] ?? env['USERPROFILE']
+  if (typeof homeRaw !== 'string' || homeRaw.trim() === '') return input
+  const rest = input === '~' ? '' : input.slice(2)
+  const base = normalizePath(homeRaw.trim())
+  return rest === '' ? base : `${base}/${normalizePath(rest)}`
 }
 
 /**
@@ -123,6 +149,11 @@ export function exportsRoot(home: string): string {
 /** `<home>/cache/spill` —— 会话关联的溢出内容（硬删时一并清） */
 export function spillRoot(home: string): string {
   return normalizePath(home) + '/' + CACHE_DIR + '/' + SPILL_DIR
+}
+
+/** `<home>/memory` —— 跨项目的用户记忆（与项目记忆 AGENTS.md 分开存放） */
+export function memoryRoot(home: string): string {
+  return normalizePath(home) + '/' + MEMORY_DIR
 }
 
 /**

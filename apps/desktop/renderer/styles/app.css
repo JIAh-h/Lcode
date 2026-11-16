@@ -689,6 +689,19 @@ body.noside .side { display: none; }
 .srow .sr { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
 .srow .src { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .srow .trash-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; color: var(--text-primary); }
+/*
+ * 设置页里的长列表（归档工作区 / 归档会话 / 回收站）：超过 5 行就内部滚动。
+ *
+ * 行高按 .srow 实测算：padding 8×2 + 内容 21 ≈ 37px，带按钮的行取 44px。
+ * 用固定 max-height 而不是 max-height: 5lh ——按钮会撑高行，5lh 会截掉第五条。
+ */
+.scroll-rows { max-height: 220px; overflow-y: auto; overscroll-behavior: contain; }
+.scroll-rows .srow:first-child { border-top: none; }
+/* 用户记忆编辑器：等宽、可纵向拉伸，避免长文本挤在小框里 */
+.memedit { width: 100%; min-height: 140px; max-height: 320px; padding: 8px 10px; border: 1px solid var(--border-subtle); border-radius: var(--r2); background: var(--bg-inset); color: var(--text-primary); font-size: 12px; line-height: 18px; resize: vertical; }
+.memedit:focus { outline: none; border-color: var(--accent); }
+/* 用户记忆的只读预览：保留原文换行，超长时内部滚动 */
+.memview { width: 100%; max-height: 220px; margin: 0; padding: 8px 10px; overflow: auto; border: 1px solid var(--border-subtle); border-radius: var(--r2); background: var(--bg-inset); color: var(--text-secondary); font-size: 12px; line-height: 18px; white-space: pre-wrap; word-break: break-word; }
 .mono { font-family: var(--font-mono); }
 .src { font-size: 11.5px; color: var(--text-muted); }
 .src b { color: var(--text-secondary); font-weight: 500; }
@@ -944,11 +957,25 @@ body.noside .side { display: none; }
 .ssctxsummary summary { padding: 7px 10px; cursor: pointer; color: var(--text-muted); }
 .ssctxsummary > div, .ssctxsummary .markdown { padding: 0 10px 9px; }
 .ssimage-loading, .ssimage-missing { display: inline-flex; align-items: center; min-height: 64px; padding: 0 14px; border: 1px dashed var(--border-subtle); border-radius: 8px; color: var(--text-muted); font-size: 11.5px; }
-.ss-user.editing { align-self: stretch; max-width: 100%; }
-/* 原位编辑：与底部 composer 同一套结构/类名，只是嵌在对话流里，不再单画一套 textarea */
-.ss-edit { margin: 2px 0 4px; }
-.ss-edit .cin { width: 100%; max-width: none; margin: 0; box-shadow: var(--sh-1); }
-.ss-edit .cin textarea { min-height: 54px; }
+/*
+ * 编辑态：**必须把 width 也改回 auto**。
+ *
+ * `.ss-user` 的 `width: fit-content` 是为普通气泡（按文字收缩）设的；
+ * 编辑态里装的是 composer（textarea + 工具条），fit-content 会让它在
+ * "按 textarea 内容算"和"按工具条宽度算"之间反复权衡，表现就是输入框变形。
+ */
+.ss-user.editing { align-self: stretch; max-width: 100%; width: auto; }
+/*
+ * 原位编辑：与底部 composer 同一套结构/类名，只是嵌在对话流里。
+ *
+ * 变形的原因是宽度约束冲突：`.ss-user` 上有 `width: fit-content`（气泡按内容收缩），
+ * 而内部的 `.cin` 又要求 `width: 100%`——两者相互拉扯，`fit-content` 会按
+ * "最宽子项"反复重算，表现为输入框被压扁或拉到奇怪宽度。
+ * 编辑态显式改成块级撑满，并让 textarea 自己决定高度。
+ */
+.ss-edit { display: block; width: 100%; margin: 2px 0 4px; }
+.ss-edit .cin { display: block; width: 100%; max-width: none; margin: 0; box-shadow: var(--sh-1); }
+.ss-edit .cin textarea { display: block; width: 100%; min-height: 54px; box-sizing: border-box; }
 .ss-edit .chint { margin-top: 6px; }
 /* 一轮 = 用户消息 + 可折叠的执行过程 + 最终回复 */
 .turn { display: flex; flex-direction: column; gap: 14px; }
