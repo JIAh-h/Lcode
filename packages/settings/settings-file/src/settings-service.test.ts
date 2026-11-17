@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { closeAllIndexDbs } from '@lcode/session-persistence-sqlite'
@@ -245,5 +245,65 @@ describe('watch 与冻结接口适配', () => {
     const read = frozen.get('model.default.maxTokens')
     expect(read).toMatchObject({ value: 2048, layer: 'user', source: 'settings.json' })
     expect(frozen.get('model.nope.nope')).toBeUndefined()
+  })
+})
+
+/*
+ * 手改 settings.json 后的投影刷新（docs/30 §9.4）。
+ *
+ * 背景：settings_kv 是 settings.json 的投影，但之前只在 open() 时同步一次——
+ * 用户手改文件后读到的是旧值，且来源还标着 settings.json（实测踩过：
+ * 测试脚本恢复 JSON 后，被删除的禁用配置"复活"）。
+ * 修复后 ensureOpen 每次读前对比 mtime，文件变了就重建 L4 投影。
+ */
+describe('手改 settings.json 后的刷新', () => {
+  it('手改文件后 getByKey 读到新值，而不是投影里的旧值', () => {
+    // 1. 服务先写入一个值（进 L4 文件 + 投影）
+    service.update({ namespace: 'model', key: 'default.maxTokens', value: 2048 })
+    expect(service.getByKey('model.default.maxTokens')).toMatchObject({ value: 2048 })
+
+    // 2. **绕过服务**直接手改文件（模拟用户用编辑器改配置）
+    const raw = JSON.parse(readFileSync(settingsFile(), 'utf8')) as { model?: { default?: Record<string, unknown> } }
+    const model = raw['model']?.['default']
+    if (model === undefined) throw new Error('settings.json 缺少 model.default 段')
+    model['maxTokens'] = 8192
+    writeFileSync(settingsFile(), JSON.stringify(raw, null, 2), 'utf8')
+    // 确保 mtime 变化：同一秒内写入可能 mtime 相同，显式触碰
+    utimesSync(settingsFile(), new Date(), new Date())
+    service.registerNamespace(MODEL_FIELDS)
+    service.close()
+    closeAllIndexDbs()
+
+    // 3. 重开服务（等价于另一个读路径），不手动 open——getByKey 的 ensureOpen 应自动刷新
+    const reopened = new LocalSettingsService({ home })
+    reopened.registerNamespace(MODEL_FIELDS)
+    expect(reopened.getByKey('model.default.maxTokens')).toMatchObject({ value: 8192 })
+
+    // 4. 服务存活期间手改文件（不重开）也要能刷新——这是之前完全坏掉的路径
+    const raw2 = JSON.parse(readFileSync(settingsFile(), 'utf8')) as { model?: { default?: Record<string, unknown> } }
+    const model2 = raw2['model']?.['default']
+    if (model2 === undefined) throw new Error('settings.json 缺少 model.default 段')
+    model2['maxTokens'] = 16384
+    writeFileSync(settingsFile(), JSON.stringify(raw2, null, 2), 'utf8')
+    utimesSync(settingsFile(), new Date(Date.now() + 2000), new Date(Date.now() + 2000))
+    expect(service.getByKey('model.default.maxTokens')).toMatchObject({ value: 16384 })
+    reopened.close()
+  })
+
+  it('mtime 未变时不做多余刷新（幂等）', () => {
+    service.update({ namespace: 'model', key: 'default.maxTokens', value: 2048 })
+    // 连续读两次，第二次不应改变任何状态
+    const first = service.getByKey('model.default.maxTokens')
+    const second = service.getByKey('model.default.maxTokens')
+    expect(second).toEqual(first)
+    expect(service.getByKey('model.default.maxTokens')).toMatchObject({ value: 2048 })
+  })
+
+  it('文件被删除后，L4 层值消失并回落到默认值', () => {
+    service.update({ namespace: 'model', key: 'default.maxTokens', value: 2048 })
+    expect(service.getByKey('model.default.maxTokens')).toMatchObject({ value: 2048 })
+    rmSync(settingsFile(), { force: true })
+    // 读触发 refreshFromDisk：文件没了 → L4 清空 → 回落 L6 默认
+    expect(service.getByKey('model.default.maxTokens')).toMatchObject({ value: 4096 })
   })
 })

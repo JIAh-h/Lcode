@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import type { ConfigLayer, SettingValue, SettingsService } from '@lcode/settings'
 import { openIndexDb } from '@lcode/session-persistence-sqlite'
@@ -119,6 +119,8 @@ export class LocalSettingsService implements SettingsApi {
   private readonly adapterBase = new Map<string, JsonValue>()
   private readonly watchers = new Map<string, Set<(change: SettingsChange) => void>>()
   private opened = false
+  /** 上次同步 `settings.json` 时的 mtime；变化才重新投影（避免每次读都打 DB） */
+  private lastSyncedMtimeMs = -1
 
   constructor(options: LocalSettingsOptions) {
     this.home = options.home
@@ -161,6 +163,47 @@ export class LocalSettingsService implements SettingsApi {
   open(): void {
     if (this.opened) return
     this.opened = true
+    this.syncFileIntoKv()
+    this.loadKvIntoMemory()
+  }
+
+  /**
+   * **手改 `settings.json` 后刷新投影**（docs/30 §9.4）。
+   *
+   * 问题：`open()` 只在首次把文件灌进 `settings_kv`，之后用户手改文件，
+   * 投影不会失效——读到的还是旧值，且来源标注"settings.json"，极具误导性
+   * （实测：测试脚本恢复 JSON 后禁用状态复活）。
+   *
+   * 方案：对比文件 mtime，变化才重新执行"文件→表→内存"。**只替换 L4 条目**：
+   * L2/L3 与内存里的 overrides / adapterBase 不受文件影响，不能被这次刷新抹掉。
+   *
+   * mtime 没变就跳过：读路径调用频繁，不能每次都打 DB。
+   */
+  refreshFromDisk(): void {
+    if (!this.opened) this.open()
+    const file = this.settingsFilePath()
+    let mtimeMs = -1
+    try {
+      mtimeMs = statSync(file).mtimeMs
+    } catch {
+      // 文件不存在：与"从未同步过"同义，若之前同步过则按 mtime -1 继续（会重建）
+      if (this.lastSyncedMtimeMs === -1) return
+    }
+    if (mtimeMs === this.lastSyncedMtimeMs) return
+    this.lastSyncedMtimeMs = mtimeMs
+
+    // 1. 清掉内存与表里的旧 L4 条目（它们只来自文件）
+    for (const [entryKey, entry] of [...this.entries]) {
+      if (entry.layer !== 'L4') continue
+      this.entries.delete(entryKey)
+    }
+    try {
+      this.db().prepare("DELETE FROM settings_kv WHERE source_layer = 'L4'").run()
+    } catch {
+      // 只读连接（测试注入）会失败：退化成只刷内存，仍能修掉"读到旧值"
+    }
+
+    // 2. 重新投影 + 读回
     this.syncFileIntoKv()
     this.loadKvIntoMemory()
   }
@@ -318,6 +361,12 @@ export class LocalSettingsService implements SettingsApi {
 
   private ensureOpen(): void {
     if (!this.opened) this.open()
+    /*
+     * 每次读前检查文件是否被手改（mtime 未变则零 DB 开销）。
+     * statSync 的成本远低于一次 SQL 查询，且这是"文件是真相"承诺的落地：
+     * 不做这一步，手改文件要重启应用才生效——而来源还标着 settings.json。
+     */
+    this.refreshFromDisk()
   }
 
   private db(): SettingsDb {
@@ -414,6 +463,12 @@ export class LocalSettingsService implements SettingsApi {
   private syncFileIntoKv(): void {
     const file = this.settingsFilePath()
     if (!existsSync(file)) return
+    try {
+      // 记录本次投影对应的文件版本：refreshFromDisk 靠它判断"文件有没有被手改"
+      this.lastSyncedMtimeMs = statSync(file).mtimeMs
+    } catch {
+      this.lastSyncedMtimeMs = -1
+    }
     let parsed: unknown
     try {
       parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
