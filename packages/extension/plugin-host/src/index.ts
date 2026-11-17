@@ -21,6 +21,13 @@ export * from './lifecycle.js'
  */
 export const pluginUtilityRunnerPath = fileURLToPath(new URL('./utility-runner.mjs', import.meta.url))
 
+/*
+ * 进程内插件宿主（docs/30 §9.6）：插件在宿主进程里 `import` 加载，
+ * 与 DSH 的 Cordis 插件同一取舍——沙箱只约束模型执行的命令，不约束插件加载。
+ */
+export { createInProcessPluginHost } from './in-process.ts'
+export type { InProcessPluginHost, InProcessHostOptions } from './in-process.ts'
+
 const DEFAULT_TIMEOUT_MS = 10_000
 const MAX_MESSAGE_BYTES = 1_048_576
 

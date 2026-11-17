@@ -69,6 +69,7 @@
     "@lcode/tool-code": "workspace:*",
     "@lcode/tool-fs": "workspace:*",
     "@lcode/tool-lsp": "workspace:*",
+    "@lcode/tool-plugin": "workspace:*",
     "@lcode/tool-shell": "workspace:*",
     "@lcode/tool-skill": "workspace:*",
     "@lcode/tool-todo": "workspace:*",

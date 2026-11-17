@@ -156,6 +156,20 @@ export function memoryRoot(home: string): string {
   return normalizePath(home) + '/' + MEMORY_DIR
 }
 
+/** `<home>/plugins` —— 已安装插件（`<id>/<version>/`），也是创造模式写插件的目标 */
+export const PLUGINS_DIR = 'plugins'
+
+/** `<home>/skills` —— 用户级技能目录（工作区级另在 `<repo>/.lcode/skills`） */
+export const SKILLS_DIR = 'skills'
+
+export function pluginsRoot(home: string): string {
+  return normalizePath(home) + '/' + PLUGINS_DIR
+}
+
+export function skillsRoot(home: string): string {
+  return normalizePath(home) + '/' + SKILLS_DIR
+}
+
 /**
  * 会话日志相对 Lcode Home 的路径（22 §7.3：`log_path` 存**相对**路径，便于整体迁移）。
  * 形如 `sessions/<workspace-key>/<session-id>.jsonl`。

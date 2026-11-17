@@ -74,29 +74,83 @@ no imports, no Node APIs, no React — use `api.h`.
 
 ## Directory layout
 
+**Every plugin has exactly this shape.** The install validator enforces it, so deviating does not
+produce a "different style of plugin" — it produces a package that fails to install.
+
 ```
 my-plugin/
-├── lcode.json          # manifest (see references/manifest.md)
-├── src/index.js        # host entry (references/plugin-api.md)
-├── src/client.js       # optional client entry (references/client.md)
+├── lcode.json          # manifest (required; see references/manifest.md)
+├── package.json        # required, must contain "type": "module"
+├── src/index.js        # host entry, path must match lcode.json "entry" (required)
+├── src/client.js       # optional client entry, only when contributes.client is declared
 ├── config.json         # optional user config, read via globalThis.__lcodePluginConfig
-├── README.md           # what it does, what permissions it needs, known limits
-└── package.json        # optional; only if you ship dependencies
+└── README.md           # what it does, what permissions it needs, known limits
 ```
 
-Install location: `~/.lcode/plugins/<plugin-id>/`.
+What the validator checks at install time (violating any one fails the install, not at runtime):
+
+| Check | Rule |
+| --- | --- |
+| `lcode.json` | Parses, `$schema` is `https://lcode.dev/schema/plugin-1.json`, closed field set |
+| `package.json` | Exists and has `"type": "module"` |
+| `entry` | Starts with `./`, ends with `.js`, no `..`, resolves to a real file inside the package |
+| `contributes.client.entry` | Same rules, and the file must exist |
+| `contributes.*` names | Match what `activate` actually registers |
+
+Install location: `~/.lcode/plugins/<plugin-id>/<version>/`.
+
+## Self-check before you hand the plugin over
+
+Run these three; they catch every structural mistake seen so far:
+
+```sh
+# 1. manifest is valid (fails loudly on a bad $schema or entry)
+node -e "const m=require('./lcode.json'); if(m.\$schema!=='https://lcode.dev/schema/plugin-1.json')throw new Error('bad \$schema'); if(!m.entry.startsWith('./'))throw new Error('entry needs ./')"
+
+# 2. entry files load in plain Node
+node --input-type=module -e "import('file:///<abs>/src/index.js').then(m=>console.log('host exports:',Object.keys(m)))"
+
+# 3. package.json declares ESM
+node -e "if(require('./package.json').type!=='module')throw new Error('need type: module')"
+```
+
+Then install it for real — a valid manifest is not an installable plugin until the validator has
+seen it.
 
 ## Verify before claiming it works
 
 A plugin that "typechecks" is not a plugin that loads. See `references/verification.md` for the
-full checklist. The minimum:
+full checklist.
 
-1. `lcode.json` parses as JSON and matches the manifest schema.
-2. `node --input-type=module -e "import('file:///<abs path to entry>')"` resolves without error.
-3. `contributes.tools` names match the `registerTool` calls in `activate`.
-4. Install into a scratch profile and confirm the tool appears in the model's tool list.
+**Run `plugin_verify` — it is the only way to know.** It installs the plugin into a throwaway Home
+(a fresh, isolated environment, deleted afterwards), activates it, and reports whether every
+declared contribution actually registered. Nothing touches the user's real environment.
 
-**Do not report success from reading the code.** Load it.
+```
+plugin_verify({ path: "<plugin dir>" })
+→ { passed, inconclusive, declared: {...}, observed: {...}, problems, hint? }
+```
+
+How to read the result:
+
+| Result | Meaning | What to do |
+|---|---|---|
+| `passed: true` | Every declared item registered | Report success — measured, not guessed |
+| `passed: false` with `problems` | The plugin's own bug | Fix the code, run again until it passes |
+| `inconclusive: true` | **Environment blocked the check** | **Stop editing the plugin.** Tell the user; quote `hint`. The code is not at fault |
+
+`inconclusive` must not be glossed over — reporting "it works" on it is a false claim.
+
+**Known limitation:** host-side loading (tools / prompt sections / listeners) cannot currently start
+in this sandbox: the native sandbox denies the AppContainer read access to the Node executable's
+directory, and that ACL cannot be granted here. Client-only plugins (themes, panels) do verify end
+to end.
+
+If `plugin_verify` is unavailable, fall back to manual checks and say which ones you ran:
+
+1. `lcode.json` parses and matches the schema (`$schema` is `https://lcode.dev/schema/plugin-1.json`).
+2. Entry files load in plain Node.
+3. Every name in `contributes.*` matches a real registration call in `activate`.
 
 ## When the user's request does not fit
 

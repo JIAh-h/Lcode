@@ -313,6 +313,29 @@ async function validatePackage(
     "entry 文件不存在或不可访问",
   );
   if (!entryStat.isFile()) throw manifestInvalid("entry 必须是普通文件");
+
+  /*
+   * client 半边同样要在这里校验（docs/30 §P4）。
+   *
+   * 之前只校验 host 的 `entry`：client 入口写错时**安装照样成功**，直到
+   * 渲染层 import 失败才发现——而那条失败只打在控制台，用户看到的是
+   * "插件装了但界面没变"，极难归因。DSH 的做法也是安装期就把 exports
+   * 里的每个入口文件验一遍。
+   */
+  const client = manifest.contributes.client;
+  if (client !== undefined) {
+    const clientEntry = resolve(root, client.entry);
+    if (!isInside(root, clientEntry)) {
+      throw manifestInvalid("contributes.client.entry 不能指向插件包外");
+    }
+    const clientStat = await statOrManifestInvalid(
+      clientEntry,
+      "contributes.client.entry 文件不存在或不可访问",
+    );
+    if (!clientStat.isFile()) {
+      throw manifestInvalid("contributes.client.entry 必须是普通文件");
+    }
+  }
 }
 
 async function snapshotDirectory(

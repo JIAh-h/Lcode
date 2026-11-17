@@ -355,6 +355,17 @@ export function WorkspacePage() {
       if (event.type === 'turn/end' || event.type === 'compaction/end' || event.type === 'compaction/undo' || event.type === 'context/turn-marker') {
         setUsageEpoch((n) => n + 1)
       }
+      /*
+       * **每一步**都刷新用量（docs/09 §3）。
+       *
+       * `assistant/message` 带 `usage`，而且每一步产出一条——只在 `turn/end`
+       * 刷会让长任务（几十上百步）在整个过程中显示的是**上一轮**的数字，
+       * 用户以为是 bug（实测：83 步执行期间用量一直不动，结束瞬间才跳）。
+       *
+       * 代价是每步多一次 IPC 拉取；但用量本来就从事件日志派生，不额外读盘，
+       * 而"看着数字涨"对判断缓存是否生效很关键——这是全局最贵的成本指标。
+       */
+      if (event.type === 'assistant/message') setUsageEpoch((n) => n + 1)
       if (event.type === 'turn/end') setGitEpoch((n) => n + 1)
       if (event.type === 'tool/result') {
         const meta = record(record(event.data)?.['meta'])

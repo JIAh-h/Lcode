@@ -112,7 +112,7 @@ export interface AgentRuntimeOptions {
   readonly routerModel?: ModelSelection | undefined
 }
 
-import { memoryRoot } from '@lcode/util'
+import { memoryRoot, pluginsRoot, skillsRoot } from '@lcode/util'
 import type { Disposer } from '@lcode/util'
 import type { SessionEvent } from '@lcode/session'
 import type { ApprovalService } from '@lcode/approval'
@@ -138,9 +138,11 @@ import { createLocalNetworkAudit } from './network-audit.ts'
 import { knobsOf, createLocalPermissionPresets, createLocalWorkspaceTrust, installPolicyHook } from '@lcode/permission-presets'
 import { createPlanModeService } from '@lcode/plan-mode'
 import { LocalPluginRegistry, type PluginInfo } from '@lcode/plugin-registry'
-import { createPluginHost, InstalledPluginLifecycleService, PluginLifecycleManager, pluginUtilityRunnerPath } from '@lcode/plugin-host'
+import { createInProcessPluginHost, InstalledPluginLifecycleService, PluginLifecycleManager } from '@lcode/plugin-host'
 import { createLocalSkillFilesystem } from '@lcode/skill-filesystem'
 import { registerSkillTools } from '@lcode/tool-skill'
+import { createPluginInstallTool, createPluginVerifyTool } from '@lcode/tool-plugin'
+import { verifyPluginInSandbox } from './plugin-verify.ts'
 import { createLocalAgentPresets, type PresetSnapshot } from '@lcode/agent-presets'
 import { applyBundleFilter, composeRuntimeProfile, type InternalBundleEntry, type RuntimeCompositionSnapshot, type RuntimeDisposer } from '@lcode/runtime-composition'
 import { registerLocalContextSources } from '@lcode/context-local'
@@ -373,18 +375,37 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
     // 延迟解析：顶层创建时 tooling 还没挂，tools/systemPrompt 尚不在 ctx
     tools: () => services.ctx.get('tools'),
     systemPrompt: () => services.ctx.get('systemPrompt'),
-    startHost: async ({ target, onRequest }) => await createPluginHost({
-      manifest: target.manifest,
-      argv: [process.execPath, pluginUtilityRunnerPath, target.entryPath],
-      cwd: options.workspaceRoot ?? process.cwd(),
-      workspace: { root: options.workspaceRoot ?? process.cwd(), trusted: services.ctx.get('workspaceTrust').isTrusted(options.workspaceRoot ?? process.cwd()) },
-      subprocess: services.ctx.get('subprocess'),
-      sandbox: {
-        policy: { mode: 'read-only', workspaceRoot: options.workspaceRoot ?? process.cwd(), allowNetwork: false },
-        wrap: async (argv) => await services.ctx.get('sandbox').wrap(argv, { mode: 'read-only', workspaceRoot: options.workspaceRoot ?? process.cwd(), allowNetwork: false }),
-      },
-      onRequest,
-    }),
+    /*
+     * 插件宿主**在进程内加载**（docs/30 §9.6，对齐 DSH）。
+     *
+     * 原先是"每个插件一个 utility process + AppContainer"，实测在 Windows
+     * 上起不来：helper 把子进程降到 Low 完整性级别，而 Node 执行脚本要对
+     * 驱动器根做 `realpath("D:\\")` → EPERM。改成 Job Object 去掉了
+     * AppContainer，完整性降级仍在（实测 26s 超时 → 4.3s 退出，仍失败）。
+     *
+     * DSH 的取舍：插件就是宿主进程里的模块，沙箱只约束模型执行的命令。
+     * 插件安全由"只能调用 ctx 提供的能力 + contributes 逐项核对 + 权限
+     * 白名单"保证。异常全部在本层捕获，不外泄到主进程顶层。
+     */
+    startHost: async ({ target, onRequest }) => {
+      const host = createInProcessPluginHost({
+        manifest: target.manifest,
+        entryPath: target.entryPath,
+        workspace: {
+          root: options.workspaceRoot ?? process.cwd(),
+          trusted: services.ctx.get('workspaceTrust').isTrusted(options.workspaceRoot ?? process.cwd()),
+        },
+        onRequest,
+      })
+      /*
+       * **必须在这里 initialize**，与 `createPluginHost` 的语义对齐：
+       * 那边在内部完成握手后才返回，生命周期层拿到的是"已激活"的宿主。
+       * 漏掉这一步的话，插件模块永远不会被执行（实测：activate 显示成功，
+       * 但工具一个都没注册）。
+       */
+      await host.initialize()
+      return host as unknown as import('@lcode/plugin-host').PluginHostClient
+    },
   })
   const pluginLifecycleService = new InstalledPluginLifecycleService(pluginLifecycle, pluginRegistry)
   const profileExtras = createOptionalCapabilityEntries(
@@ -648,13 +669,22 @@ function mountPolicyBundle(options: AgentRuntimeOptions, services: DesktopServic
       try { return sessions.sessionServiceFor(id) } catch { return undefined }
     },
     /*
-     * 记忆目录视为可信写目标（docs/28）：模型"记住用户偏好"时写
-     * `~/.lcode/memory/USER.md`，它在工作区之外。若不放开，
-     * 每次记住偏好都要弹一次审批，用户会开始无脑点允许。
+     * 应用自己的数据目录视为可信写目标（docs/28、docs/30 §6）。
      *
-     * 只放开写；读取仍按常规判定。
+     * | 目录 | 谁写 | 为什么不放开就会坏 |
+     * |---|---|---|
+     * | `memory/` | 模型（记住偏好） | 每记一条都弹审批 → 用户学会无脑点允许 |
+     * | `plugins/` | 创造模式（造插件） | 模型造完插件**写不进磁盘**，只能把代码贴给用户手动保存 |
+     * | `skills/` | 创造模式（造技能） | 同上 |
+     *
+     * 这三个都是**应用自己的数据目录**，不是用户的项目仓库：写入不会碰到用户的代码。
+     * 只放开写；读取仍按常规判定（这些目录里也不该有凭据）。
      */
-    trustedWriteRoots: [memoryRoot(services.home)],
+    trustedWriteRoots: [
+      memoryRoot(services.home),
+      pluginsRoot(services.home),
+      skillsRoot(services.home),
+    ],
   })
   const planMode = createPlanModeService({ ctx, getSession: (id) => sessions.sessionServiceFor(id), systemPrompt: ctx.get('systemPrompt'), tools: ctx.get('tools'), ...(options.approval === undefined ? {} : { approval: options.approval }) })
   const unregisterPlan = ctx.set('planMode', planMode)
@@ -875,13 +905,6 @@ function mountExtensionsBundle(
   })
   const unregisterSkills = ctx.set('skills', skills)
   const unregisterSkillTools = registerSkillTools(skills, ctx.get('tools'))
-  const localPresets = createLocalAgentPresets({
-    roots: [
-      { path: join(services.home, 'presets'), source: 'user' },
-      { path: join(workspaceRoot, '.lcode', 'presets'), source: 'workspace' },
-    ],
-  })
-  const unregisterPresets = ctx.set('presets', localPresets)
   /*
    * registry / lifecycleService 由 createAgentRuntime 顶层创建后**注入**进来：
    * 第三方插件的 bundle entry（profileExtras，见 createOptionalCapabilityEntries）
@@ -895,6 +918,40 @@ function mountExtensionsBundle(
    * ctx/tools/systemPrompt 绑定到 startHost。注入路径见 createAgentRuntime。
    */
   const lifecycle = injected.lifecycle
+  /*
+   * 插件安装工具（docs/30 §6）：模型造完插件后**必须能真的装上**。
+   *
+   * 只给它 `write` 是不够的：把文件写进 `~/.lcode/plugins/` 不会登记到
+   * `plugins` 表，应用不加载，而用户会以为装好了（实测就是这个结果——
+   * 模型回复"我无法写入磁盘"，或写进去了但界面上什么都没有）。
+   */
+  const unregisterPluginInstall = ctx.get('tools').register(createPluginInstallTool({
+    install: async (path: string) => await registry.install({ source: { kind: 'local', path } }),
+    list: () => registry.list({ includeBuiltin: false }),
+    workspaceOf: (sessionId: string) => sessions.workspaceOf(sessionId),
+    home: services.home,
+  }))
+  /*
+   * 验证工具（docs/30 §6）：在**一次性环境**里装一遍、启一遍、断言贡献项。
+   *
+   * 对齐 DSH 的 scratch profile：`createAgentRuntime({ home: 临时目录 })`
+   * 自建一整套服务，与用户运行时完全隔离，跑完即删。这样模型能自己修到
+   * 通过，而不是让用户点"安装"才发现问题。
+   */
+  const unregisterPluginVerify = ctx.get('tools').register(createPluginVerifyTool({
+    run: async ({ path }: { readonly path: string }) => await verifyPluginInSandbox({
+      path,
+      realHome: services.home,
+      ...(options.builtinSkillsDir === undefined ? {} : { builtinSkillsDir: options.builtinSkillsDir }),
+    }),
+  }))
+  const localPresets = createLocalAgentPresets({
+    roots: [
+      { path: join(services.home, 'presets'), source: 'user' },
+      { path: join(workspaceRoot, '.lcode', 'presets'), source: 'workspace' },
+    ],
+  })
+  const unregisterPresets = ctx.set('presets', localPresets)
   const unregisterPlugins = ctx.set('plugins', lifecycleService)
   const facade: ExtensionFacade = {
     plugins: {
@@ -932,6 +989,8 @@ function mountExtensionsBundle(
     facade,
     dispose: async () => {
       unregisterSkillTools()
+      unregisterPluginInstall()
+      unregisterPluginVerify()
       await lifecycle.dispose()
       unregisterPlugins()
       unregisterPresets()

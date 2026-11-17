@@ -112,6 +112,55 @@ describe("LocalPluginRegistry", () => {
     expect(registry().list()).toEqual([]);
   });
 
+  /*
+   * client 入口的安装期校验（docs/30 §P4）。
+   *
+   * 之前只校验 host 的 entry：client 入口写错时安装照样成功，
+   * 直到渲染层 import 失败才暴露——而那条失败只打在控制台，
+   * 用户看到的是"插件装了但界面没变"，极难归因。
+   */
+  it("拒绝缺失的 client 入口", async () => {
+    const source = await createLocalPlugin({
+      contributes: {
+        client: { entry: "./dist/missing-client.js", slots: ["theme"] },
+      },
+    });
+    await expect(
+      registry().install({ source: { kind: "local", path: source } }),
+    ).rejects.toMatchObject({ code: ERROR_CODES.EX_MANIFEST_INVALID });
+    expect(registry().list()).toEqual([]);
+  });
+
+  it("接受 client 入口存在的插件", async () => {
+    const source = await createLocalPlugin({
+      contributes: {
+        client: { entry: "./dist/client.js", slots: ["theme"] },
+      },
+    });
+    await writeFile(
+      join(source, "dist", "client.js"),
+      "export function render() { return null }\n",
+    );
+    const result = await registry().install({
+      source: { kind: "local", path: source },
+    });
+    expect(result.id).toBe("com.example.line-tools");
+    expect(registry().list()).toHaveLength(1);
+  });
+
+  it("拒绝指向包外的 client 入口", async () => {
+    const source = await createLocalPlugin({
+      contributes: {
+        // manifest 解析阶段就会拒绝 `..`，这里是第二道（路径穿越）
+        client: { entry: "./../outside.js", slots: ["theme"] },
+      },
+    });
+    await expect(
+      registry().install({ source: { kind: "local", path: source } }),
+    ).rejects.toMatchObject({ code: ERROR_CODES.EX_MANIFEST_INVALID });
+    expect(registry().list()).toEqual([]);
+  });
+
   it("同一 id/version 不能被不同内容覆写", async () => {
     const source = await createLocalPlugin();
     await registry().install({ source: { kind: "local", path: source } });

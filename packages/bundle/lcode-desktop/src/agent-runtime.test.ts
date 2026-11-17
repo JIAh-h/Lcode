@@ -696,6 +696,9 @@ describe('A. 装配的接线正确性', () => {
       'grep',
       'inject_worker',
       'list_workers',
+      // 造插件：装进真实环境 / 在一次性环境里验证（docs/30 §6）
+      'plugin_install',
+      'plugin_verify',
       'read',
       'report_to_router',
       'request_plan_change',

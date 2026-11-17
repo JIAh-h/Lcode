@@ -424,6 +424,9 @@ importers:
       '@lcode/tool-lsp':
         specifier: workspace:*
         version: link:../../lsp/tool-lsp
+      '@lcode/tool-plugin':
+        specifier: workspace:*
+        version: link:../../extension/tool-plugin
       '@lcode/tool-session-query':
         specifier: workspace:*
         version: link:../../session-query/tool-session-query
@@ -918,6 +921,15 @@ importers:
       '@lcode/util':
         specifier: workspace:*
         version: link:../../util
+
+  packages/extension/tool-plugin:
+    dependencies:
+      '@lcode/plugin-registry':
+        specifier: workspace:*
+        version: link:../plugin-registry
+      '@lcode/tools':
+        specifier: workspace:*
+        version: link:../../core/tools
 
   packages/fs/fs:
     dependencies:

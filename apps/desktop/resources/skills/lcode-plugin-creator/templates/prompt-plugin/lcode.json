@@ -1,10 +1,10 @@
 {
-  "$schema": "https://lcode.dev/schemas/plugin/v1.json",
+  "$schema": "https://lcode.dev/schema/plugin-1.json",
   "id": "acme.house-rules",
   "name": "House Rules",
   "version": "0.1.0",
   "engines": { "lcode": "^0.1.0" },
-  "entry": "src/index.js",
+  "entry": "./src/index.js",
   "permissions": {},
   "contributes": {
     "promptSections": ["acme-house-rules"]

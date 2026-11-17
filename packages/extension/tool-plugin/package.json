@@ -1,0 +1,13 @@
+{
+  "name": "@lcode/tool-plugin",
+  "version": "0.1.0",
+  "description": "插件安装/启用工具：让模型把造出来的插件真正装上",
+  "type": "module",
+  "private": true,
+  "exports": { ".": { "types": "./src/index.ts", "default": "./src/index.ts" } },
+  "dependencies": {
+    "@lcode/plugin-registry": "workspace:*",
+    "@lcode/tools": "workspace:*"
+  },
+  "scripts": { "build": "tsc -p tsconfig.json --noEmit" }
+}
