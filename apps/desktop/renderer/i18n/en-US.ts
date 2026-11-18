@@ -820,6 +820,12 @@ export const EN: Readonly<Record<string, string>> = {
   '编排调度会话：可派发 worker，自己不执行':
     'Orchestration session: can dispatch workers but does not execute itself',
   '{n} 个 worker': '{n} workers',
+  '打开设置面板': 'Open settings panel',
+  '重启刷新': 'Restart to apply',
+  '插件改动需要重启应用才会生效': 'Plugin changes take effect after a restart',
+  '当前环境没有重启能力，请手动重启应用': 'This environment cannot restart the app — please restart it manually',
+  '重启失败，请手动重启应用': 'Restart failed — please restart the app manually',
+  '收起设置面板': 'Collapse settings panel',
   // 侧栏会话行的运行指示（status 派生自事件日志）
   '任务进行中…': 'Task running…',
   '等待审批——需要你确认才能继续': 'Waiting for approval — confirm to continue',

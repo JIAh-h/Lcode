@@ -1583,6 +1583,101 @@ interface PluginRef {
   readonly version: string;
 }
 
+/**
+ * 按**轮次边界**切一段事件窗口（会话切换/加载更早的分页单位）。
+ *
+ * ## 为什么必须按 turn 切、而不能按事件条数切
+ *
+ * 一轮的开始与结束由 `turn/start` / `turn/end` 标记，渲染层据此判断
+ * "这一轮是否还在跑"、哪里是执行过程的边界。按条数硬切会把某一轮切成两半，
+ * 结果是：`turn/start` 在前一页、`turn/end` 在后一页，于是界面显示
+ * "正在执行"却永远等不到结束——比不加分页更糟。
+ *
+ * 所以这里先按 `turn/start` 找出所有轮次的起点，再以轮为单位取最后 N 轮。
+ * 末尾若还有没结束的轮，它自然也在窗口内（我们从"最后一轮"往回数）。
+ */
+/**
+ * 首屏事件的轮数窗口。
+ *
+ * 对齐 DSH 的量级（它默认 50 条消息 ≈ 十几轮，长会话首屏能到 2MB）。
+ * 但**光有轮数窗口不够**：实测那个 21MB 的会话只有 12 轮，却装了 8.4 万条事件，
+ * 其中 8.2 万条是 `assistant/chunk`（流式增量，占 69% 体积）。按轮切对它几乎无效——
+ * 12 轮全在窗口内。真正的体积来源必须单独处理（见 HISTORY_CHUNK_STRIPPED）。
+ */
+const INITIAL_TURN_WINDOW = 40
+/**
+ * 分页取历史时**剔除流式增量**（`assistant/chunk`）。
+ *
+ * 这些 increment 只服务于"正在生成"时的逐字渲染，最终内容已完整存在于
+ * `assistant/message` 里。打开历史会话时重放它们没有任何界面价值，
+ * 却占了实测 69% 的体积与 97% 的事件条数（21MB → 5.6MB，8.4 万条 → 2159 条）。
+ *
+ * 注意：**只剔除历史分页里的**，实时推送的那条链路不能动——
+ * 正在生成的回复靠它逐字显示。
+ */
+/**
+ * 分页下发时**剥离 diff 的 hunks**（保留 changes）。
+ *
+ * hunks 是逐行 diff，一个会话里能占到 diff meta 体积的 85%（实测 147KB/173KB），
+ * 但只在鼠标悬停某个文件时才会被看到。首屏只留 `changes`（文件名 + 增删数）
+ * 就够画卡片行；悬停时用 `session.diff` 按 seq 单独取。
+ */
+function stripDiffHunks<T extends { readonly type: string; readonly data?: unknown }>(events: readonly T[]): readonly T[] {
+  return events.map((event) => {
+    if (event.type !== 'tool/result') return event
+    const data = event.data as { readonly meta?: unknown } | undefined
+    const meta = data?.meta
+    if (typeof meta !== 'object' || meta === null) return event
+    const record = meta as Record<string, unknown>
+    if (record['card'] !== 'diff' || record['hunks'] === undefined) return event
+    const { hunks: _omitted, ...rest } = record
+    return { ...event, data: { ...(data as Record<string, unknown>), meta: rest } }
+  })
+}
+
+function stripStreamChunks<T extends { readonly type: string }>(events: readonly T[]): readonly T[] {
+  return events.filter((event) => event.type !== 'assistant/chunk')
+}
+/**
+ * "加载更早"每次追加的轮数。
+ *
+ * 比首屏小一半：越往前翻，用户越可能只是想扫一眼上下文，
+ * 一次给太多反而慢。
+ */
+const HISTORY_TURN_PAGE = 20
+
+function sliceEventsByTurns(
+  events: readonly { readonly type: string; readonly seq: number }[],
+  opts: { readonly turnLimit: number; readonly beforeSeq?: number },
+): { readonly events: readonly { readonly type: string; readonly seq: number }[]; readonly hasMore: boolean } {
+  /* 每一轮的起始 seq（`turn/start` 的 seq） */
+  const turnStarts: number[] = [];
+  for (const event of events) {
+    if (event.type === 'turn/start') turnStarts.push(event.seq);
+  }
+  /*
+   * 用户消息可能早于第一个 turn/start（例如导入的旧日志），
+   * 这种情况把日志开头也当成一个边界，避免最前面那一段永远取不到。
+   */
+  const first = events[0];
+  if (first !== undefined && (turnStarts.length === 0 || turnStarts[0] !== first.seq)) {
+    turnStarts.unshift(first.seq);
+  }
+  /*
+   * 游标：`beforeSeq` 表示"只要这个 seq 之前的内容"（加载更早时用）。
+   * 用它裁掉已经显示过的那部分轮次。
+   */
+  const visibleStarts = opts.beforeSeq === undefined
+    ? turnStarts
+    : turnStarts.filter((seq) => seq < opts.beforeSeq!);
+  if (visibleStarts.length === 0) return { events: [], hasMore: false };
+  const fromIndex = Math.max(0, visibleStarts.length - opts.turnLimit);
+  const fromSeq = visibleStarts[fromIndex]!;
+  const toSeq = opts.beforeSeq;
+  const sliced = events.filter((event) => event.seq >= fromSeq && (toSeq === undefined || event.seq < toSeq));
+  return { events: sliced, hasMore: fromIndex > 0 };
+}
+
 function pluginRef(input: unknown): PluginRef {
   if (typeof input !== 'object' || input === null) throw new Error('插件参数必须是对象');
   const record = input as Record<string, unknown>;
@@ -1848,6 +1943,17 @@ ipcMain.handle('lcode:plugins.clientBundles', async () => {
      * 的插件整个失效——host 侧现在还有既有的沙箱问题（AppContainer 下
      * electron 子进程无法启动），把两者绑一起等于 client 插件永远用不了。
      */
+    /*
+     * **用户停用的插件不再提供给渲染层**。
+     *
+     * 注释原本就写着"只排除被用户停用的插件"，但代码里漏了这个判断——
+     * 于是停用后重载又把插件加载回来，壁纸/主题不会消失（实测踩过）。
+     *
+     * state 不等于 enabled 表示用户没启用它（enabled = 0）。这里**不要求
+     * host 那半激活成功**：host 起不来（沙箱限制）不该连累界面那半，
+     * 它们是两个独立的半边。
+     */
+    if (entry.state !== 'enabled') continue;
     if (client === undefined) continue;
     // 与 host 侧同一条路径拼接规则；manifest 已保证 entry 是包内 ./ 相对路径
     const file = join(entry.installPath, client.entry);
@@ -1881,6 +1987,38 @@ ipcMain.handle('lcode:sandbox.status', async () => (await agentRuntime()).ctx.ge
  * 内置插件总览：全局插件来自实际组合快照，会话插件来自当前工具注册表。
  * 只读视图；启用/停用由代码与模式决定（见 @lcode/lcode-desktop 的 builtin-plugins）。
  */
+/**
+ * **重启应用**（设置页「重启刷新」按钮）。
+ *
+ * 为什么需要它：host 那半（工具/提示段/事件订阅）是在装配期挂进注册表的，
+ * 运行中激活只能让 lifecycle 记录出现，**工具并不会进入模型可见的工具表**
+ * （实测：inspected 有记录，但 tools.schemas() 数量不变）。同理 client 那半
+ * 遇到自带 MutationObserver 的插件时，宿主清掉的副作用会被它立刻恢复。
+ *
+ * 所以最可靠、也最容易理解的做法是：状态一变就让用户重启一次。
+ * `app.relaunch()` 之后正常走退出流程（host 会先释放 runtime，避免留下子进程）。
+ */
+ipcMain.handle('lcode:app.relaunch', async () => {
+  /*
+   * **必须带上原来的命令行参数**。
+   *
+   * `app.relaunch()` 默认只用 `process.execPath`（electron.exe）重启自己，
+   * 不带入口目录、也不带开关。开发态下这会得到一个空 Electron：
+   * 没有入口 → 加载不到应用 → 白屏；同时丢掉 `--no-sandbox` 与
+   * `--disable-gpu`，这台机器上 GPU 进程还会崩（见 dev-electron.mjs 的实测记录）。
+   *
+   * `process.argv.slice(1)` 正是「入口目录 + 现有开关」，原样传回去即可。
+   * 打包态下它是空数组（可执行文件自身就是入口），行为不变。
+   *
+   * 已知限制：开发态下外层 `concurrently -k` 会把 vite dev server 一并杀掉，
+   * 新进程请求 localhost:5173 拿不到任何东西，仍会白屏。那个组合只在开发时
+   * 出现（打包态页面是本地文件、没有 dev server），因此不为它增加启动器复杂度。
+   */
+  app.relaunch({ args: process.argv.slice(1) });
+  app.quit();
+  return { relaunching: true };
+});
+
 ipcMain.handle('lcode:runtime.builtinPlugins', async () => {
   const rt = await agentRuntime();
   return buildBuiltinPluginCatalog({
@@ -1894,23 +2032,41 @@ ipcMain.handle('lcode:plugins.install', async (_e: IpcMainInvokeEvent, input: un
   if (typeof path !== 'string' || path.trim() === '') throw new Error('插件目录 path 必填');
   const rt = await agentRuntime();
   const installed = await rt.plugins.installLocal(path);
+  notifyPluginsChanged('install', installed.id);
   return { installed, plugins: publicPlugins(rt) };
 });
 ipcMain.handle('lcode:plugins.activate', async (_e: IpcMainInvokeEvent, input: unknown) => {
   const rt = await agentRuntime();
   await rt.plugins.activate(pluginRef(input));
+  notifyPluginsChanged('activate', pluginRef(input).id);
   return publicPlugins(rt);
 });
 ipcMain.handle('lcode:plugins.deactivate', async (_e: IpcMainInvokeEvent, input: unknown) => {
   const rt = await agentRuntime();
   await rt.plugins.deactivate(pluginRef(input));
+  notifyPluginsChanged('deactivate', pluginRef(input).id);
   return publicPlugins(rt);
 });
 ipcMain.handle('lcode:plugins.uninstall', async (_e: IpcMainInvokeEvent, input: unknown) => {
   const rt = await agentRuntime();
   await rt.plugins.uninstall(pluginRef(input));
+  notifyPluginsChanged('uninstall', pluginRef(input).id);
   return publicPlugins(rt);
 });
+
+/**
+ * **插件启用状态变了**，广播给所有窗口。
+ *
+ * 为什么必须由宿主推：client 半边（主题/面板）只在渲染层加载一次，
+ * 而"启用状态"是宿主持有的权威事实。让设置页在点完按钮后自己调一次
+ * reload 是错的——其它入口（`plugin_install` 工具、未来的市场页、CLI）
+ * 改了状态就漏了，实测表现为"停用后壁纸还在"。
+ *
+ * 渲染层订阅后自行重载，与事件来源无关。
+ */
+function notifyPluginsChanged(kind: 'install' | 'activate' | 'deactivate' | 'uninstall', id: string): void {
+  pushToRenderer('lcode:plugins.changed', { kind, id });
+}
 
 /** 把一条消息推给所有窗口 */
 function pushToRenderer(channel: string, payload: unknown): void {
@@ -2145,18 +2301,77 @@ ipcMain.handle(
       .find((e) => e.type === "turn/end");
     const lastTurnErrored =
       lastTurnEnd?.type === "turn/end" && lastTurnEnd.data.reason === "error";
+    /*
+     * **首屏只发最后 N 轮**（docs/30 性能）。
+     *
+     * 之前这里回 `events()` 全量：长会话下事件数组能到几十 MB，
+     * 切换会话时全部经 IPC 过一次序列化，界面卡在"加载中"好几秒。
+     * 实测那个 68.7M tok 的会话就是这么慢的。
+     *
+     * 窗口按**轮次边界**切（见 sliceEventsByTurns）：按条数硬切会把某一轮
+     * 劈开，`turn/start` 与 `turn/end` 分属两页，界面会一直显示"正在执行"。
+     * 更早的部分由 `lcode:session.pageHistory` 按游标补取。
+     */
+    const allEvents = rt.sessions.sessionServiceFor(sessionId).events();
+    const windowed = sliceEventsByTurns(stripDiffHunks(stripStreamChunks(allEvents)), { turnLimit: INITIAL_TURN_WINDOW });
     return {
       // `sessions.meta` 的 `header` 才是带 workspace/title 的会话元数据；
       // 直接回整个 meta 会让渲染层读不到 workspace/title（标题栏显示“未设置工作区/未命名会话”）。
       meta: meta.header,
       history,
-      events: rt.sessions.sessionServiceFor(sessionId).events(),
+      events: windowed.events,
+      /** 更早还有内容：界面据此决定是否显示"加载更早" */
+      has_more_events: windowed.hasMore,
       repaired: resumed.repaired,
       closers: resumed.closers ?? [],
       last_turn_errored: lastTurnErrored,
     };
   },
 );
+
+/*
+ * "加载更早"：按游标向前取一段历史（**按轮切**，见 sliceEventsByTurns）。
+ *
+ * `before_seq` 是当前已显示内容的最小 seq；只返回它之前的轮次，
+ * 避免同一轮被切成两半（那会让 turn/start 与 turn/end 分属两页）。
+ */
+/*
+ * 产物卡片的 diff **按需取**（悬停某个文件时才调用）。
+ *
+ * 打开会话时不下发 `meta.hunks`：实测一个会话里 diff meta 共 173KB，
+ * 其中 147KB（85%）是 hunks，而它们只在鼠标悬停时才会被看一眼。
+ * 首屏只需要 `changes`（文件名、增删行数）来画卡片行。
+ */
+ipcMain.handle("lcode:session.diff", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const sessionId = record["session_id"];
+  const seq = record["seq"];
+  if (typeof sessionId !== "string" || sessionId === "")
+    throw new Error("session_id 必填");
+  if (typeof seq !== "number" || !Number.isInteger(seq))
+    throw new Error("seq 必填");
+  const rt = await agentRuntime();
+  const event = rt.sessions.sessionServiceFor(sessionId).events().find((item) => item.seq === seq);
+  if (event === undefined || event.type !== "tool/result") return { hunks: [] };
+  const meta = (event.data as { readonly meta?: unknown }).meta;
+  if (typeof meta !== "object" || meta === null) return { hunks: [] };
+  const hunks = (meta as { readonly hunks?: unknown }).hunks;
+  return { hunks: Array.isArray(hunks) ? hunks : [] };
+});
+
+ipcMain.handle("lcode:session.pageHistory", async (_e: IpcMainInvokeEvent, input: unknown) => {
+  const record = (input ?? {}) as Record<string, unknown>;
+  const sessionId = record["session_id"];
+  const beforeSeq = record["before_seq"];
+  if (typeof sessionId !== "string" || sessionId === "")
+    throw new Error("session_id 必填");
+  if (typeof beforeSeq !== "number" || !Number.isFinite(beforeSeq))
+    throw new Error("before_seq 必填");
+  const rt = await agentRuntime();
+  const events = rt.sessions.sessionServiceFor(sessionId).events();
+  const page = sliceEventsByTurns(stripDiffHunks(stripStreamChunks(events)), { turnLimit: HISTORY_TURN_PAGE, beforeSeq });
+  return { events: page.events, has_more_events: page.hasMore };
+});
 
 ipcMain.handle(
   "lcode:session.delete",

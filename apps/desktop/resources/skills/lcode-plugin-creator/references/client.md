@@ -71,6 +71,36 @@ api.setBackgroundMedia({ url: 'lcode-plugin://acme.wallpaper/assets/bg.mp4', opa
 api.setBackgroundMedia({ url: 'lcode-plugin://acme.wallpaper/assets/bg.webp' })
 ```
 
+**Two ways to change appearance — pick by intent:**
+
+| Intent | Use | Who decides the details |
+|---|---|---|
+| Recolor the UI | `setCssVars` | Host defines tokens; you supply values |
+| Simple wallpaper | `setBackgroundMedia` | Host owns the layer |
+| Layering, positioning, decorative overlays, complex composition | `injectStyles` | **You** — write the CSS |
+
+`injectStyles` is the escape hatch for anything the convenience APIs cannot express. It gives you
+a scoped `<style>` element (created and owned by the host — you only supply text):
+
+```js
+api.injectStyles(`
+  #lcode-plugin-background { z-index: -1; }
+  .shell { background: rgba(20, 20, 28, 0.55); }
+`)
+```
+
+Rules: styles are keyed per plugin (injecting again replaces your previous sheet), they are removed
+when your plugin unloads, and `@import` is rejected — reference your own assets with
+`lcode-plugin://<id>/<path>` instead.
+
+This split mirrors DSH: its host only exposes a style-injection entry point
+(`webserver/index-inject`); z-index and translucency rules live in the plugin's own CSS.
+
+**Host baseline you can rely on:** `.shell` (menubar, sidebar, conversation) always establishes a
+stacking context above full-window overlays, and `body` has no background of its own — the canvas
+color comes from `--bg-canvas` on `.shell`. So a full-window background needs the canvas token to
+be translucent; that part is your call, not a host rule.
+
 **`lcode-plugin://<plugin-id>/<path-inside-package>` is the right way to reference your own
 files.** The host serves only that plugin's directory and only media types (images, videos,
 fonts) — it is not a general file-read channel. This is why you never need to base64-encode a

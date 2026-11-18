@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { t } from '../i18n/index.ts'
 
 /** 一个 diff 块：edit/write 工具结果 meta.hunks 的旧/新行 */
@@ -12,7 +12,14 @@ export interface EditedFile {
   readonly kind: string
   readonly additions: number
   readonly deletions: number
+  /**
+   * 逐行 diff。**首屏不带**（hunks 占 diff meta 体积的 85%），
+   * 悬停时才用 `seq` + `sessionId` 向主进程取。
+   */
   readonly hunks?: readonly EditedFileHunk[] | undefined
+  /** 产生这条变更的 `tool/result` 事件 seq（按需取 diff 用） */
+  readonly seq?: number | undefined
+  readonly sessionId?: string | undefined
 }
 
 /** 单个 diff 块：旧/新行成对，颜色与右侧 Git 工作区（gdiff）一致 */
@@ -46,7 +53,41 @@ function HunkView({ hunk }: { readonly hunk: EditedFileHunk }) {
  * 内部滚动看全量；位置自适应由外层 `.edhover-anchor.above` 控制。
  */
 function EditedFileHover({ file }: { readonly file: EditedFile }) {
-  const hunks = file.hunks ?? []
+  /*
+   * **悬停才取逐行 diff**。
+   *
+   * 打开会话时主进程已剥离 `meta.hunks`（它是 diff 体积的 85%），这里按需补上。
+   * 取过一次就缓存在组件内——同一行反复悬停不该重复请求。
+   */
+  const [hunks, setHunks] = useState<readonly EditedFileHunk[]>(file.hunks ?? [])
+  const [loading, setLoading] = useState(hunks.length === 0 && file.seq !== undefined)
+  useEffect(() => {
+    if (hunks.length > 0 || file.seq === undefined) return
+    const bridge = (globalThis as unknown as {
+      lcode?: { session?: { diff?: (input: unknown) => Promise<unknown> } }
+    }).lcode
+    if (bridge?.session?.diff === undefined) {
+      setLoading(false)
+      return
+    }
+    let alive = true
+    void bridge.session.diff({ session_id: file.sessionId, seq: file.seq })
+      .then((value) => {
+        if (!alive) return
+        const raw = (value as { hunks?: unknown } | null)?.hunks
+        if (!Array.isArray(raw)) return
+        setHunks(raw.flatMap((item) => {
+          if (typeof item !== 'object' || item === null) return []
+          const hunk = item as Record<string, unknown>
+          const oldLines = Array.isArray(hunk['oldLines']) ? (hunk['oldLines'] as unknown[]).map(String) : []
+          const newLines = Array.isArray(hunk['newLines']) ? (hunk['newLines'] as unknown[]).map(String) : []
+          return oldLines.length > 0 || newLines.length > 0 ? [{ oldLines, newLines }] : []
+        }))
+      })
+      .catch(() => undefined)
+      .finally(() => { if (alive) setLoading(false) })
+    return () => { alive = false }
+  }, [file.seq, file.sessionId, hunks.length])
   return (
     <div className="edhover-pop" role="tooltip">
       <div className="edhover-head">
@@ -56,7 +97,7 @@ function EditedFileHover({ file }: { readonly file: EditedFile }) {
         </span>
       </div>
       {hunks.length === 0 ? (
-        <div className="gdiff-note">{t('这个文件的变更内容不可用（可能是旧会话或非文件工具）')}</div>
+        <div className="gdiff-note">{loading ? t('正在读取变更…') : t('这个文件的变更内容不可用（可能是旧会话或非文件工具）')}</div>
       ) : (
         <div className="edhover-diff">
           {hunks.map((hunk, index) => <HunkView hunk={hunk} key={index} />)}

@@ -154,6 +154,25 @@ export interface FsService {
   grep(pattern: string, opts?: FsGrepOpts): Promise<FsGrepResult>
   stat(path: string): Promise<FsStat>
   readdir(path: string): Promise<readonly string[]>
+  /**
+   * 删除**单个文件**或**空目录**。
+   *
+   * 刻意不支持递归：递归删目录是最容易"误伤一片"的操作，而模型在收尾时
+   * 清理的临时文件几乎都是单个文件。要删整个目录就让模型逐个删空再删目录——
+   * 每一步都可见、可审计。
+   *
+   * 走 `fs` 服务（而不是 `shell`）还有一层实际原因：`shell` 在 Windows 沙箱下
+   * 会被降到 Low 完整性级别，**删不掉自己刚创建的文件**（实测 `del` 返回
+   * "拒绝访问"）。`fs` 走进程内直接调用，没有这个问题。
+   */
+  remove(path: string): Promise<FsRemoveResult>
+}
+
+export interface FsRemoveResult {
+  readonly path: string
+  /** `file` | `dir`（只可能是空目录） */
+  readonly kind: 'file' | 'dir'
+  readonly removed: boolean
 }
 
 /** ctx key 声明（合并进 @lcode/context） */

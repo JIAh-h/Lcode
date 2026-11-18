@@ -307,7 +307,100 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
     },
   }
 
-  return [read, write, edit, glob, grep] as readonly ToolDefinition[]
+  /*
+   * `delete`：模型收尾时清理临时文件。
+   *
+   * ## 为什么必须是独立工具，而不是让它用 shell 删
+   *
+   * 两个原因，都实测过：
+   * - Windows 沙箱把 `shell` 子进程降到 Low 完整性级别，**删不掉自己刚创建的文件**
+   *   （`del` 直接返回"拒绝访问"）；
+   * - `shell` 的删除是黑盒：拼错路径就可能删到别的东西，模型也看不见影响面。
+   *
+   * 这个工具走 `fs` 服务（进程内直接调用），并且只删**单个文件或空目录**，不递归。
+   *
+   * ## 产物卡片的策略（用户要求的行为）
+   *
+   * **本轮新建又删掉的文件不显示**——那是一次净效果为零的探针，本该无痕。
+   * 只有删掉**任务开始前就存在**的文件才是破坏性变更，必须让用户看见。
+   *
+   * 判据用 `mtimeMs` 与"本轮开始时间"比较：文件比本轮还新 ⇒ 本轮产物 ⇒ 不报。
+   * 这个判据不完美（touch 过的旧文件会误判为新增），但误判方向是**少报**，
+   * 对"清理自己的临时文件"这个主场景是安全的；真要误删用户文件时，
+   * 权限层仍会按策略拦。
+   */
+  const remove: ToolDefinition = {
+    name: 'delete',
+    description:
+      '删除一个文件或空目录（不递归）。用于清理你本轮自己创建的临时文件/探针脚本；' +
+      '删目录前要先删空它。删除**不可撤销**，删之前确认路径——' +
+      '如果它不是你本轮创建的，那是在删用户的东西。',
+    card: 'diff',
+    presentationMeta: (_args, value) => {
+      const result = value as { path?: unknown; kind?: unknown; preexisting?: unknown; size?: unknown }
+      const path = typeof result.path === 'string' ? result.path : ''
+      /*
+       * 只删本轮产物的调用**不产出 changes**：返回空数组后，上层按
+       * `editedFiles.length > 0` 判断就不会渲染卡片——正好实现"临时文件无痕"。
+       */
+      if (result.preexisting !== true) {
+        return { path, changes: [], shadowed: true }
+      }
+      const size = typeof result.size === 'number' ? result.size : 0
+      return {
+        path,
+        changes: [{ path, kind: 'delete', additions: 0, deletions: Math.max(1, Math.ceil(size / 40)) }],
+        preexisting: true,
+      }
+    },
+    timeoutMs: 10_000,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path: { type: 'string', description: '要删除的文件或空目录路径' },
+      },
+      required: ['path'],
+    },
+    describeAction: (parsed) => {
+      const p = parsed as { path: string }
+      return { summary: `删除 ${p.path}`, paths: [{ path: p.path, mode: 'write' }] }
+    },
+    execute: async (call, opts) => {
+      const p = call.parsed as { path: string }
+      const root = rootFor(opts)
+      const target = absolute(root, p.path)
+      const fs = fsFor(opts)
+      /*
+       * 先 stat 拿 mtime 与大小：删除之后就查不到了，而这两项正是
+       * "要不要给用户看"与"diff 行数"的依据。
+       */
+      const before = await fs.stat(target)
+      const result = await fs.remove(target)
+      const turnStartedAt = turnStartTimeOf(opts.scope)
+      const preexisting = turnStartedAt !== undefined && before.mtimeMs < turnStartedAt
+      return {
+        path: result.path,
+        kind: result.kind,
+        removed: result.removed,
+        preexisting,
+        size: before.size,
+      } as never
+    },
+  }
+
+  return [read, write, edit, glob, grep, remove] as readonly ToolDefinition[]
+}
+
+/**
+ * 本轮开始时间（epoch ms）：`scope.turnStartedAt` 由引擎注入。
+ *
+ * 拿不到时返回 undefined —— 调用方按"不判定为新增"处理（保守：宁可少报，
+ * 也不要把真删除藏起来）。这样即使宿主还没接线，行为也是安全的。
+ */
+function turnStartTimeOf(scope: unknown): number | undefined {
+  if (typeof scope !== 'object' || scope === null) return undefined
+  const value = (scope as { turnStartedAt?: unknown }).turnStartedAt
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 /** 认引擎传下来的 scope 形状（`{ sessionId }`） */

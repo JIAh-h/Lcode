@@ -31,10 +31,14 @@ const rootStyle = {
   body: {
     prepend: () => undefined,
   },
+  /* injectStyles 会往 head 里挂 <style>，按 id 索引所以要有 head */
+  head: {
+    appendChild: () => undefined,
+  },
   /*
-   * `createElement` 的桩要能同时充当 div 和 video：
-   * 背景媒体分支会设 `src`/`muted`/`loop`/`autoplay`/`playsInline`、调 `play()`、
-   * 还会 `appendChild` 到容器上。
+   * `createElement` 的桩要能同时充当 div / video / style：
+   * 背景媒体分支会设 `src`/`muted`/`loop`/`autoplay`/`playsInline`、调 `play()`；
+   * 样式注入分支会设 `dataset` 与 `textContent`、最后 `remove()`。
    */
   createElement: () => ({
     id: '',
@@ -44,6 +48,8 @@ const rootStyle = {
     loop: false,
     autoplay: false,
     playsInline: false,
+    textContent: '',
+    dataset: {} as Record<string, string>,
     setAttribute: () => undefined,
     remove: () => undefined,
     play: () => Promise.resolve(),
@@ -55,7 +61,7 @@ const rootStyle = {
   static revokeObjectURL() { return undefined }
 }
 
-const { applyCssVars, clearCssVars, applyBackgroundMedia } = await import('./clientPlugins.tsx')
+const { applyCssVars, clearCssVars, applyBackgroundMedia, injectPluginStyles, clearPluginStyles, clearAllPluginStyles } = await import('./clientPlugins.tsx')
 
 function reset(): void {
   applied.clear()
@@ -130,5 +136,26 @@ describe('client 插件的样式安全边界', () => {
     expect(() => applyBackgroundMedia({ url: 'https://x/y.webm' })).not.toThrow()
     // 显式声明优先于扩展名
     expect(() => applyBackgroundMedia({ url: 'https://x/y.png', kind: 'video' })).not.toThrow()
+  })
+
+  /*
+   * 样式注入通道（对齐 DSH 的 style 注入）：插件用它实现层级、定位、
+   * 装饰这类"具体能力"，不必要求宿主为每种形态新增 API。
+   */
+  it('可以注入自己的 CSS，并按插件隔离清理', () => {
+    expect(() => injectPluginStyles('a.one', '#x { z-index: -1 }')).not.toThrow()
+    expect(() => injectPluginStyles('b.two', '.y { opacity: .5 }')).not.toThrow()
+    // 重复注入同一插件：替换而不是叠加（桩里看不出叠加，只要不抛即可）
+    expect(() => injectPluginStyles('a.one', '#x { z-index: -2 }')).not.toThrow()
+    expect(() => clearPluginStyles('a.one')).not.toThrow()
+    expect(() => clearAllPluginStyles()).not.toThrow()
+  })
+
+  it('拒绝 @import：样式不该绕过插件资源协议去加载外部资源', () => {
+    expect(() => injectPluginStyles('a.one', '@import url("https://evil.test/x.css");')).toThrow(/@import/)
+  })
+
+  it('非字符串的 CSS 直接报错，而不是写入 "undefined"', () => {
+    expect(() => injectPluginStyles('a.one', undefined as unknown as string)).toThrow()
   })
 })

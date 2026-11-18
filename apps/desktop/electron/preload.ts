@@ -113,6 +113,10 @@ const api = {
     create: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.create', input),
     /** 打开会话：返回 meta + 已有历史，并开始推送它之后的事件 */
     open: (sessionId: string): Promise<unknown> => ipcRenderer.invoke('lcode:session.open', sessionId),
+    /** 取更早的历史（按轮边界切），用于"加载更早"。与回放用的 history 无关。 */
+    pageHistory: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.pageHistory', input),
+    /** 产物卡片的逐行 diff：悬停某个文件时才取（首屏不下发，省 85% 体积） */
+    diff: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.diff', input),
     delete: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.delete', input),
     restore: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.restore', input),
     rename: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:session.rename', input),
@@ -286,6 +290,10 @@ const api = {
     /** 内置能力的禁用列表（docs/30 §P2）；改动需重启生效 */
     disabledList: (): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.disabled.list'),
     disabledSet: (input: unknown): Promise<unknown> => ipcRenderer.invoke('lcode:plugins.disabled.set', input),
+  },
+  app: {
+    /** 重启应用（插件启停后让改动真正生效） */
+    relaunch: (): Promise<unknown> => ipcRenderer.invoke('lcode:app.relaunch'),
   },
   runtime: {
     composition: (): Promise<unknown> => ipcRenderer.invoke('lcode:runtime.composition'),

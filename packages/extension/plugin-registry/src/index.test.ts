@@ -57,6 +57,29 @@ function registry(): LocalPluginRegistry {
 }
 
 describe("LocalPluginRegistry", () => {
+  /*
+   * 回归：连接被外部关闭后，同一个注册表实例仍要能查询。
+   *
+   * 之前把 `openIndexDb()` 的返回值缓存在实例上，于是任何一次
+   * `closeIndexDb(home)` / `closeAllIndexDbs()`（索引重建、sessions.close()、
+   * 测试清理都会调）之后，这个实例就永久失效——实测表现为"一打开设置页的
+   * 插件模块就报 The database connection is not open"。
+   */
+  it("索引连接被关闭后仍能查询（不缓存失效句柄）", async () => {
+    // createLocalPlugin 会初始化 home；必须先生成，再建 registry
+    const source = await createLocalPlugin()
+    const instance = registry()
+    await instance.install({ source: { kind: "local", path: source } })
+    expect(instance.list()).toHaveLength(1)
+
+    // 模拟外部关闭连接（索引重建 / 会话关闭 / 测试清理都会这样）
+    closeIndexDb(home)
+
+    // 必须能自愈重连，而不是抛 "database connection is not open"
+    expect(() => instance.list()).not.toThrow()
+    expect(instance.list()).toHaveLength(1)
+  })
+
   it("复制经过校验的本地快照，落安装记录但不激活", async () => {
     const source = await createLocalPlugin();
     const result = await registry().install({

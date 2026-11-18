@@ -332,6 +332,16 @@ export function createSandboxedFs(options: SandboxedFsOptions): SandboxedFs {
       )
     },
 
+    async remove(path) {
+      const file = pathOf(path)
+      // 工作区外的删除交给 base：越界写入由权限层审批，沙箱层不重复判断
+      if (!inside(file)) return await options.base.remove(file)
+      return await withWorker(
+        { op: 'remove', path: file },
+        async () => await options.base.remove(file),
+      )
+    },
+
     async dispose(): Promise<void> {
       await closeWorker()
     },

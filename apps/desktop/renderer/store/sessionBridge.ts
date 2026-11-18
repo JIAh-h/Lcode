@@ -61,8 +61,12 @@ export interface TrashEntry {
   readonly expires_in_ms: number
 }
 
-export interface OpenedSession {  readonly meta: SessionMeta
+export interface OpenedSession {
+  readonly meta: SessionMeta
+  /** 首屏只包含最后若干轮（按 turn 边界切），更早的用 `history()` 补取 */
   readonly events: readonly SessionEvent[]
+  /** 更早还有内容：决定是否显示"加载更早" */
+  readonly has_more_events?: boolean
   readonly history: { readonly messages: readonly ModelMessage[] }
   readonly repaired: boolean
   readonly closers: readonly SessionEvent[]
@@ -108,6 +112,16 @@ export interface SessionBridge {
   storageUsage?(): Promise<StorageUsage>
   create(input: unknown): Promise<{ readonly session_id: string; readonly last_seq: number }>
   open(sessionId: string): Promise<OpenedSession>
+  /**
+   * 取一段更早的历史（"加载更早"）。
+   *
+   * `before_seq` 传当前已显示内容的最小 seq；服务端按**轮边界**向前取，
+   * 保证不会把某一轮切成两半。
+   */
+  pageHistory(input: { readonly session_id: string; readonly before_seq: number }): Promise<{
+    readonly events: readonly SessionEvent[]
+    readonly has_more_events: boolean
+  }>
   delete(input: { readonly session_id: string }): Promise<unknown>
   restore(input: { readonly session_id: string }): Promise<unknown>
   rename(input: { readonly session_id: string; readonly title: string }): Promise<{ readonly session_id: string; readonly title: string }>

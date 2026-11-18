@@ -23,7 +23,17 @@
         "type": "string",
         "description": "背景媒体地址：lcode-plugin://<插件id>/assets/xxx.mp4 可引用本插件目录里的图片或视频"
       },
-      "backgroundOpacity": { "type": "number", "description": "背景不透明度 0-1", "default": 1 }
+      "backgroundOpacity": { "type": "number", "description": "背景不透明度 0-1", "default": 1 },
+      "canvasVeil": {
+        "type": "string",
+        "description": "有背景时主画布的遮罩色（需半透明才看得见背景），如 rgba(20,20,28,0.55)",
+        "default": "rgba(20, 20, 28, 0.55)"
+      },
+      "elevatedVeil": {
+        "type": "string",
+        "description": "有背景时侧栏/面板的遮罩色（建议比画布更不透明，保证文字可读）",
+        "default": "rgba(24, 24, 32, 0.72)"
+      }
     }
   }
 }

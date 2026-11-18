@@ -76,9 +76,14 @@ html[data-cb='on'] {
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+/*
+ * `body` 不画背景色：插件背景容器是 `z-index:-1` 的 body 子节点，
+ * body 若有不透明背景就会把它盖住（皮肤永远看不见）。
+ * 画布色改由 `.shell` 承担——它盖在背景层之上，本身又是内容容器。
+ */
 body {
   font: 13.5px/21px var(--font-ui);
-  background: var(--bg-canvas);
+  background: transparent;
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
 }

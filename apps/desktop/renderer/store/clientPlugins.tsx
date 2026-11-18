@@ -77,6 +77,25 @@ export interface ClientApi {
   setBackgroundMedia(input: BackgroundMediaInput | null): void
   /** 旧接口：只设图片背景（保留兼容；新插件请用 `setBackgroundMedia`） */
   setBackgroundImage(input: { readonly url: string; readonly size?: string; readonly opacity?: number } | null): void
+  /**
+   * 注入一段**自己的 CSS**（对齐 DSH 的 `webserver/index-inject` 风格注入）。
+   *
+   * ## 什么时候用它而不是上面的便利 API
+   *
+   * `setCssVars` / `setBackgroundMedia` 是"简单路径"：覆盖令牌、放一张/一段背景。
+   * 但有些形态它们表达不了——比如自定义覆盖层的**层级与定位**、复杂的合成效果、
+   * 给特定区域加装饰。这类"具体能力"应当由插件用 CSS 自己实现，而不是要求
+   * 宿主为它新增 API。
+   *
+   * ## 边界（安全）
+   *
+   * - 样式按**插件 id 隔离**：同一插件重复注入覆盖旧样式表，卸载时自动移除；
+   * - `<style>` 元素由宿主创建，插件只能给文本，拿不到 DOM 引用；
+   * - 不允许 `@import`：那会让样式表加载外部资源，绕过插件资源协议与 CSP。
+   *
+   * 返回撤销函数（也可依赖自动清理）。
+   */
+  injectStyles(css: string): () => void
   /** 创建节点描述；插件不直接产出 React 元素 */
   h(tag: string, content?: string | NodeResult, props?: Readonly<Record<string, string>>): NodeResult
   /** 请求重渲染这个插槽（异步数据到达后调） */
@@ -123,6 +142,55 @@ export function clearCssVars(): void {
     else root.style.setProperty(name, previous)
   }
   appliedVars.clear()
+}
+
+/* ─────────── 插件样式注入（对齐 DSH 的 style 注入） ─────────── */
+
+/** 插件 id → 它的 <style> 元素。同一插件只保留一份，重复注入即替换。 */
+const injectedStyleNodes = new Map<string, HTMLStyleElement>()
+
+/**
+ * 给某个插件注入一段 CSS。
+ *
+ * 与 `setCssVars` 的分工（这是**能力边界**，不是风格问题）：
+ * - `setCssVars`：换配色这类"改令牌"的需求，插件只说"What token = What value"；
+ * - `injectStyles`：层级、定位、合成、特定区域装饰这类**具体实现**，
+ *   由插件自己写 CSS——宿主不该为每个插件形态新增 API（DSH 同此取舍：
+ *   它只提供 `webserver/index-inject` 这个注入入口，z-index 与半透明规则
+ *   都写在插件自己的 skin.css 里）。
+ *
+ * 安全边界：
+ * - `<style>` 由宿主创建并持有，插件只交文本，拿不到节点；
+ * - 拒绝 `@import`：否则样式能绕过插件资源协议去加载外部资源；
+ * - 按插件隔离 + 卸载自动清理（见 PluginSlot 的 cleanup）。
+ */
+export function injectPluginStyles(pluginId: string, css: string): void {
+  if (typeof document === 'undefined') return
+  if (typeof css !== 'string') throw new Error('injectStyles 需要一段 CSS 文本')
+  if (/@import\b/i.test(css)) {
+    throw new Error('injectStyles 不允许 @import：请用 lcode-plugin:// 引用插件自己的资源')
+  }
+  let node = injectedStyleNodes.get(pluginId)
+  if (node === undefined) {
+    node = document.createElement('style')
+    node.dataset['lcodePlugin'] = pluginId
+    document.head.appendChild(node)
+    injectedStyleNodes.set(pluginId, node)
+  }
+  node.textContent = css
+}
+
+/** 移除某个插件注入的全部样式（卸载/禁用时调） */
+export function clearPluginStyles(pluginId: string): void {
+  const node = injectedStyleNodes.get(pluginId)
+  if (node === undefined) return
+  node.remove()
+  injectedStyleNodes.delete(pluginId)
+}
+
+/** 移除所有插件样式（整页卸载时调） */
+export function clearAllPluginStyles(): void {
+  for (const id of [...injectedStyleNodes.keys()]) clearPluginStyles(id)
 }
 
 let backgroundNode: HTMLDivElement | undefined
@@ -182,12 +250,17 @@ export function applyBackgroundMedia(input: BackgroundMediaInput | null): void {
     node.id = 'lcode-plugin-background'
     /*
      * 固定铺满、**不接收指针事件**：皮肤不该挡住任何交互。
-     * z-index 0 + 页面内容本身有更高的层叠上下文，所以它落在最底下。
+     *
+     * `z-index: -1` 是这条便利路径的**默认值**（开箱即用：背景在内容之下）。
+     * 它不是硬性规则——插件需要别的层级时用 `api.injectStyles` 覆盖，
+     * 例如 `#lcode-plugin-background { z-index: 5 }`。宿主不替插件决定
+     * "我的皮肤该怎么摆"，只给一个合理的起点（DSH 同此取舍：它的宿主只
+     * 提供 style 注入入口，z-index 写在插件自己的 CSS 里）。
      */
     node.style.cssText = [
       'position:fixed',
       'inset:0',
-      'z-index:0',
+      'z-index:-1',
       'pointer-events:none',
       'background-position:center',
       'background-repeat:no-repeat',
@@ -402,6 +475,8 @@ export function PluginSlot({ plugins, slot }: { plugins: readonly ClientPlugin[]
   useEffect(() => () => {
     clearCssVars()
     applyBackgroundMedia(null)
+    // 注入的样式表同样要撤：否则停用插件后它的层级/装饰规则仍然生效
+    clearAllPluginStyles()
   }, [])
 
   const owners = useMemo(() => plugins.filter((plugin) => plugin.slots.includes(slot)), [plugins, slot])
@@ -422,6 +497,13 @@ export function PluginSlot({ plugins, slot }: { plugins: readonly ClientPlugin[]
       },
       setBackgroundImage: (input) => {
         applyBackgroundImage(input)
+      },
+      injectStyles: (css) => {
+        injectPluginStyles(plugin.id, css)
+        // 返回撤销器：插件也可在自身逻辑里主动撤回（不必等卸载）
+        return () => {
+          clearPluginStyles(plugin.id)
+        }
       },
       h: makeNodeApi(),
       refresh: () => {

@@ -74,13 +74,30 @@ interface PluginRow {
  * 后续 P6-03 的 utility host 只能消费本注册表已验证的安装记录。
  */
 export class LocalPluginRegistry {
-  private readonly db: ReturnType<typeof openIndexDb>;
   private readonly now: () => number;
   private writes: Promise<void> = Promise.resolve();
+  /** 注入的显式连接（测试用）；生产路径走 `db` getter 每次现取 */
+  private readonly injectedDb: ReturnType<typeof openIndexDb> | undefined;
 
   constructor(private readonly options: LocalPluginRegistryOptions) {
-    this.db = options.db ?? openIndexDb({ home: options.home });
+    this.injectedDb = options.db;
     this.now = options.now ?? Date.now;
+  }
+
+  /**
+   * 索引连接（**每次现取**，不缓存到实例上）。
+   *
+   * 之前是 `this.db = openIndexDb(...)` 缓存在构造期，结果是：只要有人
+   * 调过 `closeIndexDb(home)` / `closeAllIndexDbs()`（索引重建、`sessions.close()`、
+   * 测试清理都会），这个实例手里就留着一个已关闭的句柄，之后每次查询都抛
+   * `TypeError: The database connection is not open`——实测表现为"一打开设置页
+   * 的插件模块就报错"。
+   *
+   * `openIndexDb` 内部有连接缓存、且对已关闭的缓存会重开，所以现取是廉价的，
+   * 也天然自愈。
+   */
+  private get db(): ReturnType<typeof openIndexDb> {
+    return this.injectedDb ?? openIndexDb({ home: this.options.home });
   }
 
   list(

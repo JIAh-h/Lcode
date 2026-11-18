@@ -690,6 +690,7 @@ describe('A. 装配的接线正确性', () => {
       'delegate',
       'delegate_async',
       'delegate_wait',
+      'delete',
       'dispatch_worker',
       'edit',
       'glob',

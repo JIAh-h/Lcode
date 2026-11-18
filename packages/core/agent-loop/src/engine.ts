@@ -151,6 +151,13 @@ export class TurnEngine {
   private activeStepAbort: AbortController | null = null;
   /** 当前在跑的轮的收尾通知 */
   private inflight: Promise<TurnEndReason> | null = null;
+  /**
+   * 本轮 `turn/start` 的时间戳，注入到工具 scope。
+   *
+   * `delete` 工具用它区分"删自己本轮的临时产物"与"删用户原有文件"：
+   * 前者不该出现在产物卡片里，后者必须可见。
+   */
+  private turnStartedAt: number | undefined = undefined;
   private cancellation: Promise<void> | null = null;
   private readonly idleWaiters: Array<() => void> = [];
   /** 最近一个被用户暂停、尚未被续跑的回合。 */
@@ -431,6 +438,18 @@ export class TurnEngine {
 
     const turn = nextTurnNumber(session.events());
     const turnStart = session.append({ type: "turn/start", data: { turn } });
+    /*
+     * 本轮开始时刻（落到工具 scope 上）。
+     *
+     * 用途：判断"这个文件是不是本轮创建的"。`delete` 工具据此决定要不要
+     * 在产物卡片里显示——本轮建了又删的探针文件属于净效果为零，不该打扰用户；
+     * 删掉任务开始前就存在的文件是破坏性变更，必须可见。
+     *
+     * 取 `turn/start` 事件的 `time`（由 store 分配，与实际落盘时刻一致），
+     * 不在这里另取 `Date.now()`——两者差几毫秒，会让"刚创建就删"的文件
+     * 被判成旧文件。
+     */
+    this.turnStartedAt = turnStart.time;
     if (!item.continuation) {
       const userMsg = session.append({
         type: "user/message",
@@ -642,6 +661,7 @@ export class TurnEngine {
           const result = await this.executeTool(call, stepSignal, {
             sessionId: this.inner.sessionId,
             agentId: this.inner.id,
+            ...(this.turnStartedAt === undefined ? {} : { turnStartedAt: this.turnStartedAt }),
           });
           // 「立即引导」打断本步：被中止的工具结果标记“用户打断”（整轮取消不走这里）
           const interruptedNow = stepAbort.signal.aborted && !signal.aborted;
@@ -1010,7 +1030,7 @@ export class TurnEngine {
   private async executeTool(
     call: ToolCall,
     signal: AbortSignal,
-    scope: { readonly sessionId: string; readonly agentId: string },
+    scope: { readonly sessionId: string; readonly agentId: string; readonly turnStartedAt?: number },
   ): Promise<ToolResult> {
     const tools: ToolRegistry = this.deps.ctx.get("tools");
     try {

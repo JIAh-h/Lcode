@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { PointerEvent as ReactPointerEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
@@ -35,8 +35,15 @@ import { ComposerBar, type Attachment, type ComposerSendInput, type ImageAttachm
  */
 
 interface SessionBridge {
+  /** 取更早的一页历史（按轮边界切） */
+  pageHistory(input: { readonly session_id: string; readonly before_seq: number }): Promise<{
+    readonly events: readonly SessionEvent[]
+    readonly has_more_events: boolean
+  }>
   open(sessionId: string): Promise<{
     events: readonly SessionEvent[]
+    /** 更早还有内容（首屏只给最后若干轮） */
+    has_more_events?: boolean
     history: { messages: readonly ModelMessage[] }
     repaired: boolean
     /** 日志末尾是一个失败的轮（`turn/end {reason:'error'}`） */
@@ -84,6 +91,7 @@ function bridge(): SessionBridge | undefined {
   if (lcode?.session === undefined || lcode.agent === undefined) return undefined
   return {
     open: (id) => lcode.session!.open(id),
+    pageHistory: (input) => lcode.session!.pageHistory(input),
     onEvent: (h) => lcode.session!.onEvent(h),
     onChunks: (h) => lcode.session!.onChunks(h),
     onTurnFailed: (h) => lcode.session!.onTurnFailed(h),
@@ -525,6 +533,10 @@ export function SessionStream({
 }) {
   /** 全部事件（open 时的历史 + 事件流推来的增量）——投影的唯一输入 */
   const [events, setEvents] = useState<readonly SessionEvent[]>([])
+  /** 主进程说更早还有内容（首屏只给了最后若干轮） */
+  const [hasMoreEvents, setHasMoreEvents] = useState(false)
+  /** "加载更早"正在进行中，避免连点导致重复请求 */
+  const [loadingEarlier, setLoadingEarlier] = useState(false)
   /** 回退重发后自增：重新 open 一次，把已经渲染出来的旧轮次从内存里抹掉 */
   const [reloadEpoch, setReloadEpoch] = useState(0)
   /** 流式中的增量文本（`assistant/message` 落盘前的"打字过程"） */
@@ -651,6 +663,7 @@ export function SessionStream({
         // open() 与订阅可能并发完成，合并时按 seq 去重，避免首屏丢事件或重复消息。
         const merged = [...openedSession.events, ...buffered].sort((a, b) => a.seq - b.seq)
         const unique = merged.filter((event, index) => index === 0 || event.seq !== merged[index - 1]!.seq)
+        setHasMoreEvents(openedSession.has_more_events === true)
         setEvents(unique)
         const lastTurn = [...unique].reverse().find((event) => event.type === 'turn/end')
         setPaused(lastTurn?.type === 'turn/end' && lastTurn.data.reason === 'cancelled')
@@ -877,6 +890,37 @@ export function SessionStream({
     return decisions
   }, [events])
   /** 固定/屏蔽标记：last-write-wins，和主进程的投影规则一致 */
+  /**
+   * **加载更早的一页历史**（按轮边界切，见主进程的 session.history）。
+   *
+   * 首屏只给最后若干轮，所以往前翻要真的去主进程取——之前这里只是放大
+   * 渲染窗口，本地根本没有更早的事件，翻到头就是空的。
+   *
+   * 合并时按 seq 去重：实时事件与历史页可能有重叠区间。
+   */
+  const loadEarlier = useCallback(async (): Promise<void> => {
+    const api = bridge()
+    if (api === undefined || loadingEarlier) return
+    const oldest = events[0]?.seq
+    if (oldest === undefined) return
+    setLoadingEarlier(true)
+    try {
+      const page = await api.pageHistory({ session_id: sessionId, before_seq: oldest })
+      setHasMoreEvents(page.has_more_events)
+      if (page.events.length > 0) {
+        setEvents((prev) => {
+          const seen = new Set(prev.map((event) => event.seq))
+          const merged = [...page.events.filter((item: SessionEvent) => !seen.has(item.seq)), ...prev]
+          return merged.sort((a, b) => a.seq - b.seq)
+        })
+      }
+    } catch {
+      // 取失败就保持原样：用户可以再点一次
+    } finally {
+      setLoadingEarlier(false)
+    }
+  }, [events, loadingEarlier, sessionId])
+
   const markers = useMemo(() => {
     const map = new Map<number, { muted: boolean; pinned: boolean }>()
     for (const event of events) {
@@ -1299,7 +1343,13 @@ export function SessionStream({
           className="ssmore"
           onClick={() => {
             anchorRef.current = scrollerRef.current?.scrollHeight ?? null
-            setVisibleLimit((n) => n * 2)
+            /*
+             * 先扩渲染窗口；如果已经渲染完了本地所有轮、而主进程说更早还有，
+             * 再向主进程要一页（按轮边界切，见 session.history）。
+             */
+            const next = visibleLimit * 2
+            setVisibleLimit(next)
+            if (next >= blocks.length && hasMoreEvents) void loadEarlier()
           }}
         >
           {t('加载更早的 {n} 轮', { n: Math.min(hiddenCount, visibleLimit) })}
@@ -1328,18 +1378,40 @@ export function SessionStream({
             ) ?? null
         /*
          * 被编辑的文件是**产物**，不是过程（docs/10，仿 DSH）：
-         * edit/write 的 diff 卡片从"执行过程"里剔除，聚合后在回复末尾
-         * 用 EditedFilesCard 展示——悬停文件行弹出 diff（复用 Git 工作区观感）。
+         * edit/write 的 diff 卡片聚合后渲染在回复末尾。
+         *
+         * **必须从原始 `events` 收集，不能用 `block.events`**：`timeline`
+         * 只保留 user/assistant/tool/`call`/approval 四类，`tool/result`
+         * 根本不在里面——diff 的 meta 恰恰挂在 `tool/result` 上。
+         * 用 block.events 的话产物卡片永远不出现（实测踩过：改了 README
+         * 却没有产物卡）。
+         *
+         * 归属这一轮的方式：按 seq 区间（本轮用户消息 seq 之后、下一轮
+         * 用户消息 seq 之前）。seq 是日志单调递增的，比按 turn 字段更直接。
          */
-        const editedFiles: EditedFile[] = []
-        const process = block.events.filter((event) => {
-          if (final !== null && event.seq === final.seq) return false
-          if (event.type !== 'tool/result') return true
+        const turnStartSeq = block.user?.seq ?? 0
+        const nextBlock = visibleBlocks[index + 1]
+        const turnEndSeq = nextBlock?.user?.seq ?? Number.POSITIVE_INFINITY
+        /*
+         * **按文件路径聚合**（不是每次 write/edit 各列一行）。
+         *
+         * 一次任务里同一文件常被写一次、再改两三次——实测 README.md 就出现了
+         * 三行（+262-0 / +19-13 / +8-6）。用户关心的是"这一轮动了哪些文件、
+         * 净变化多少"，逐次罗列既冗余又看不出总量。
+         *
+         * 聚合规则：
+         * - 同一路径只留一条，additions/deletions 累加；
+         * - kind：只要有一次 create 就记 create，否则 modify；
+         * - hunks 按出现顺序拼接，悬停时能看到全部改动。
+         */
+        const byPath = new Map<string, { path: string; kind: string; additions: number; deletions: number; hunks: EditedFileHunk[]; seq: number }>()
+        for (const event of events) {
+          if (event.type !== 'tool/result') continue
+          if (event.seq <= turnStartSeq || event.seq >= turnEndSeq) continue
           const meta = (event.data as { readonly meta?: unknown }).meta
-          if (typeof meta !== 'object' || meta === null) return true
+          if (typeof meta !== 'object' || meta === null) continue
           const record = meta as Record<string, unknown>
-          if (record['card'] !== 'diff' || !Array.isArray(record['changes'])) return true
-          const rawChanges = record['changes'] as readonly unknown[]
+          if (record['card'] !== 'diff' || !Array.isArray(record['changes'])) continue
           const rawHunks = record['hunks']
           const hunks: EditedFileHunk[] = Array.isArray(rawHunks)
             ? rawHunks.flatMap((value) => {
@@ -1350,18 +1422,48 @@ export function SessionStream({
                 return oldLines.length > 0 || newLines.length > 0 ? [{ oldLines, newLines }] : []
               })
             : []
-          for (const value of rawChanges) {
+          for (const value of record['changes'] as readonly unknown[]) {
             if (typeof value !== 'object' || value === null) continue
             const item = value as Record<string, unknown>
             if (typeof item['path'] !== 'string' || typeof item['kind'] !== 'string') continue
-            editedFiles.push({
-              path: item['path'],
-              kind: item['kind'],
-              additions: typeof item['additions'] === 'number' ? item['additions'] : 0,
-              deletions: typeof item['deletions'] === 'number' ? item['deletions'] : 0,
-              ...(hunks.length === 0 ? {} : { hunks }),
-            })
+            const path = item['path']
+            const additions = typeof item['additions'] === 'number' ? item['additions'] : 0
+            const deletions = typeof item['deletions'] === 'number' ? item['deletions'] : 0
+            const existing = byPath.get(path)
+            if (existing === undefined) {
+              byPath.set(path, {
+                path,
+                kind: item['kind'],
+                additions,
+                deletions,
+                hunks: [...hunks],
+                seq: event.seq,
+              })
+              continue
+            }
+            existing.additions += additions
+            existing.deletions += deletions
+            // create 优先：先建后改的文件本质仍是"本轮新建的"
+            if (item['kind'] === 'create') existing.kind = 'create'
+            existing.hunks.push(...hunks)
           }
+        }
+        const editedFiles: EditedFile[] = [...byPath.values()].map((entry) => ({
+          path: entry.path,
+          kind: entry.kind,
+          additions: entry.additions,
+          deletions: entry.deletions,
+          ...(entry.hunks.length === 0 ? {} : { hunks: entry.hunks }),
+          seq: entry.seq,
+          sessionId,
+        }))
+        const process = block.events.filter((event) => {
+          if (final !== null && event.seq === final.seq) return false
+          if (event.type !== 'tool/result') return true
+          /*
+           * diff 的结果已经从原始 events 收集过了（见上方 editedFiles），
+           * 这里只负责把它从"执行过程"里剔除——产物不该混在步骤列表里。
+           */
           return false
         })
         const open = openBlocks[block.key] ?? blockRunning
@@ -1388,7 +1490,14 @@ export function SessionStream({
               <TurnProcessList events={process} running={blockRunning} renderEvent={renderProcessEvent} />
             )}
             {!editingTurn && final !== null ? renderMessage(final) : null}
-            {!editingTurn && editedFiles.length > 0 && <EditedFilesCard files={editedFiles} />}
+            {/*
+              * 产物卡片**整轮结束后**才出现（运行中不显示）。
+              *
+              * 模型回复途中会陆续写文件；实时显示的话，卡片会在正文还没说完时
+              * 就跳出来、数字还在变，读起来像"结论插在过程中间"。产物是**结果**，
+              * 该跟在完整回复之后——用 `!blockRunning` 压住，等这一轮收尾。
+              */}
+            {!editingTurn && !blockRunning && editedFiles.length > 0 && <EditedFilesCard files={editedFiles} />}
           </div>
         )
       })}

@@ -13,7 +13,17 @@
 .is-scrolling::-webkit-scrollbar-thumb:hover { background: var(--border-strong); }
 ::-webkit-scrollbar-corner { background: transparent; }
 
-.shell { display: flex; flex-direction: column; height: 100vh; }
+/*
+ * `.shell` 建自己的层叠上下文（`position: relative`），保证它**总是**压在任何
+ * 全窗覆盖层之上——菜单栏、侧栏、会话区不该被插件做的东西盖掉，这是宿主必须
+ * 兜住的底线（否则插件一写 `position:fixed` 界面就不可用）。
+ *
+ * `z-index` 的具体值刻意不在这里定死配合关系：插件若需要更精细的层级
+ * （自己的覆盖层、装饰、遮罩），用 `api.injectStyles` 写它的 CSS 去决定——
+ * 这正是 DSH 的做法（它只提供 style 注入入口，z-index 与半透明规则都写在
+ * 插件自己的 skin.css 里）。
+ */
+.shell { display: flex; flex-direction: column; height: 100vh; position: relative; z-index: 1; background: var(--bg-canvas); }
 
 /* ── 菜单栏 ── */
 .menubar { display: flex; align-items: center; gap: var(--s3); padding: 0 var(--s4); height: 34px; background: var(--bg-panel); border-bottom: 1px solid var(--border-subtle); flex-shrink: 0; }
@@ -423,12 +433,50 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pending .ptxt { color: var(--text-primary); }
 .pending button { margin-left: auto; font-size: 12px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border-strong); background: var(--bg-elevated); color: var(--text-primary); cursor: pointer; }
 .pending button:hover { background: var(--bg-inset); }
-.cinput { flex: none; background: var(--bg-canvas); padding: var(--s2) var(--s7) var(--s4); }
+/*
+ * 输入区的底色**不额外铺一层**，由 `.shell` 的画布色承担（见上面 `.shell` 的
+ * 说明）。这里保持透明的原因：
+ *
+ * - 全窗皮肤需要壁纸透到输入区背后。若在这里铺一层 `--bg-canvas`，令牌即使是
+ *   半透明也会被叠两次（`.shell` 一次 + 这里一次），输入区就比会话区更暗，
+ *   形成一条人眼可见的分界——实测就是这个现象。
+ * - 背景只影响绘制，**不影响布局**：`padding` 与 `flex: none` 都不变，
+ *   去掉背景不会让输入框位移。
+ */
+.cinput { flex: none; background: transparent; padding: var(--s2) var(--s7) var(--s4); }
 /* 会话区与输入框之间的常驻状态条：高度即芯片高度，下沉一半压住输入框上缘，
    上方 20px 渐隐把会话内容收到这条边界后面（内容滚动时自然淡出） */
 .turnstrip { position: relative; z-index: 6; flex: none; display: flex; align-items: center; justify-content: center; gap: 8px; height: 28px; margin-bottom: -14px; padding: 0 var(--s7); background: transparent; pointer-events: none; }
 .turnstrip > * { pointer-events: auto; }
-.turnstrip::before { content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 20px; background: linear-gradient(to bottom, transparent, var(--bg-canvas)); pointer-events: none; }
+/*
+ * 渐隐遮罩的终点色也必须是令牌：写死 `var(--bg-canvas)` 时它是**不透明**的，
+ * 于是这条 20px 的渐变在壁纸上方形成一道色带，看起来就是"会话区与输入框之间
+ * 有条缝"。令牌是半透明时，渐变自然也透出背景。
+ */
+/*
+ * 上方 20px 渐隐：**保留遮挡作用，但不画出可见色带**。
+ *
+ * 之前用 `linear-gradient(transparent, var(--bg-canvas))` 画一条从透明到底色的
+ * 渐变——在没有壁纸时它和背景同色，看不出来；一旦皮肤把 `--bg-canvas` 改成
+ * 半透明（壁纸需要），这条渐变就叠在壁纸上变成一道**可见的色带**，看起来
+ * 像会话区和输入框之间有条缝。
+ *
+ * 改成 `backdrop-filter` 模糊：它只模糊背后的内容（达到'内容收到边界后面'的
+ * 原意），本身不填充颜色，所以不会再出现色带。无背景时看不出差别。
+ */
+.turnstrip::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 100%;
+  height: 20px;
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+  mask-image: linear-gradient(to bottom, transparent, black);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black);
+  pointer-events: none;
+}
 .turnstrip .turnbar { margin: 0; }
 /* 输入框上方的本轮状态芯片（仿 Qoder）：默认一行，悬停浮出列表 */
 .turnbar { display: flex; align-items: center; justify-content: center; gap: 8px; max-width: 780px; margin: 0 auto var(--s2); }
@@ -667,7 +715,8 @@ body.noside .side { display: none; }
 
 /* ── 设置（Codex 布局：左面包栏 + 右内容区） ── */
 .setwrap { flex: 1; display: flex; min-height: 0; width: 100%; }
-.setnav { width: 220px; flex: none; border-right: 1px solid var(--border-subtle); background: var(--bg-panel); padding: var(--s5) var(--s3); overflow: auto; display: flex; flex-direction: column; }
+/* 宽度由组件内联设置（与会话区共用 lcode.layout.leftWidth），这里不再写死 */
+.setnav { flex: none; border-right: 1px solid var(--border-subtle); background: var(--bg-panel); padding: var(--s5) var(--s3); overflow: auto; display: flex; flex-direction: column; }
 .setnav .setback { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; margin-bottom: var(--s3); border-radius: var(--r2); font-size: 13px; color: var(--text-primary); text-align: left; }
 .setnav .setback:hover { background: var(--bg-inset); }
 .setnav .setback svg { color: var(--text-muted); flex: none; }
@@ -751,6 +800,18 @@ body.noside .side { display: none; }
 .ext-desc { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ext-tag { flex: none; padding: 1px 6px; border-radius: 4px; background: var(--bg-inset); color: var(--text-muted); font-size: 10.5px; }
 .ext-tag.on { color: var(--state-success); background: color-mix(in srgb, var(--state-success) 10%, transparent); }
+/*
+ * 插件自己的管理面板（`settings.section` 插槽）：展开在插件行下方。
+ * 左侧留出与行内图标对齐的缩进，并用一条细边表达"它属于上面那个插件"。
+ */
+.ext-panel {
+  margin: 0 0 4px 30px;
+  padding: 12px 14px;
+  border-left: 2px solid var(--border-subtle);
+  background: var(--bg-inset);
+  border-radius: 0 var(--r2) var(--r2) 0;
+}
+.ext-panel:empty { display: none; }
 .ext-readonly { flex: none; font-size: 11px; color: var(--text-muted); }
 .ext-empty { margin: var(--s4) var(--s5); padding: 26px 16px; border: 1px dashed var(--border-subtle); border-radius: var(--r3); text-align: center; }
 .ext-empty-icon { color: var(--text-muted); font-size: 20px; opacity: 0.55; }

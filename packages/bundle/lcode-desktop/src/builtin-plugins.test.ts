@@ -113,3 +113,27 @@ describe('buildBuiltinPluginCatalog', () => {
     }
   })
 })
+
+describe('第三方插件不混入内置能力目录', () => {
+  /*
+   * 统一加载器把第三方插件也装配进 profile（id 形如 `plugin:<id>@<version>`），
+   * 但它们不属于"随应用出厂的内置能力"：那一栏的开关写的是 plugins.disabled
+   * （装配期禁用），对第三方插件既不生效也不该被这样关。实测截图里出现过
+   * `plugin:lcode.wallpaper@0.1.0` 显示成"内置运行时组合条目"，就是漏了这一步过滤。
+   */
+  it('composition 里的 plugin:* 条目不出现在全局插件清单', () => {
+    const withThirdParty = {
+      profile: 'desktop-default',
+      entries: [
+        ...composition.entries,
+        { id: 'plugin:lcode.wallpaper@0.1.0', provides: [], adopts: [], requires: [] },
+        { id: 'plugin:acme.demo@0.1.0', provides: [], adopts: [], requires: [] },
+      ],
+    }
+    const built = buildBuiltinPluginCatalog({ composition: withThirdParty, tools, platform: 'win32' })
+    const ids = built.plugins.map((plugin) => plugin.id)
+    expect(ids.some((id) => id.startsWith('plugin:'))).toBe(false)
+    // 内置条目该在的还在（不是一刀切清空）
+    expect(ids).toContain('tooling-local')
+  })
+})

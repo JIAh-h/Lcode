@@ -145,6 +145,63 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
   }, [nextCursor, loadingMore])
 
+  /*
+   * **实时运行态**（修复：图标要等模型回完才出现）。
+   *
+   * `session.list()` 的 `status` 来自 SQLite 索引投影，而投影是**异步批量**写的
+   * （IndexWriter.schedule → drainOnce）。于是 turn/start 已经发生、模型已经在跑，
+   * 索引里却还是 idle——侧栏图标要等投影落盘才亮，实测表现为"模型回完才出现"。
+   *
+   * 这里直接吃实时事件流：turn/start 记入运行集，turn/end 移出。与索引 status
+   * 取**并集**（`isRunning`），两边任一为真即显示运行中——索引负责冷启动/重开
+   * 应用后仍然正确，事件负责"立刻"。
+   */
+  const [liveRunning, setLiveRunning] = useState<ReadonlySet<string>>(() => new Set())
+  /** 已经有实时结论的会话：它们的运行态以事件为准，不被滞后的索引 status 覆盖 */
+  const liveAuthoritative = useRef<Set<string>>(new Set())
+  useEffect(() => {
+    const bridge = sessionBridge()
+    if (bridge === undefined) return
+    const dispose = bridge.onEvent((payload) => {
+      const record = payload as { session_id?: unknown; event?: { type?: unknown } } | null
+      const sessionId = record?.session_id
+      const type = record?.event?.type
+      if (typeof sessionId !== 'string' || typeof type !== 'string') return
+      if (type !== 'turn/start' && type !== 'turn/end') return
+      const running = type === 'turn/start'
+      liveAuthoritative.current.add(sessionId)
+      setLiveRunning((prev) => {
+        if (running === prev.has(sessionId)) return prev
+        const next = new Set(prev)
+        if (running) next.add(sessionId)
+        else next.delete(sessionId)
+        return next
+      })
+      /*
+       * turn 结束立刻刷一次列表：索引投影是异步批量的，不主动刷的话它可能
+       * 一直停在 busy（turn 结束后没有新事件再触发投影），图标会一直亮。
+       */
+      if (!running) void refreshSessions()
+    })
+    return () => {
+      dispose()
+    }
+  }, [refreshSessions])
+  /**
+   * 会话是否在运行。
+   *
+   * 实时事件优先：拿到过 turn/start|end 的会话，以它为准——索引的 `status`
+   * 是异步投影出来的，会慢一拍（实测表现为"模型回完才亮图标"）。
+   * 没收到过事件的会话（重开应用、别人的会话）回落到索引 status。
+   */
+  const isRunning = useCallback(
+    (meta: SessionMeta): boolean => {
+      if (liveAuthoritative.current.has(meta.session_id)) return liveRunning.has(meta.session_id)
+      return meta.status === 'busy'
+    },
+    [liveRunning],
+  )
+
   useEffect(() => {
     void refreshSessions()
     const refresh = () => void refreshSessions()
@@ -362,15 +419,14 @@ export function AppShell({ children }: { children: ReactNode }) {
   const renderSessionRow = (it: SessionMeta): ReactNode => {
     const workers = workersByParent.get(it.session_id) ?? []
     /*
-     * 会话运行指示（docs/30 §9.7）：status 由事件日志派生（project.ts：
-     * hasOpenTurn ? busy/waiting-approval : idle），`session.list` 已返回。
-     * 之前侧栏没用它，"哪个会话在跑"只能点进去才知道。
-     *
-     * waiting-approval 比 busy 更需要被看见：它是"必须有人点一下才能继续"的状态，
-     * 配上不同颜色。error 也给出标记，避免用户以为任务还挂在那里。
+     * 会话运行指示：运行态以**实时事件**为准（`isRunning`，见上方 liveRunning），
+     * 索引 status 只说"上一次投影时"的状态，会慢一拍。
+     * waiting-approval 比运行中更需要被看见：它是"必须有人点一下才能继续"的状态。
+     * error 也给出标记，避免用户以为任务还挂在那里。
      */
+    const running = isRunning(it)
     const statusTitle =
-      it.status === 'busy' ? t('任务进行中…')
+      running ? t('任务进行中…')
         : it.status === 'waiting-approval' ? t('等待审批——需要你确认才能继续')
           : it.status === 'error' ? t('上一轮出错') : undefined
     return (
@@ -383,7 +439,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               </span>
             )}
             <span className="sname">{it.title || t('未命名会话')}</span>
-            {it.status === 'busy' && (
+            {running && (
               <span className="srun" title={statusTitle} aria-label={statusTitle}>
                 <svg className="srun-spin" width="11" height="11" viewBox="0 0 16 16" fill="none">
                   <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.8" strokeDasharray="26 12" strokeLinecap="round" />
@@ -416,7 +472,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             <NavLink to={`/sessions/${worker.session_id}`} className="sitem" title={worker.title || t('未命名会话')}>
               <span className="sname">{worker.title || t('未命名会话')}</span>
-              {worker.status === 'busy' && (
+              {isRunning(worker) && (
                 <span className="srun" title={t('任务进行中…')}>
                   <svg className="srun-spin" width="11" height="11" viewBox="0 0 16 16" fill="none">
                     <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.8" strokeDasharray="26 12" strokeLinecap="round" />

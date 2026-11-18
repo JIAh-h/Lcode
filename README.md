@@ -37,7 +37,8 @@ Lcode 是一个本地优先的 AI coding agent：
 
 **Agent 能力**
 
-- 工具流水线：`read / write / edit / glob / grep / shell / terminal / jobs / lsp / web …`
+- 工具流水线：`read / write / edit / delete / glob / grep / shell / terminal / jobs / lsp / web …`；`delete` 只删单个文件或空目录（不递归），模型收尾清理临时产物用它，不走 shell
+- 长会话按轮分页：首屏只发最后若干轮（按 turn 边界切，不会劈开一轮），流式增量不进历史回放路径；产物卡片的逐行 diff 悬停时才按需读取
 - 权限预设（只读 / 标准 / 自动 / 完全访问 / 无人值守）、逐次审批、OS 级沙箱（Windows 原生沙箱已真机验收）
 - 计划模式：先只读探索出计划，确认后再执行；写后 diff 审阅与检查点回滚
 - 异步子代理：`delegate_async` / `delegate_wait` 派发长任务不阻塞主对话，取消向上传播

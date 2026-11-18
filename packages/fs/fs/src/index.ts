@@ -13,6 +13,7 @@ export type {
   FsMutationGrant,
   FsReadOpts,
   FsReadResult,
+  FsRemoveResult,
   FsService,
   FsStat,
   FsWriteOpts,

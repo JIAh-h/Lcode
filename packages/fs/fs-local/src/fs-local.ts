@@ -10,6 +10,7 @@ import type {
   FsMutationAuthority,
   FsReadOpts,
   FsReadResult,
+  FsRemoveResult,
   FsService,
   FsStat,
   FsWriteOpts,
@@ -18,7 +19,7 @@ import type {
 import { canonicalPath, normalizePath } from '@lcode/fs'
 import { ERROR_CODES, LcodeErrorImpl } from '@lcode/util'
 import { readFileSync } from 'node:fs'
-import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rmdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
 
 /**
@@ -277,6 +278,34 @@ export function createLocalFs(options: LocalFsOptions): FsService {
       } catch (err) {
         throw ioFailed(`列目录失败：${dir}`, err)
       }
+    },
+
+    /**
+     * 删除单个文件 / 空目录（不递归）。
+     *
+     * `rmdir` 在目录非空时会以 ENOTEMPTY 失败——这正是想要的：删目录必须
+     * 先把里面的东西逐个删掉，而不是一条命令抹掉一片。
+     */
+    async remove(path: string): Promise<FsRemoveResult> {
+      const target = abs(path)
+      let kind: 'file' | 'dir'
+      try {
+        const s = await stat(target)
+        kind = s.isDirectory() ? 'dir' : 'file'
+      } catch (err) {
+        throw ioFailed(`删除失败（文件不存在）：${target}`, err)
+      }
+      try {
+        if (kind === 'dir') await rmdir(target)
+        else await unlink(target)
+      } catch (err) {
+        // 目录非空给出可操作的原因，而不是把 ENOTEMPTY 原样抛给模型
+        if (err instanceof Error && 'code' in err && (err as { code?: unknown }).code === 'ENOTEMPTY') {
+          throw ioFailed(`目录非空，请先逐个删除里面的文件：${target}`, err)
+        }
+        throw ioFailed(`删除失败：${target}`, err)
+      }
+      return { path: target, kind, removed: true }
     },
   }
 }

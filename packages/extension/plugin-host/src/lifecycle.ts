@@ -1,6 +1,19 @@
 import type { Context } from '@lcode/context'
 import type { PluginManifest } from '@lcode/plugin-manifest'
 import type { PluginCapabilityCatalog } from '@lcode/plugin-sdk'
+
+/**
+ * 没有 host 的插件（纯客户端）的能力账本。
+ *
+ * 它们不申请任何宿主能力（渲染层能做的事由 `api` 决定，与 permissions 无关），
+ * 但 `PluginInspection` 的形状要求这一项存在。
+ */
+const EMPTY_CAPABILITIES: PluginCapabilityCatalog = {
+  fs: { read: [], write: [] },
+  network: [],
+  spawn: [],
+  env: [],
+}
 import type { SystemPromptService } from '@lcode/system-prompt'
 import type { ToolDefinition, ToolInputSchema, ToolRegistry } from '@lcode/tools'
 import { ERROR_CODES, LcodeErrorImpl, isJsonValue, type Disposer, type JsonValue } from '@lcode/util'
@@ -97,7 +110,15 @@ export class PluginLifecycleManager {
 
   inspect(): readonly PluginInspection[] {
     return [...this.#records.values()]
-      .filter((record) => record.state === 'active' && record.host !== undefined)
+      /*
+       * `host !== undefined` 曾经是这里的硬条件——但**纯客户端插件根本没有 host**
+       * （只有渲染层入口，没有工具/提示段/事件订阅）。于是它们虽然被标成
+       * active，却永远不出现在 inspect() 里，设置页那行就一直显示"未启动"，
+       * 点"启动"还会提示"已启动"——两处说法互相矛盾（实测踩过）。
+       *
+       * 现在：只要记录处于 active 就算激活；没有 host 时 capabilities 用空集。
+       */
+      .filter((record) => record.state === 'active')
       .map((record) => ({
         ...toActivePlugin(record),
         contributes: {
@@ -105,7 +126,7 @@ export class PluginLifecycleManager {
           services: [...(record.target.manifest.contributes.services ?? [])],
           promptSections: [...(record.target.manifest.contributes.promptSections ?? [])],
         },
-        capabilities: record.host!.capabilities,
+        capabilities: record.host?.capabilities ?? EMPTY_CAPABILITIES,
       }))
       .sort((left, right) => `${left.id}@${left.version}`.localeCompare(`${right.id}@${right.version}`))
   }
@@ -130,6 +151,33 @@ export class PluginLifecycleManager {
 
   async deactivate(target: Pick<PluginLifecycleTarget, 'manifest'>): Promise<void> {
     await this.deactivateByKey(`${target.manifest.id}@${target.manifest.version}`)
+  }
+
+  /**
+   * 登记一个**纯客户端插件**的激活状态（不启动 host）。
+   *
+   * 这类插件只在渲染层工作（主题、面板），host 的 `activate` 是空的，起程序
+   * 只会白等一个必定超时的握手。但它们**仍然是已激活的插件**——设置页要显示
+   * "运行中"、用户要能停用/卸载，所以必须在记录表里有一条。
+   *
+   * 之前这条记录压根不存在，于是 `inspect()` 永远看不到它：点"启动"提示
+   * "已启动"，行内却仍是"未启动"（实测踩过）。
+   */
+  registerClientOnly(target: PluginLifecycleTarget): ActivePlugin {
+    const key = pluginKey(target)
+    const existing = this.#records.get(key)
+    if (existing !== undefined) return toActivePlugin(existing)
+    const record: LifecycleRecord = {
+      key,
+      target,
+      state: 'active',
+      disposers: [],
+      stopRequested: false,
+      settled: undefined as unknown as Promise<ActivePlugin>,
+    }
+    record.settled = Promise.resolve(toActivePlugin(record))
+    this.#records.set(key, record)
+    return toActivePlugin(record)
   }
 
   async deactivateByKey(key: string): Promise<void> {
@@ -338,8 +386,10 @@ export class InstalledPluginLifecycleService {
       || (contributes.promptSections?.length ?? 0) > 0
       || (contributes.services?.length ?? 0) > 0
     if (!hostNeeded) {
+      /* 纯客户端插件：登记激活状态即可（渲染层由 clientPlugins 加载），不起 host */
+      const active = this.lifecycle.registerClientOnly(target)
       await this.installations.setEnabled({ ...input, enabled: true })
-      return { id: target.manifest.id, version: target.manifest.version, state: 'active' }
+      return active
     }
     const active = await this.lifecycle.activate(target)
     try {

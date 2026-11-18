@@ -37,8 +37,8 @@ const run = (name: string, args: unknown): ReturnType<InMemoryToolRegistry['exec
   tools.execute(call(name, args), { signal: new AbortController().signal })
 
 describe('工具清单', () => {
-  it('注册了五个文件工具', () => {
-    expect(tools.schemas().map((s) => s.name).sort()).toEqual(['edit', 'glob', 'grep', 'read', 'write'])
+  it('注册了六个文件工具（含 delete：模型收尾清理临时产物要用）', () => {
+    expect(tools.schemas().map((s) => s.name).sort()).toEqual(['delete', 'edit', 'glob', 'grep', 'read', 'write'])
   })
 
   it('每个工具都有 description 与 inputSchema（模型靠它决定怎么调）', () => {
@@ -203,5 +203,48 @@ describe('P5-00：写工具透传调用身份', () => {
       { signal: new AbortController().signal, scope: { sessionId: 'session-a' } },
     )
     expect(result).toMatchObject({ ok: false, error: { code: 'ET-DENIED' } })
+  })
+})
+
+describe('delete 的产物卡片策略', () => {
+  /*
+   * 用户要求的行为：本轮新建又删掉的临时文件**不显示**在产物卡片里
+   * （它本来是净效果为零的探针）；删掉任务开始前就存在的文件才显示。
+   */
+  it('删本轮新建的临时文件：changes 为空，不打扰用户', async () => {
+    const scope = { sessionId: 'session-del' }
+    /*
+     * turnStartedAt 必须**早于**文件创建：它语义上是"本轮开始时刻"，
+     * 而文件是本轮中途写的。取删除时的 Date.now() 会让 mtime 落在它之前，
+     * 于是被判成"删除已有文件"——这正是这条用例最初失败的原因（时序不确定）。
+     */
+    const turnStartedAt = Date.now() - 60_000
+    await tools.execute(
+      { callId: 'w1', name: 'write', arguments: JSON.stringify({ path: 'probe.txt', content: 'x' }) },
+      { signal: new AbortController().signal, scope },
+    )
+    const r = await tools.execute(
+      { callId: 'd1', name: 'delete', arguments: JSON.stringify({ path: 'probe.txt' }) },
+      { signal: new AbortController().signal, scope: { ...scope, turnStartedAt } },
+    )
+    expect(r.ok).toBe(true)
+    expect((r.value as { preexisting?: boolean }).preexisting).toBe(false)
+    expect((r.meta as { changes?: readonly unknown[] }).changes).toEqual([])
+  })
+
+  it('删本轮之前就存在的文件：changes 里出现 delete 记录', async () => {
+    const scope = { sessionId: 'session-del-old' }
+    await tools.execute(
+      { callId: 'w1', name: 'write', arguments: JSON.stringify({ path: 'legacy.txt', content: 'x' }) },
+      { signal: new AbortController().signal, scope },
+    )
+    // turnStartedAt 设为未来 ⇒ 文件必然"更旧"，应当被判定为删除已有文件
+    const r = await tools.execute(
+      { callId: 'd1', name: 'delete', arguments: JSON.stringify({ path: 'legacy.txt' }) },
+      { signal: new AbortController().signal, scope: { ...scope, turnStartedAt: Date.now() + 60_000 } },
+    )
+    expect(r.ok).toBe(true)
+    expect((r.value as { preexisting?: boolean }).preexisting).toBe(true)
+    expect((r.meta as { changes?: readonly { kind?: string }[] }).changes?.[0]?.kind).toBe('delete')
   })
 })

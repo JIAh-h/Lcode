@@ -293,7 +293,20 @@ export function buildBuiltinPluginCatalog(input: BuiltinPluginCatalogInput): Bui
     })
   }
 
-  const entries = [...input.composition.entries]
+  /*
+   * **第三方插件不属于「内置能力」**。
+   *
+   * 统一加载器把第三方插件也装配进 profile，条目 id 形如
+   * `plugin:<id>@<version>`（见 agent-runtime 的命名空间约定）。如果不过滤：
+   * - 它们会在「全局插件」里显示成"内置运行时组合条目"（查不到元数据，
+   *   用的是兜底文案），用户看到 `plugin:lcode.wallpaper@0.1.0` 会觉得莫名其妙；
+   * - 那栏的开关写的是 `plugins.disabled`（装配期禁用），对第三方插件
+   *   既不生效也不该被这样关——它们有自己的启停按钮与安装列表。
+   *
+   * 判据用 id 前缀而不是"查不到元数据"，因为后者会把真正新增的内置条目
+   * 也误排除掉。
+   */
+  const entries = [...input.composition.entries].filter((entry) => !entry.id.startsWith('plugin:'))
   entries.sort((a, b) => orderOf(a.id) - orderOf(b.id))
   const global: BuiltinPluginView[] = entries.map((entry) => {
     const meta = GLOBAL_PLUGINS[entry.id]

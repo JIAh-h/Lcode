@@ -17,18 +17,33 @@ function config() {
 export function render({ api }) {
   const cfg = config()
   /*
-   * 只改**设计令牌**，不改具体属性（比如直接写 background）。
+   * 改外观有两条路，按意图选（这是能力边界，不是风格偏好）：
    *
-   * 令牌是宿主定义的一层间接：所有组件都读 `var(--bg-canvas)`，
-   * 改令牌等于一次性换掉整套配色，而直接写 background 只能改到
-   * 你手动列出来的那几个元素——那会得到"一半暗一半亮"的界面。
+   * - **换配色** → `setCssVars`：只说"哪个令牌等于什么值"。令牌是宿主定义的
+   *   一层间接，所有组件都读 `var(--bg-canvas)`，改令牌等于一次性换掉整套配色；
+   *   直接写 background 只能改到你手动列出的那几个元素，会得到"一半暗一半亮"。
+   *
+   * - **层级 / 定位 / 装饰这类具体实现** → `injectStyles`：注入自己的 CSS。
+   *   宿主不替插件决定这些（否则每出一种插件形态就要宿主加一个 API）。
+   *
+   * 本模板做的是**全窗背景肤**：背景层在 `z-index:-1`，画布做成半透明才看得见
+   * 背景。这两条都是本形态的实现细节，写在下面自己的 CSS 里——只做配色或
+   * 局部装饰的主题不需要它们。
    */
+  const hasBackground = typeof cfg.background === 'string' && cfg.background !== ''
   api.setCssVars({
-    '--bg-canvas': cfg.canvas ?? '#14141c',
-    '--bg-elevated': cfg.canvas ?? '#14141c',
+    '--bg-canvas': hasBackground ? (cfg.canvasVeil ?? 'rgba(20, 20, 28, 0.55)') : (cfg.canvas ?? '#14141c'),
+    '--bg-elevated': hasBackground ? (cfg.elevatedVeil ?? 'rgba(24, 24, 32, 0.72)') : (cfg.canvas ?? '#14141c'),
     '--text-primary': cfg.text ?? '#e6e6ef',
     '--accent': cfg.accent ?? '#7c9cff',
   })
+  /*
+   * 全窗背景肤需要把背景层压到内容之下。宿主只保证 `.shell`（菜单栏/侧栏/
+   * 会话区）有自己的层叠上下文、不会被覆盖层盖掉；**具体的 z-index 由插件定**。
+   */
+  if (hasBackground) {
+    api.injectStyles('#lcode-plugin-background { z-index: -1; }')
+  }
 
   /*
    * 背景媒体：图片或视频都走同一个接口，类型按扩展名推断。

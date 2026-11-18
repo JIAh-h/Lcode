@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
+import { PluginSlot } from '../store/clientPlugins.tsx'
+import { useClientPlugins } from '../store/ClientPluginProvider.tsx'
 import { CONTEXT_WINDOW_PROBE_MAX, CONTEXT_WINDOW_STEP, FALLBACK_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '@lcode/model-api'
 import { Seg, Select, Switch, SwitchRow, TextArea, TextInput } from '../components/controls.tsx'
 import { syncWindowOverlayTheme } from '../store/overlayTheme.ts'
@@ -2970,6 +2972,23 @@ function PluginSection() {
   const [busy, setBusy] = useState<string | undefined>()
   const [uninstalling, setUninstalling] = useState<PluginEntry | null>(null)
   /*
+   * 展开哪个插件自己的**设置面板**（插件的 `settings.section` 插槽）。
+   *
+   * 插件可以只做能力不做界面；声明了 `settings.section` 的那些才值得展开，
+   * 所以按钮只对它们显示——不然点开是一片空白，比没有入口更糟。
+   */
+  const [managing, setManaging] = useState<string | null>(null)
+  /*
+   * **有插件改动尚未生效**（启停/安装/卸载之后为 true）。
+   *
+   * host 那半（工具/提示段/事件）是在装配期挂进注册表的，运行中激活只能让
+   * lifecycle 记录出现——工具并不会进入模型可见的工具表（实测：inspect 有记录
+   * 但 tools.schemas() 数量不变）。所以插件改动事实上需要一次重启才生效。
+   * 这里只在真有改动时把「重启刷新」露出来，避免平时干扰。
+   */
+  const [restartPending, setRestartPending] = useState(false)
+  const clientPlugins = useClientPlugins()
+  /*
    * 内置能力开关（docs/30 §P2）。
    *
    * 粒度是 **bundle**（不是单个工具）：composeRuntimeProfile 按 bundle 装配，
@@ -2988,7 +3007,20 @@ function PluginSection() {
       window.lcode.runtime.composition() as Promise<{ entries?: readonly { id: string }[] }>,
       window.lcode.plugins.disabledList() as Promise<unknown>,
     ]).then(([composition, disabled]) => {
-      setBundleIds((composition.entries ?? []).map((item) => item.id))
+      /*
+       * **第三方插件不算内置能力**。
+       *
+       * 统一加载器把第三方插件也装配进 profile，条目 id 是
+       * `plugin:<id>@<version>`（见 agent-runtime 的命名空间约定）。
+       * 不过滤的话，它们会出现在「内置能力开关」里——那一栏是"随应用
+       * 出厂的能力"，用户会觉得莫名其妙（实测截图里就有
+       * `plugin:lcode.wallpaper@0.1.0`）。第三方插件有自己的列表与启停按钮。
+       */
+      setBundleIds(
+        (composition.entries ?? [])
+          .map((item) => item.id)
+          .filter((id) => !id.startsWith('plugin:')),
+      )
       setDisabledBundles(Array.isArray(disabled) ? disabled as string[] : [])
     }).catch(() => undefined)
   }, [])
@@ -3014,6 +3046,7 @@ function PluginSection() {
     try {
       await window.lcode.plugins.install({ path })
       refresh()
+      setRestartPending(true)
       toast(t('插件已安装，尚未启动'))
     } catch (error) {
       toast(error instanceof Error ? error.message : t('插件安装失败'))
@@ -3027,6 +3060,7 @@ function PluginSection() {
     try {
       await window.lcode.plugins[action]({ id: plugin.id, version: plugin.version })
       refresh()
+      setRestartPending(true)
       toast(t(action === 'activate' ? '插件已启动' : '插件已停用'))
     } catch (error) {
       toast(error instanceof Error ? error.message : t('插件操作失败'))
@@ -3057,6 +3091,7 @@ function PluginSection() {
       await window.lcode.plugins.uninstall({ id: plugin.id, version: plugin.version })
       setUninstalling(null)
       refresh()
+      setRestartPending(true)
       toast(t('插件已卸载'))
     } catch (error) {
       toast(error instanceof Error ? error.message : t('插件操作失败'))
@@ -3150,6 +3185,37 @@ function PluginSection() {
         <div className="sh2">
           {t('第三方插件')}
           <span className="sh2-actions">
+            {/*
+              * **重启刷新**：只在真有插件改动时出现。
+              *
+              * host 那半（工具/提示段/事件订阅）在装配期就挂进注册表了，运行中
+              * 激活只会让 lifecycle 记录出现——工具并不会进入模型可见的工具表
+              * （实测：inspect 有记录但 tools.schemas() 数量不变）。所以插件改动
+              * 事实上需要一次重启才真正生效。与其做一套半灵不灵的热重载，不如
+              * 老实告诉用户要重启，并给一个一键入口。
+              */}
+
+            {restartPending && (
+              <button
+                className="mini"
+                title={t('插件改动需要重启应用才会生效')}
+                onClick={() => {
+                  const bridge = (globalThis as unknown as {
+                    lcode?: { app?: { relaunch?: () => Promise<unknown> } }
+                  }).lcode
+                  if (bridge?.app?.relaunch === undefined) {
+                    toast(t('当前环境没有重启能力，请手动重启应用'))
+                    return
+                  }
+                  void bridge.app.relaunch().catch(() => {
+                    toast(t('重启失败，请手动重启应用'))
+                  })
+                }}
+              >
+                ↻ {t('重启刷新')}
+              </button>
+            )}
+
             <button className="mini" disabled={busy !== undefined} onClick={() => void install()}>
               ＋ {busy === 'install' ? t('正在安装…') : t('从文件夹安装')}
             </button>
@@ -3162,29 +3228,59 @@ function PluginSection() {
               const key = `${plugin.id}@${plugin.version}`
               const tools = plugin.contributes.tools ?? []
               const prompts = plugin.contributes.promptSections ?? []
+              /*
+               * 这个插件有没有自己的管理界面：`settings.section` 插槽 + 对应的
+               * 客户端半区已加载。两者缺一不可——只声明没实现就是空面板。
+               */
+              const clientEntry = clientPlugins.find((item) => item.id === plugin.id)
+              const hasPanel = clientEntry !== undefined && clientEntry.slots.includes('settings.section')
+              const open = managing === plugin.id
               return (
-                <div className="mrow ext-row" key={key}>
-                  <span className="mic">⬡</span>
-                  <div className="ext-main">
-                    <div className="mnm">
-                      <code className="mono">{plugin.id}</code>
-                      <span className="ext-version">v{plugin.version}</span>
-                      <span className={'ext-tag' + (plugin.active ? ' on' : '')}>
-                        {plugin.active ? t('运行中') : t('未启动')}
-                      </span>
+                <div key={key}>
+                  <div className="mrow ext-row">
+                    <span className="mic">⬡</span>
+                    <div className="ext-main">
+                      <div className="mnm">
+                        <code className="mono">{plugin.id}</code>
+                        <span className="ext-version">v{plugin.version}</span>
+                        <span className={'ext-tag' + (plugin.active ? ' on' : '')}>
+                          {plugin.active ? t('运行中') : t('未启动')}
+                        </span>
+                      </div>
+                      <div className="msrc ext-desc">
+                        {t('工具')}：{tools.length === 0 ? t('无') : tools.join('、')} · {t('提示段')}：{prompts.length === 0 ? t('无') : prompts.join('、')}
+                      </div>
                     </div>
-                    <div className="msrc ext-desc">
-                      {t('工具')}：{tools.length === 0 ? t('无') : tools.join('、')} · {t('提示段')}：{prompts.length === 0 ? t('无') : prompts.join('、')}
-                    </div>
+                    <span className="macts">
+                      {hasPanel && (
+                        <button
+                          type="button"
+                          title={open ? t('收起设置面板') : t('打开设置面板')}
+                          aria-label={open ? t('收起设置面板') : t('打开设置面板')}
+                          aria-expanded={open}
+                          onClick={() => setManaging(open ? null : plugin.id)}
+                        >
+                          {open ? '▾' : '⚙'}
+                        </button>
+                      )}
+                      {plugin.active ? (
+                        <button type="button" title={t('停用插件')} aria-label={t('停用插件')} disabled={busy !== undefined} onClick={() => void operate('deactivate', plugin)}>⏸</button>
+                      ) : (
+                        <button type="button" title={t('启动插件')} aria-label={t('启动插件')} disabled={busy !== undefined} onClick={() => void operate('activate', plugin)}>▶</button>
+                      )}
+                      <button type="button" title={t('卸载插件')} aria-label={t('卸载插件')} disabled={busy !== undefined} onClick={() => setUninstalling(plugin)}>✕</button>
+                    </span>
                   </div>
-                  <span className="macts">
-                    {plugin.active ? (
-                      <button type="button" title={t('停用插件')} aria-label={t('停用插件')} disabled={busy !== undefined} onClick={() => void operate('deactivate', plugin)}>⏸</button>
-                    ) : (
-                      <button type="button" title={t('启动插件')} aria-label={t('启动插件')} disabled={busy !== undefined} onClick={() => void operate('activate', plugin)}>▶</button>
-                    )}
-                    <button type="button" title={t('卸载插件')} aria-label={t('卸载插件')} disabled={busy !== undefined} onClick={() => setUninstalling(plugin)}>✕</button>
-                  </span>
+                  {/*
+                    * 插件自己的管理面板（docs/30 §9）：渲染在设置页里，
+                    * 能力由 `settings.section` 插槽提供——插件只写界面，不用改宿主。
+                    * 插件抛错时 PluginSlot 会捕获并降级，不会拖垮设置页。
+                    */}
+                  {open && hasPanel && (
+                    <div className="ext-panel">
+                      <PluginSlot plugins={clientPlugins.filter((item) => item.id === plugin.id)} slot="settings.section" />
+                    </div>
+                  )}
                 </div>
               )
             })}
@@ -3928,7 +4024,14 @@ export function SettingsPage() {
 
   return (
     <div className="setwrap">
-      <nav className="setnav">
+      {/*
+        * 侧栏宽度与会话区保持一致（`lcode.layout.leftWidth`）。
+        *
+        * 之前这里是 CSS 里写死的 220px，而会话区 .side 是 250px 且可拖拽——
+        * 在两个页面间切换时内容会横向抖 30px（实测观感很差）。
+        * 读同一个键，用户拖过分隔条后两边一起变。
+        */}
+      <nav className="setnav" style={{ width: readLeftWidth() }}>
         <button className="setback" onClick={back}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M10 3 5 8l5 5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -3945,4 +4048,22 @@ export function SettingsPage() {
       </main>
     </div>
   )
+}
+
+/**
+ * 会话区侧栏宽度（与会话页共用 `lcode.layout.leftWidth`）。
+ *
+ * 拿不到时退回 250——那是 `useResizablePanel` 的默认值，两边必须用同一个数，
+ * 否则切换页面时内容会横向跳一下。
+ */
+const LEFT_WIDTH_FALLBACK = 250
+function readLeftWidth(): number {
+  try {
+    const raw = window.localStorage.getItem('lcode.layout.leftWidth')
+    const parsed = raw === null ? Number.NaN : Number(raw)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : LEFT_WIDTH_FALLBACK
+  } catch {
+    // 打包后 file:// 可能禁用 localStorage；用默认值即可
+    return LEFT_WIDTH_FALLBACK
+  }
 }
