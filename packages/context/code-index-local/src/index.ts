@@ -56,6 +56,8 @@ export interface CodeSearchResult {
   readonly query: string
   readonly model: string
   readonly results: readonly CodeSearchHit[]
+  /** 空结果时的可执行提示（区分"索引未建"与"没命中"） */
+  readonly hint?: string | undefined
 }
 
 export interface RebuildReport {
@@ -395,8 +397,11 @@ export function createCodeSearchTool(deps: CodeSearchToolDeps): ToolDefinition<C
   return {
     name: 'code_search',
     description:
-      '按语义搜索仓库代码（向量索引）。适合"哪里实现了登录/限流/重试"这类不确定关键词的问题；' +
-      '精确字符串、标识符用 grep。需要先在设置里建立索引，返回按相关度排序的代码片段。',
+      '按语义搜索仓库代码，直接返回相关代码片段与位置。\n' +
+      '**优先用它定位**："哪里实现了登录/限流/重试"、"某功能在哪个文件"、"这个常量定义在哪"。\n' +
+      '比盲目 grep 快得多：一次拿到相关片段，不必反复试关键词。\n' +
+      '拿到位置后再用 read 精读那几行；确定要精确匹配某个标识符时才用 grep。\n' +
+      '需要先在设置里建立索引；返回按相关度排序的片段。',
     card: 'search',
     timeoutMs: 120_000,
     inputSchema: {
@@ -412,7 +417,23 @@ export function createCodeSearchTool(deps: CodeSearchToolDeps): ToolDefinition<C
       const workspace = sessionId === undefined ? undefined : deps.workspaceOf(sessionId)
       const root = workspace ?? deps.fallbackWorkspace
       const limit = call.parsed.limit === undefined ? 8 : Math.min(20, Math.max(1, Math.trunc(call.parsed.limit)))
-      return deps.search({ workspace: root, query: call.parsed.query, limit, signal: opts.signal })
+      const result = await deps.search({ workspace: root, query: call.parsed.query, limit, signal: opts.signal })
+      /*
+       * 空结果要区分两种情况，否则模型会误判成"代码里没有"：
+       * - 索引没建 / 索引里没有这个工作区 → 它该去做别的事（grep/glob），并在回答里说明
+       * - 索引有但没命中 → 换个说法再搜
+       * 这两种后续动作完全不同，混成一个空数组会白耗好几步。
+       */
+      if (result.results.length === 0) {
+        return {
+          ...result,
+          hint:
+            '没有命中。若这个工作区还没建立索引（设置 → 代码索引），本条检索不会返回任何结果，' +
+            '此时应改用 grep（已知标识符）或 glob（找文件）继续，并在最终答复里说明索引未建。' +
+            '若索引已建，换个更具体的说法或改用 grep 精确匹配。',
+        }
+      }
+      return result
     },
   }
 }

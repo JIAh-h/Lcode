@@ -5,6 +5,7 @@ import type { SystemPromptService } from '@lcode/system-prompt'
 import type { ToolDefinition, ToolInputSchema, ToolRegistry } from '@lcode/tools'
 import { ERROR_CODES, LcodeErrorImpl, isJsonValue, type Disposer, type JsonValue } from '@lcode/util'
 import type { PluginHostClient } from './index.ts'
+import type { PluginRouteRegistry } from './routes.ts'
 
 export type PluginLifecycleState = 'activating' | 'active' | 'rolling-back' | 'deactivating'
 
@@ -33,6 +34,14 @@ export interface PluginLifecycleManagerOptions {
    */
   readonly tools: () => ToolRegistry
   readonly systemPrompt: () => SystemPromptService
+  /**
+   * 插件 HTTP 路由表（docs/30 §9.7）。省略 = 不开放路由能力。
+   *
+   * 插件通过 `ctx.registerRoute(path, handler)` 注册，宿主在
+   * `lcode-plugin://<id>/<path>` 协议处理里分发。这样平台只需开放**入口**，
+   * 具体资源（视频/流式/鉴权）由插件自己伺候——与 DSH 的 `ctx.webServer` 同理。
+   */
+  readonly routes?: PluginRouteRegistry | undefined
   readonly startHost: PluginHostStarter
 }
 
@@ -179,6 +188,8 @@ export class PluginLifecycleManager {
         return this.#registerPromptSection(record, params)
       case 'ctx/registerListener':
         return this.#registerListener(record, params)
+      case 'ctx/registerRoute':
+        return this.#registerRoute(record, params)
       default:
         throw undeclared(`Plugin requested unsupported context operation: ${method}`)
     }
@@ -232,6 +243,54 @@ export class PluginLifecycleManager {
         // A plugin listener must never break the core event pipeline.
       }
     }))
+    return null
+  }
+
+  /**
+   * 插件注册一条 HTTP 路由（docs/30 §9.7，对齐 DSH 的 `ctx.webServer`）。
+   *
+   * 平台只开放入口（`lcode-plugin://<id>/<path>`），具体资源怎么伺服由插件决定：
+   * 视频、流式、鉴权、转码都行。这样平台不必为每种资源类型维护白名单。
+   *
+   * **handler 必须由宿主持有**：插件传进来的是函数（进程内模式），
+   * 或者一个路由 id（子进程模式）。这里统一存"能把请求变成响应的东西"，
+   * 具体分发在 `resolve` 时进行。
+   */
+  #registerRoute(record: LifecycleRecord, params: unknown): null {
+    const routes = this.options.routes
+    if (routes === undefined) throw undeclared('当前运行时未开放插件 HTTP 路由（ctx.webServer）')
+    if (!isRouteSpec(params)) throw activationFailed('Plugin submitted an invalid route definition')
+    /*
+     * 声明核对：`contributes.routes` 里没写就不能注册。
+     * 与工具/提示段同一套规则——"声明什么才能注册什么"。
+     */
+    if (!(record.target.manifest.contributes.routes ?? []).includes(params.path)) {
+      throw undeclared(`Route ${params.path} is not declared in the plugin manifest`)
+    }
+    const handler = async (request: Request): Promise<Response> => {
+      const host = record.host
+      if (host === undefined || host.state !== 'running') {
+        return new Response('plugin host is not running', { status: 503 })
+      }
+      /*
+       * 单实例宿主：路径之外的东西都序列化后交给插件。
+       * 请求体不转（视频是 GET/Range，不需要 body），避免把二进制塞进 RPC。
+       */
+      const result = await host.request<unknown>('plugin/route', {
+        path: params.path,
+        method: request.method,
+        url: request.url,
+        headers: [...request.headers.entries()],
+      })
+      if (!isRouteResponse(result)) {
+        return new Response('plugin route returned an invalid response', { status: 502 })
+      }
+      return new Response(result.body === null ? null : result.body, {
+        status: result.status,
+        headers: result.headers ?? {},
+      })
+    }
+    this.#track(record, routes.register({ pluginId: record.target.manifest.id, path: params.path, handler }))
     return null
   }
 
@@ -333,6 +392,22 @@ function isPromptSection(value: unknown): value is { id: string; content: string
 
 function isListener(value: unknown): value is { event: string; listenerId: string } {
   return isRecord(value) && typeof value.event === 'string' && typeof value.listenerId === 'string'
+}
+
+function isRouteSpec(value: unknown): value is { path: string } {
+  return isRecord(value) && typeof value.path === 'string' && value.path.startsWith('/')
+}
+
+/** 插件返回的路由响应：只接受这三种字段，避免插件塞任意结构 */
+function isRouteResponse(value: unknown): value is { status: number; body: string | null; headers?: Record<string, string> } {
+  if (!isRecord(value)) return false
+  if (typeof value.status !== 'number' || !Number.isInteger(value.status)) return false
+  if (value.body !== null && typeof value.body !== 'string') return false
+  if (value.headers !== undefined) {
+    if (!isRecord(value.headers)) return false
+    if (!Object.values(value.headers).every((item) => typeof item === 'string')) return false
+  }
+  return true
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

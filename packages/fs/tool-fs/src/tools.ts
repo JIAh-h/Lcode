@@ -82,8 +82,10 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
   const read: ToolDefinition = {
     name: 'read',
     description:
-      '读取一个文件的内容，按行返回并带行号。用 offset/limit 读大文件的某一段。' +
-      '返回的 totalLines 是整个文件的行数（不受窗口影响），truncated 表示有没有被窗口截断。',
+      '读取一个文件的内容，按行返回并带行号。用 offset/limit 读大文件的某一段。\n' +
+      '返回的 totalLines 是整个文件的行数（不受窗口影响），truncated 表示有没有被窗口截断。\n' +
+      '**同一文件不要反复整读**：已经读过就基于拿到的内容推理；' +
+      '需要另外几行时用 offset/limit 精确取，别为了"再看看"把整文件再读一遍。',
     card: 'read',
     presentationMeta: (_args, value) => {
       const result = value as { path?: unknown; offset?: unknown; lines?: unknown; totalLines?: unknown; truncated?: unknown }
@@ -271,8 +273,11 @@ export function createFsTools(deps: ToolFsDeps): readonly ToolDefinition[] {
   const grep: ToolDefinition = {
     name: 'grep',
     description:
-      '在文件内容里搜正则。结果按 path/line/column 给出，truncated 表示被截断 —— ' +
-      '为 true 时请收窄模式，否则你会以为找全了。',
+      '在文件内容里搜正则，返回 path/line/column。\n' +
+      '**适合**：已知确切标识符或字符串（`createContext`、`TODO:`）、查某符号的引用、确认某段文本是否存在。\n' +
+      '**不适合**：不知道关键词时的探索式查找——反复换词 grep 又搜不到是最耗步数的做法，' +
+      '这类问题应改用 `code_search` 做语义定位，再用 read 精读命中处。\n' +
+      'truncated 为 true 表示结果被截断，请收窄 pattern 或加 path，否则你会误以为找全了。',
     card: 'search',
     presentationMeta: (_args, value) => {
       const result = value as { matches?: unknown; truncated?: unknown; total?: unknown }

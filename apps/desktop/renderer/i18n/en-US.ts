@@ -820,6 +820,10 @@ export const EN: Readonly<Record<string, string>> = {
   '编排调度会话：可派发 worker，自己不执行':
     'Orchestration session: can dispatch workers but does not execute itself',
   '{n} 个 worker': '{n} workers',
+  // 侧栏会话行的运行指示（status 派生自事件日志）
+  '任务进行中…': 'Task running…',
+  '等待审批——需要你确认才能继续': 'Waiting for approval — confirm to continue',
+  '上一轮出错': 'Last turn errored',
   '编排状态：这里能看到 Router 派出去的 worker':
     'Orchestration status — workers this Router has dispatched',
   'worker {n}': 'workers {n}',

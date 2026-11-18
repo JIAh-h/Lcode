@@ -31,9 +31,23 @@ const rootStyle = {
   body: {
     prepend: () => undefined,
   },
+  /*
+   * `createElement` 的桩要能同时充当 div 和 video：
+   * 背景媒体分支会设 `src`/`muted`/`loop`/`autoplay`/`playsInline`、调 `play()`、
+   * 还会 `appendChild` 到容器上。
+   */
   createElement: () => ({
     id: '',
     style: { cssText: '', backgroundImage: '', backgroundSize: '', opacity: '' },
+    src: '',
+    muted: false,
+    loop: false,
+    autoplay: false,
+    playsInline: false,
+    setAttribute: () => undefined,
+    remove: () => undefined,
+    play: () => Promise.resolve(),
+    appendChild: () => undefined,
   }),
 }
 ;(globalThis as unknown as { URL: unknown }).URL = class {
@@ -41,7 +55,7 @@ const rootStyle = {
   static revokeObjectURL() { return undefined }
 }
 
-const { applyCssVars, clearCssVars, applyBackgroundImage } = await import('./clientPlugins.tsx')
+const { applyCssVars, clearCssVars, applyBackgroundMedia } = await import('./clientPlugins.tsx')
 
 function reset(): void {
   applied.clear()
@@ -87,11 +101,34 @@ describe('client 插件的样式安全边界', () => {
     expect(removed.has('--new-var')).toBe(true)
   })
 
-  it('背景图只接受 https 与 data:image，拒绝 file 与 javascript', () => {
-    // 用 node 端桩验证过滤分支不抛错；真实 DOM 行为在 e2e 里验证过
-    expect(() => applyBackgroundImage({ url: 'file:///C:/secret.png' })).not.toThrow()
-    expect(() => applyBackgroundImage({ url: 'javascript:alert(1)' })).not.toThrow()
-    expect(() => applyBackgroundImage({ url: 'data:image/png;base64,AAA' })).not.toThrow()
-    expect(() => applyBackgroundImage(null)).not.toThrow()
+  it('背景媒体放行 https / data:image|video / blob / file / lcode-plugin', () => {
+    for (const url of [
+      'https://example.com/bg.png',
+      'data:image/png;base64,AAA',
+      'data:video/mp4;base64,AAA',
+      'blob:http://localhost:5173/abc',
+      'file:///C:/Users/me/wall.mp4',
+      'lcode-plugin://acme.wallpaper/assets/bg.mp4',
+    ]) {
+      expect(() => applyBackgroundMedia({ url })).not.toThrow()
+    }
+    expect(() => applyBackgroundMedia(null)).not.toThrow()
+  })
+
+  /*
+   * 非法 URL **抛错**而不是静默丢弃——旧实现是静默 return，
+   * 插件以为设成功了、用户看到"什么都没变"，极难排查。
+   */
+  it('拒绝 javascript: 等非法协议，并给出可执行的提示', () => {
+    expect(() => applyBackgroundMedia({ url: 'javascript:alert(1)' })).toThrow(/不支持的背景地址/)
+    expect(() => applyBackgroundMedia({ url: 'javascript:alert(1)' })).toThrow(/lcode-plugin:\/\//)
+  })
+
+  it('按扩展名推断视频，显式 kind 优先', () => {
+    // 推断正确时走 <video> 分支：桩里 createElement 返回的对象会被 appendChild
+    expect(() => applyBackgroundMedia({ url: 'lcode-plugin://a.b/x.mp4' })).not.toThrow()
+    expect(() => applyBackgroundMedia({ url: 'https://x/y.webm' })).not.toThrow()
+    // 显式声明优先于扩展名
+    expect(() => applyBackgroundMedia({ url: 'https://x/y.png', kind: 'video' })).not.toThrow()
   })
 })

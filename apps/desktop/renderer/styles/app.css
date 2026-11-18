@@ -1197,6 +1197,22 @@ body.noside .side { display: none; }
 .snrow.on .srole { background: var(--bg-canvas); }
 /* worker 计数：与徽标同尺寸，靠右 */
 .sworkers { flex: none; margin-left: auto; padding: 1px 5px; border-radius: 999px; border: 1px solid var(--border-subtle); color: var(--text-muted); font-size: 10px; line-height: 14px; }
+/*
+ * 会话运行指示（docs/30 §9.7）：侧栏会话行的"正在进行"标记。
+ * busy 用旋转的圆弧（动画），waiting-approval 用暂停符（需要人点一下），
+ * error 用感叹号（上一轮失败了）。都放在标题右侧、worker 计数之前。
+ */
+.srun { flex: none; margin-left: auto; display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; color: var(--state-running); font-size: 10px; line-height: 14px; }
+.srun-wait { color: var(--state-waiting); }
+.srun-err { color: var(--state-error); font-weight: 700; }
+.srun-spin { animation: lcode-spin 0.9s linear infinite; }
+@keyframes lcode-spin { to { transform: rotate(360deg); } }
+/* 减少动态效果偏好下不旋转：状态仍有颜色可辨，不至于失去信息 */
+@media (prefers-reduced-motion: reduce) {
+  .srun-spin { animation: none; }
+}
+/* 有运行指示时，worker 计数不再抢 margin-left:auto（两者都靠右排队） */
+.snrow .srun + .sworkers { margin-left: 6px; }
 /* worker 行：缩进 + 左侧细线，表达"它属于上面那个 Router" */
 .snrow-worker { padding-left: 18px; position: relative; }
 .snrow-worker::before { content: ''; position: absolute; left: 9px; top: 50%; width: 5px; height: 1px; background: var(--border-strong); }

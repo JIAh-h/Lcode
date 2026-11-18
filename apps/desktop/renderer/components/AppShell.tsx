@@ -361,6 +361,18 @@ export function AppShell({ children }: { children: ReactNode }) {
    */
   const renderSessionRow = (it: SessionMeta): ReactNode => {
     const workers = workersByParent.get(it.session_id) ?? []
+    /*
+     * 会话运行指示（docs/30 §9.7）：status 由事件日志派生（project.ts：
+     * hasOpenTurn ? busy/waiting-approval : idle），`session.list` 已返回。
+     * 之前侧栏没用它，"哪个会话在跑"只能点进去才知道。
+     *
+     * waiting-approval 比 busy 更需要被看见：它是"必须有人点一下才能继续"的状态，
+     * 配上不同颜色。error 也给出标记，避免用户以为任务还挂在那里。
+     */
+    const statusTitle =
+      it.status === 'busy' ? t('任务进行中…')
+        : it.status === 'waiting-approval' ? t('等待审批——需要你确认才能继续')
+          : it.status === 'error' ? t('上一轮出错') : undefined
     return (
       <div key={it.session_id}>
         <div className={'snrow' + (pathname.startsWith(`/sessions/${it.session_id}`) ? ' on' : '')}>
@@ -371,6 +383,23 @@ export function AppShell({ children }: { children: ReactNode }) {
               </span>
             )}
             <span className="sname">{it.title || t('未命名会话')}</span>
+            {it.status === 'busy' && (
+              <span className="srun" title={statusTitle} aria-label={statusTitle}>
+                <svg className="srun-spin" width="11" height="11" viewBox="0 0 16 16" fill="none">
+                  <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.8" strokeDasharray="26 12" strokeLinecap="round" />
+                </svg>
+              </span>
+            )}
+            {it.status === 'waiting-approval' && (
+              <span className="srun srun-wait" title={statusTitle} aria-label={statusTitle}>
+                ⏸
+              </span>
+            )}
+            {it.status === 'error' && (
+              <span className="srun srun-err" title={statusTitle} aria-label={statusTitle}>
+                !
+              </span>
+            )}
             {workers.length > 0 && (
               <span className="sworkers" title={t('{n} 个 worker', { n: workers.length })}>
                 {workers.length}
@@ -387,6 +416,13 @@ export function AppShell({ children }: { children: ReactNode }) {
           >
             <NavLink to={`/sessions/${worker.session_id}`} className="sitem" title={worker.title || t('未命名会话')}>
               <span className="sname">{worker.title || t('未命名会话')}</span>
+              {worker.status === 'busy' && (
+                <span className="srun" title={t('任务进行中…')}>
+                  <svg className="srun-spin" width="11" height="11" viewBox="0 0 16 16" fill="none">
+                    <circle cx="8" cy="8" r="6" stroke="currentColor" strokeWidth="1.8" strokeDasharray="26 12" strokeLinecap="round" />
+                  </svg>
+                </span>
+              )}
             </NavLink>
             <SessionActionsMenu session={worker} buttonClass="sga sact" />
           </div>

@@ -56,6 +56,26 @@ interface PluginContext {
   registerTool(spec: PluginToolSpecShape, execute: ToolExecute): Promise<void>
   registerPromptSection(id: string, content: string, order?: number): Promise<void>
   on(event: string, handler: (payload: unknown) => void | Promise<void>): Promise<void>
+  /**
+   * 注册一条 HTTP 路由（docs/30 §9.7）：平台只给入口，资源由插件自己伺服。
+   *
+   * 返回的响应只接受 `{ status, body, headers }`，body 必须是字符串——
+   * 要发二进制就自己 base64 或用平台的静态资源入口，不要指望这里透传 Buffer。
+   */
+  registerRoute(path: string, handler: (request: RouteRequest) => RouteResponse | Promise<RouteResponse>): Promise<void>
+}
+
+/** 插件路由收到的请求（已裁剪成可 JSON 传的形状） */
+export interface RouteRequest {
+  readonly method: string
+  readonly url: string
+  readonly headers: Readonly<Record<string, string>>
+}
+
+export interface RouteResponse {
+  readonly status: number
+  readonly body: string | null
+  readonly headers?: Readonly<Record<string, string>> | undefined
 }
 
 interface PluginToolSpecShape {
@@ -83,6 +103,8 @@ export function createInProcessPluginHost(options: InProcessHostOptions): InProc
   const listeners = new Map<string, (payload: unknown) => void | Promise<void>>()
   /** 事件名 → listenerId，供 plugin/event 反查 */
   const listenerIds = new Map<string, string>()
+  /** 路由路径 → 插件交出的处理函数（由 plugin/route 调用，见 §9.7） */
+  const routeHandlers = new Map<string, (request: RouteRequest) => RouteResponse | Promise<RouteResponse>>()
   let activationDispose: Disposer | undefined
 
   const context: PluginContext = {
@@ -111,6 +133,10 @@ export function createInProcessPluginHost(options: InProcessHostOptions): InProc
       listeners.set(listenerId, handler)
       listenerIds.set(event, listenerId)
       await options.onRequest('ctx/registerListener', { event, listenerId })
+    },
+    async registerRoute(path, handler) {
+      routeHandlers.set(path, handler)
+      await options.onRequest('ctx/registerRoute', { path })
     },
   }
 
@@ -176,6 +202,39 @@ export function createInProcessPluginHost(options: InProcessHostOptions): InProc
         }
         return null as T
       }
+      if (method === 'plugin/route') {
+        const { path, method: httpMethod, url, headers } = (params ?? {}) as {
+          path?: unknown
+          method?: unknown
+          url?: unknown
+          headers?: unknown
+        }
+        const handler = typeof path === 'string' ? routeHandlers.get(path) : undefined
+        if (handler === undefined) return null as T
+        /*
+         * 把请求裁成可 JSON 的形状交给插件：`Headers` 实例过不了序列化边界，
+         * 这里转成普通对象。插件拿到的就是一份数据，不能反向操作宿主对象。
+         */
+        const headerRecord: Record<string, string> = {}
+        if (Array.isArray(headers)) {
+          for (const pair of headers) {
+            if (Array.isArray(pair) && typeof pair[0] === 'string' && typeof pair[1] === 'string') {
+              headerRecord[pair[0]] = pair[1]
+            }
+          }
+        }
+        try {
+          const response = await handler({
+            method: typeof httpMethod === 'string' ? httpMethod : 'GET',
+            url: typeof url === 'string' ? url : '',
+            headers: headerRecord,
+          })
+          return response as T
+        } catch (error) {
+          // 路由处理抛错：回 500 而不是让协议层静默失败，插件作者能看到原因
+          return { status: 500, body: `plugin route failed: ${messageOf(error)}`, headers: { 'content-type': 'text/plain; charset=utf-8' } } as T
+        }
+      }
       throw new Error(`unsupported core method: ${method}`)
     },
     async close() {
@@ -188,6 +247,7 @@ export function createInProcessPluginHost(options: InProcessHostOptions): InProc
         toolExecutes.clear()
         listeners.clear()
         listenerIds.clear()
+        routeHandlers.clear()
         activationDispose = undefined
         state = 'closed'
         resolveExit({ code: 0, signal: null })

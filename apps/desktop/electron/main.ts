@@ -1,11 +1,12 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog, session, shell } from "electron";
+import { app, BrowserWindow, Menu, ipcMain, dialog, session, shell, protocol } from "electron";
 import type { ImageAttachmentWriter } from "@lcode/lcode-desktop";
 import type { IpcMainInvokeEvent, OpenDialogOptions } from "electron";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync, readdirSync, readSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve, extname } from "node:path";
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { promisify } from "node:util";
 import {
@@ -1590,6 +1591,138 @@ function pluginRef(input: unknown): PluginRef {
   return { id: record.id, version: record.version };
 }
 
+/**
+ * 在 `app ready` **之前**声明协议特权（Electron 的硬性要求：
+ * `registerSchemesAsPrivileged` 必须在 ready 前调用，否则直接抛错）。
+ */
+function declarePluginAssetScheme(): void {
+  protocol.registerSchemesAsPrivileged([
+    {
+      scheme: 'lcode-plugin',
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        // 背景媒体是 <video>/CSS 加载的，必须允许跨源取用
+        corsEnabled: true,
+        stream: true,
+      },
+    },
+  ]);
+}
+
+/**
+ * 注册 `lcode-plugin://` 协议（docs/30 §9.7）：让插件引用**自己目录里**的
+ * 图片/视频/字体，而不必把它们塞进 data: URL（几 MB 的 base64 会撑爆 IPC 与内存）。
+ *
+ * URL 形状：`lcode-plugin://<plugin-id>/<包内相对路径>`
+ * 例：`lcode-plugin://acme.wallpaper/assets/屏保4.mp4`
+ *
+ * 安全要点见调用处注释。这里只强调一条：**只放行媒体扩展名**。不放行
+ * `.json`/`.js`/`.md` 之类——这个协议不是"插件读文件"的通用通道。
+ */
+const PLUGIN_ASSET_EXTENSIONS: Readonly<Record<string, string>> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.avif': 'image/avif',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.ogv': 'video/ogg',
+  '.mov': 'video/quicktime',
+  '.woff2': 'font/woff2',
+  '.woff': 'font/woff',
+};
+
+function registerPluginAssetProtocol(): void {
+  /* 特权声明在 `declarePluginAssetScheme()`（必须在 app ready 之前）；这里只装处理器 */
+  protocol.handle('lcode-plugin', async (request) => {
+    try {
+      const url = new URL(request.url);
+      // host 是插件 id（小写化由 URL 解析负责，与注册表 id 的大小写规则一致）
+      const pluginId = decodeURIComponent(url.hostname);
+      const assetPath = decodeURIComponent(url.pathname).replace(/^\/+/, '');
+      if (pluginId === '' || assetPath === '') return new Response(null, { status: 404 });
+
+      const rt = await agentRuntime();
+      const entry = rt.plugins.list().find((item) => item.id === pluginId);
+      if (entry === undefined) return new Response(null, { status: 404 });
+      /*
+       * **未启用的插件也不伺服资源**（与 DSH 一致：未激活的包返回 404）。
+       * 否则"停用插件"只停掉它的代码、却仍能被当成资源仓库读取，
+       * 停用的语义就不完整。
+       */
+      if (entry.state !== 'enabled') return new Response(null, { status: 404 });
+
+      /*
+       * **先查插件自建的路由**（docs/30 §9.7）。
+       *
+       * 平台只开放入口 `lcode-plugin://<id>/<path>`：插件可以用
+       * `ctx.registerRoute('/wallpaper', handler)` 自己伺服视频、流式数据、
+       * 需要鉴权的内容——不必等平台为每种资源类型加白名单。
+       * 这正对应 DSH 的 `ctx.webServer`：它的静态资源路由也只放行图片，
+       * 视频皮肤插件靠的是自己注册的 `/xxx/background.mp4` 路由。
+       *
+       * 没命中路由才回落到平台的静态资源（图片/视频/字体，限插件自己目录）。
+       */
+      const routed = rt.pluginRoutes.resolve(pluginId, `/${assetPath}`)
+      if (routed !== undefined) {
+        return await routed.handler(request);
+      }
+
+      /*
+       * 路径必须落在**该插件自己的目录**内。先 resolve 再比较前缀：
+       * 这样 `../` 会被规范化掉，不能穿越到别的插件或用户目录。
+       */
+      const root = entry.installPath;
+      const target = resolve(root, assetPath);
+      const within = relative(root, target);
+      if (within.startsWith('..') || isAbsolute(within)) {
+        console.warn(`[lcode] 拒绝插件资源越界访问：${pluginId} → ${assetPath}`);
+        return new Response(null, { status: 403 });
+      }
+
+      // 只放行媒体扩展名：这个协议不是通用文件读取通道
+      const ext = extname(target).toLowerCase();
+      const mime = PLUGIN_ASSET_EXTENSIONS[ext];
+      if (mime === undefined) {
+        console.warn(`[lcode] 拒绝插件资源类型：${ext}（${pluginId} → ${assetPath}）`);
+        return new Response(null, { status: 403 });
+      }
+
+      /*
+       * ETag 用请求路径而不是内容哈希：插件快照本身不可变（registry 校验过
+       * 内容哈希），同一路径在同一个 version 下必然同一份字节。这样
+       * `If-None-Match` 命中时不必读盘——与 DSH 的 `etag: "<requested path>"` 同构。
+       */
+      const etag = `"${pluginId}/${assetPath}"`;
+      if (request.headers.get('if-none-match') === etag) {
+        return new Response(null, { status: 304, headers: { etag } });
+      }
+      const data = await readFile(target);
+      return new Response(new Uint8Array(data), {
+        status: 200,
+        headers: {
+          'content-type': mime,
+          // 插件快照不可变，可以长缓存
+          'cache-control': 'public, max-age=31536000, immutable',
+          etag,
+          /*
+           * 禁止内容嗅探：没有它，一个 `.mp4` 里塞了别的字节就可能被当成
+           * 可执行类型处理。DSH 的资源路由同样带这个头。
+           */
+          'x-content-type-options': 'nosniff',
+        },
+      });
+    } catch (error) {
+      console.warn(`[lcode] 插件资源读取失败：${String(error)}`);
+      return new Response(null, { status: 404 });
+    }
+  });
+}
+
 function publicPlugins(rt: AgentRuntime) {
   const active = new Set(rt.plugins.inspect().map((entry) => `${entry.id}@${entry.version}`));
   return rt.plugins.list().map((entry) => ({
@@ -1837,6 +1970,15 @@ async function ensureSessionWatch(sessionId: string): Promise<void> {
      */
     if (event.type === "worker/session-created") {
       pushToRenderer("lcode:session.changed", { session_id: event.data.workerSessionId });
+      pushToRenderer("lcode:session.changed", { session_id: sessionId });
+    }
+    /*
+     * turn 边界会让 `session.list()` 里的 status 在 idle/busy 之间切换
+     * （见 project.ts：hasOpenTurn ? busy : idle）。侧边栏据此显示"会话进行中"
+     * 的运转图标，但侧栏只在 `session.changed` 时刷新列表——这里补推一次，
+     * 否则"正在进行中"的指示只在别的 IPC 偶然触发时才会更新。
+     */
+    if (event.type === "turn/start" || event.type === "turn/end") {
       pushToRenderer("lcode:session.changed", { session_id: sessionId });
     }
     // 结构与表面事件**即时**推：它们是 UI 的骨架，攒批会让"正在做什么"看起来卡住
@@ -3534,7 +3676,31 @@ function parseSetDefaultInput(input: unknown): {
   return { provider, model };
 }
 
+/*
+ * 协议特权**必须在 app ready 之前**声明（Electron 的硬性要求）。
+ * 放模块顶层：这是 import 完就执行的唯一时机。
+ */
+declarePluginAssetScheme();
+
 app.whenReady().then(() => {
+  /*
+   * 插件资源协议：`lcode-plugin://<plugin-id>/<相对路径>`（docs/30 §9.7）。
+   *
+   * ## 为什么需要它
+   *
+   * 换肤插件要用**用户本机**的图片/视频当背景。渲染层直接加载 `file://`
+   * 会被拦：开发态页面是 `http://localhost:5173`，跨源到 `file:` 不允许；
+   * 生产态是 `file://` 页面，但 `webSecurity` 默认仍限制任意本地读取。
+   *
+   * ## 安全边界（比放行 file:// 严格得多）
+   *
+   * - 只能读**已安装插件自己的目录**：URL 里的 id 必须能在注册表里找到，
+   *   路径必须落在该插件目录内（`..` 会被规范化后拒绝）；
+   * - 只放行媒体类型（图片/视频/字体），不给读任意文件的能力——
+   *   否则它就是"用插件当壳读整台机器"的通道；
+   * - 只读，不暴露目录列表。
+   */
+  registerPluginAssetProtocol();
   createMainWindow();
   startTrashPruner();
   // 装配失败不该让窗口起不来：模型页会显示不可用，而不是整个应用打不开

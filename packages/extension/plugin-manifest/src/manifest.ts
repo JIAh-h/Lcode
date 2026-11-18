@@ -26,6 +26,17 @@ export interface PluginContributes {
    * 任何"改外观/加面板"的需求都只能靠改应用源码——那等于插件体系缺了一整块。
    */
   readonly client?: PluginClientContribution;
+  /**
+   * 插件自己伺服的 HTTP 路由（docs/30 §9.7，对齐 DSH 的 `ctx.webServer`）。
+   *
+   * 平台只开放**入口**（`lcode-plugin://<id>/<path>` 与 `registerRoute`），
+   * 具体资源怎么给由插件决定——视频背景、流式数据、需要鉴权的内容都不必等
+   * 平台加白名单。DSH 的视频皮肤插件正是这么做的（插件自带 `/xxx/background.mp4`
+   * 路由），因为它的静态资源路由也只放行图片。
+   *
+   * **声明了什么才能注册什么**：未声明的路径在注册时抛错。
+   */
+  readonly routes?: readonly string[];
 }
 
 export interface PluginClientContribution {
@@ -219,16 +230,18 @@ function namedRule(
 function optionalContributes(value: unknown): PluginContributes {
   if (value === undefined) return {};
   if (!isRecord(value)) throw manifestInvalid("contributes 必须是对象");
-  rejectUnknown(value, ["tools", "services", "promptSections", "client"]);
+  rejectUnknown(value, ["tools", "services", "promptSections", "client", "routes"]);
   const tools = optionalStringArray(value, "tools");
   const services = optionalStringArray(value, "services");
   const promptSections = optionalStringArray(value, "promptSections");
   const client = optionalClient(value.client);
+  const routes = optionalStringArray(value, "routes");
   return {
     ...(tools !== undefined ? { tools } : {}),
     ...(services !== undefined ? { services } : {}),
     ...(promptSections !== undefined ? { promptSections } : {}),
     ...(client !== undefined ? { client } : {}),
+    ...(routes !== undefined ? { routes } : {}),
   };
 }
 

@@ -3506,6 +3506,8 @@ function ArchiveSection() {
   const [purgeTarget, setPurgeTarget] = useState<
     { kind: 'one'; id: string; title: string } | { kind: 'all' } | null
   >(null)
+  /** 待删除的归档工作区（撤销信任 + 移出列表），先弹确认 */
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     const bridge = sessionBridge()
@@ -3564,6 +3566,56 @@ function ArchiveSection() {
       await load()
     })()
       .catch((err: unknown) => toast(err instanceof Error ? err.message : t('恢复失败')))
+      .finally(() => setBusy(null))
+  }
+
+  /*
+   * 删除已归档工作区：
+   * 1. **撤销信任**——「选择项目」只列已信任工作区，撤了才不会继续出现；
+   * 2. 从归档列表移除；
+   * 3. **软删该工作区下的活跃会话**——侧栏分组来自会话记录（与信任无关），
+   *    不动会话的话分组会在删除后仍然显示（实测踩过）。会话进「已归档会话」，可恢复。
+   * 需要确认：撤销信任是有安全含义的动作（下次打开该目录要走完整信任流程）。
+   */
+  const removeWorkspace = (key: string): void => {
+    const bridge = window.lcode.workspaceTrust
+    if (bridge === undefined) {
+      toast(t('当前环境没有主进程桥，无法撤销信任'))
+      return
+    }
+    setBusy(key)
+    void (async () => {
+      await bridge.set({ workspace: key, trusted: false })
+
+      /*
+       * **把该工作区下的活跃会话一并软删**——否则侧栏的分组还在
+       * （侧栏分组来自会话记录，与信任无关），用户看到的是"删除了反而恢复"。
+       * 软删的会话进「已归档会话」，可恢复，不丢数据。
+       */
+      const sb = sessionBridge()
+      if (sb !== undefined) {
+        const list = await sb.list({ limit: 500 })
+        const targets = list.items.filter((item) => item.workspace === key)
+        const results = await Promise.allSettled(targets.map((item) => sb.delete({ session_id: item.session_id })))
+        const failed = results.filter((item) => item.status === "rejected").length
+        if (failed > 0) toast(t("{n} 个会话归档失败", { n: failed }))
+      }
+      const current = (await window.lcode.getSidebar()) as {
+        pinnedWorkspaces: string[]
+        archivedWorkspaces: string[]
+        pinnedSessions: string[]
+        collapsedWorkspaces: string[]
+      }
+      await window.lcode.setSidebar({
+        ...current,
+        archivedWorkspaces: current.archivedWorkspaces.filter((item) => item !== key),
+        pinnedWorkspaces: current.pinnedWorkspaces.filter((item) => item !== key),
+      })
+      window.dispatchEvent(new Event('lcode:sidebar-changed'))
+      toast(t('已删除：撤销信任并从列表移除'))
+      await load()
+    })()
+      .catch((err: unknown) => toast(err instanceof Error ? err.message : t('删除失败')))
       .finally(() => setBusy(null))
   }
 
@@ -3630,11 +3682,29 @@ function ArchiveSection() {
                 <button className="btn" disabled={busy !== null} onClick={() => restoreWorkspace(item.key)}>
                   {t('恢复')}
                 </button>
+                {/* 删除 = 撤销信任 + 移出归档列表；「选择项目」只列已信任工作区，删后自然消失 */}
+                <button className="btn danger" disabled={busy !== null} onClick={() => setRemoveTarget(item.key)}>
+                  {t('删除')}
+                </button>
               </div>
             ))}
           </div>
         )}
       </div>
+      {removeTarget !== null && (
+        <ConfirmDialog
+          title={t('删除已归档工作区')}
+          message={t('会撤销「{path}」的信任、从归档列表移除，并把该工作区下的活跃会话一并归档（可在「已归档会话」恢复）。删除后再次打开需要重新信任。', { path: removeTarget })}
+          confirmLabel={t('删除')}
+          danger
+          onCancel={() => setRemoveTarget(null)}
+          onConfirm={() => {
+            const target = removeTarget
+            setRemoveTarget(null)
+            removeWorkspace(target)
+          }}
+        />
+      )}
       <div className="sect">
         <div className="sh2">
           {t('已归档会话')}

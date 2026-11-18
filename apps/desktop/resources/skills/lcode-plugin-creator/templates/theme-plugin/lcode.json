@@ -18,7 +18,12 @@
     "properties": {
       "canvas": { "type": "string", "description": "主背景色", "default": "#14141c" },
       "text": { "type": "string", "description": "主要文字颜色", "default": "#e6e6ef" },
-      "accent": { "type": "string", "description": "强调色", "default": "#7c9cff" }
+      "accent": { "type": "string", "description": "强调色", "default": "#7c9cff" },
+      "background": {
+        "type": "string",
+        "description": "背景媒体地址：lcode-plugin://<插件id>/assets/xxx.mp4 可引用本插件目录里的图片或视频"
+      },
+      "backgroundOpacity": { "type": "number", "description": "背景不透明度 0-1", "default": 1 }
     }
   }
 }

@@ -64,6 +64,31 @@ export function HomePage() {
   /** 新会话的 Agent 模式：standard（默认）或 creator（多一个 run_code） */
   const [agentPreset, setAgentPreset] = useState<AgentPresetId>('standard')
   const [agentPresets, setAgentPresets] = useState<readonly AgentPresetOption[]>([])
+  /*
+   * 待信任确认的提交（docs/12 工作区信任）。
+   *
+   * 非 null 时弹出信任确认框：用户点「信任」→ 写信任并继续创建会话；
+   * 点「保持只读」→ 不写信任、照常创建（只读下模型只能读，写/执行被策略拦）。
+   * 修复：之前信任框在进会话页之后才弹，而消息已经发出去了——模型先跑起来，
+   * 用户还没做信任决定。
+   */
+  const [pendingTrust, setPendingTrust] = useState<{
+    readonly path: string
+    readonly title: string
+    readonly value: string
+    readonly attachments: readonly { readonly path: string }[]
+    readonly skills: readonly string[]
+    readonly images: readonly unknown[]
+    readonly asRouter: boolean
+    readonly agentPreset: AgentPresetId
+    /** 「信任」按钮用它写信任状态；undefined = 桥未暴露（按钮退化为只读继续） */
+    readonly trustSet: ((i: unknown) => Promise<unknown>) | undefined
+  } | null>(null)
+  /** submit 时保存的桥引用：确认框的回调晚于 submit 执行，闭包里的 api 可能已过期 */
+  const trustApiRef = useRef<{
+    readonly session: { create(i: unknown): Promise<{ session_id: string }> }
+    readonly agent: { send(i: unknown): Promise<unknown> }
+  } | null>(null)
   /**
    * 勾选编排会话时，输入区显示的应该是 **Router 自己的模型**（设置里那一栏），
    * 而不是"新对话默认模型"——后者只有 worker 用。不显示的话，用户在勾选后
@@ -96,16 +121,44 @@ export function HomePage() {
     }
   }, [location.key, location.state])
 
+  /*
+   * 「选择项目」只列**已信任**的工作区（docs/12 工作区信任）。
+   *
+   * 之前从会话记录取 workspace 去重、不做任何过滤——于是一次性的临时目录
+   * 也会永远留在列表里（实测积压了一堆 ws-probe-* / Temp 下的目录）。
+   * 只留已信任的：用过的临时目录若被「保持只读」跳过，自然不再出现；
+   * 归档工作区在设置页撤销信任后也从这里消失。
+   *
+   * 并行取信任清单与会话列表：两个请求都很轻，不必串行。
+   */
   useEffect(() => {
     const api = sessionBridge()
+    const trustApi = window.lcode?.workspaceTrust
     if (api === undefined) return
-    void api
-      .list()
-      .then((result) => {
+    void Promise.all([
+      api.list(),
+      trustApi?.list().catch(() => []) ?? Promise.resolve([]),
+    ])
+      .then(([result, trustedRaw]) => {
+        /*
+         * **路径形状必须先统一再比对**（实测踩过两个坑）：
+         * 1. 字段名：信任清单是 `path`（workspace-trust.ts），不是 `workspace`；
+         * 2. 分隔符：信任清单存反斜杠（`D:\li\X`），会话记录存正斜杠（`D:/li/X`）——
+         *    直接 `Set.has()` 永远匹配不上，列表会恒为空。
+         * 统一成正斜杠 + 小写（Windows 不区分大小写）后再比。
+         */
+        const normalize = (input: string): string => input.replaceAll('\\', '/').toLowerCase()
+        const trusted = new Set<string>()
+        for (const item of Array.isArray(trustedRaw) ? trustedRaw : []) {
+          if (typeof item !== 'object' || item === null) continue
+          const row = item as { path?: unknown }
+          if (typeof row.path === 'string') trusted.add(normalize(row.path))
+        }
         const seen = new Set<string>()
         const next: Proj[] = []
         for (const item of result.items) {
           if (item.workspace === null || seen.has(item.workspace)) continue
+          if (!trusted.has(normalize(item.workspace))) continue
           seen.add(item.workspace)
           const name = item.workspace.split(/[\\/]/).filter(Boolean).pop() || item.workspace
           next.push({ name, path: item.workspace })
@@ -150,6 +203,28 @@ export function HomePage() {
    * 之前这里是 `navigate('/sessions/demo-1')`——一个写死的会话 id，
    * 于是无论说什么都进同一个空壳（工作台里显示的还是一张与输入无关的假总结卡）。
    */
+
+  /** 查某路径的信任状态：'trusted' / 'untrusted' / 'unknown'（拿不到桥时按未知处理） */
+  const trustStateFor = async (path: string): Promise<'trusted' | 'untrusted' | 'unknown'> => {
+    try {
+      const api = (globalThis as unknown as {
+        lcode?: { workspaceTrust?: { list(): Promise<unknown> } }
+      }).lcode
+      if (api?.workspaceTrust === undefined) return 'unknown'
+      const value = await api.workspaceTrust.list()
+      const entries = Array.isArray(value) ? value : []
+      const hit = entries.find(
+        (item) => typeof item === 'object' && item !== null &&
+          (item as { workspace?: unknown }).workspace === path,
+      ) as { trusted?: unknown } | undefined
+      if (hit === undefined) return 'untrusted'
+      return hit.trusted === true ? 'trusted' : 'untrusted'
+    } catch {
+      // 查询失败不阻断建会话：进会话页后仍会弹信任确认（原有兜底）
+      return 'unknown'
+    }
+  }
+
   const submit = async ({ attachments, skills, images }: ComposerSendInput) => {
     const value = text.trim()
     if (value.length === 0 && images.length === 0 && attachments.length === 0) return
@@ -158,6 +233,10 @@ export function HomePage() {
         lcode?: {
           session?: { create(i: unknown): Promise<{ session_id: string }> }
           agent?: { send(i: unknown): Promise<unknown> }
+          workspaceTrust?: {
+            list(): Promise<unknown>
+            set(i: unknown): Promise<unknown>
+          }
         }
       }
     ).lcode
@@ -165,15 +244,61 @@ export function HomePage() {
       toast(t('当前环境没有主进程桥，无法新建对话'))
       return
     }
+    // 确认框的回调晚于本函数执行，把桥引用存到 ref 里避免闭包过期
+    trustApiRef.current = { session: api.session, agent: api.agent }
+    // 信任桥单独存：确认框「信任」按钮需要它
+    const trustSet = api.workspaceTrust?.set.bind(api.workspaceTrust)
+    /*
+     * **信任前置检查**（修复：新建会话弹了信任框、模型却已开始回复）。
+     *
+     * 旧流程：session.create → agent.send → 进工作区页才弹信任框。
+     * 信任框是纯展示层判断，不阻断任何东西——于是模型已经跑起来了。
+     *
+     * 现在：选了项目且未信任时，**先弹确认、后创建会话**。
+     * 「信任」→ 写信任 → 照常创建并发消息；「保持只读」→ 照常创建并发消息
+     * （只读下模型只能读，写/执行会被策略拦——这与进入会话页后确认的行为一致）。
+     */
+    if (proj !== null) {
+      const trust = await trustStateFor(proj.path)
+      if (trust === 'untrusted') {
+        const title = (value.split('\n')[0] ?? '').slice(0, 40)
+        // pendingTrust 里带 trustSet：确认框「信任」按钮要用它写信任状态
+        setPendingTrust({
+          path: proj.path, title, value, attachments, skills, images, asRouter, agentPreset,
+          trustSet,
+        })
+        return
+      }
+    }
+    void startSession({
+      attachments, skills, images,
+      titleBase: value.split('\n')[0] ?? '',
+      api: { session: api.session, agent: api.agent },
+    })
+  }
+
+  /*
+   * 真正创建会话并发首句。从 submit 拆出来是因为信任确认也可能走到这里：
+   * 用户点「信任」或「保持只读」之后，从这里继续，不再重复检查。
+   */
+  const startSession = async (input: {
+    readonly attachments: readonly { readonly path: string }[]
+    readonly skills: readonly string[]
+    readonly images: readonly unknown[]
+    readonly titleBase: string
+    readonly api: {
+      readonly session: { create(i: unknown): Promise<{ session_id: string }> }
+      readonly agent: { send(i: unknown): Promise<unknown> }
+    }
+  }): Promise<void> => {
     try {
-      // 标题取首行前若干字（列表里要能认出这是哪次对话）；真正的命名/重命名是后续的事
       const title =
-        (value.split('\n')[0] ?? '').slice(0, 40) ||
-        (attachments.length > 0
-          ? (attachments[0]?.path.split(/[\\/]/).filter(Boolean).pop() ?? t('附件'))
+        input.titleBase.slice(0, 40) ||
+        (input.attachments.length > 0
+          ? (input.attachments[0]?.path.split(/[\\/]/).filter(Boolean).pop() ?? t('附件'))
           : t('图片'))
       // 没选项目就不带 cwd：会话会进入侧栏「最近任务」，不隐式绑定当前目录
-      const created = await api.session.create({
+      const created = await input.api.session.create({
         ...(proj === null ? {} : { cwd: proj.path }),
         title,
         ...(asRouter ? { role: 'router' } : {}),
@@ -181,12 +306,12 @@ export function HomePage() {
         ...(agentPreset === 'standard' ? {} : { preset: agentPreset }),
       })
       // 首句**在这里就发出去**：用户已经表达完了意图，没必要进去再发一次
-      await api.agent.send({
+      await input.api.agent.send({
         session_id: created.session_id,
-        text: value,
-        ...(attachments.length === 0 ? {} : { attachments }),
-        ...(skills.length === 0 ? {} : { skills }),
-        ...(images.length === 0 ? {} : { images }),
+        text: text,
+        ...(input.attachments.length === 0 ? {} : { attachments: input.attachments }),
+        ...(input.skills.length === 0 ? {} : { skills: input.skills }),
+        ...(input.images.length === 0 ? {} : { images: input.images }),
       })
       notifySessionChanged()
       navigate(`/sessions/${created.session_id}`)
@@ -412,6 +537,65 @@ export function HomePage() {
         </div>
       </div>
       {dragOver && <div className="dropmask">{t('松开以打开该文件夹')}</div>}
+      {/*
+       * 信任确认框（docs/12 工作区信任）：**在创建会话之前**弹出。
+       * 与会话页里那个同款；确认后从 startSession 继续完整流程。
+       * 「保持只读」不写信任——只读下模型只能读，写/执行被策略拦。
+       */}
+      {pendingTrust !== null && (
+        <div className="dropmask" style={{ zIndex: 60 }} onClick={(e) => e.stopPropagation()}>
+          <div className="modal" style={{ width: 500 }}>
+            <div className="mh">
+              <h3 style={{ margin: 0 }}>{t('信任此文件夹？')}</h3>
+            </div>
+            <div className="mb" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <span>{t('未信任的文件夹只能读取。信任后，模型可以在此文件夹中修改文件并执行命令。')}</span>
+              <span className="src mono">{pendingTrust.path}</span>
+            </div>
+            <div className="mf" style={{ justifyContent: 'flex-end' }}>
+              <button
+                className="btn"
+                onClick={() => {
+                  const pending = pendingTrust
+                  setPendingTrust(null)
+                  // 「保持只读」不写信任：只读下模型只能读，写/执行被策略拦
+                  const api = trustApiRef.current
+                  if (api === null) return
+                  void startSession({
+                    attachments: pending.attachments,
+                    skills: pending.skills,
+                    images: pending.images,
+                    titleBase: pending.title,
+                    api,
+                  })
+                }}
+              >
+                {t('保持只读')}
+              </button>
+              <button
+                className="btn primary"
+                onClick={() => {
+                  const pending = pendingTrust
+                  setPendingTrust(null)
+                  // 先写信任再建会话：这样模型的第一个请求就运行在已信任的目录里
+                  pending.trustSet?.({ workspace: pending.path, trusted: true }).catch(() => undefined)
+                  const api = trustApiRef.current
+                  if (api === null) return
+                  void startSession({
+                    attachments: pending.attachments,
+                    skills: pending.skills,
+                    images: pending.images,
+                    titleBase: pending.title,
+                    api,
+                  })
+                }}
+              >
+                {t('信任此文件夹')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }

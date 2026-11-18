@@ -138,7 +138,7 @@ import { createLocalNetworkAudit } from './network-audit.ts'
 import { knobsOf, createLocalPermissionPresets, createLocalWorkspaceTrust, installPolicyHook } from '@lcode/permission-presets'
 import { createPlanModeService } from '@lcode/plan-mode'
 import { LocalPluginRegistry, type PluginInfo } from '@lcode/plugin-registry'
-import { createInProcessPluginHost, InstalledPluginLifecycleService, PluginLifecycleManager } from '@lcode/plugin-host'
+import { createInProcessPluginHost, createPluginRouteRegistry, InstalledPluginLifecycleService, PluginLifecycleManager, type PluginRouteRegistry } from '@lcode/plugin-host'
 import { createLocalSkillFilesystem } from '@lcode/skill-filesystem'
 import { registerSkillTools } from '@lcode/tool-skill'
 import { createPluginInstallTool, createPluginVerifyTool } from '@lcode/tool-plugin'
@@ -254,6 +254,11 @@ export interface AgentRuntime {
   readonly checkpoints: FileCheckpointService
   /** P6 产品入口：安装快照、生命周期和只读检查都由同一 Runtime 持有。 */
   readonly plugins: PluginRuntimeService
+  /**
+   * 插件自建 HTTP 路由（docs/30 §9.7）：主进程的 `lcode-plugin://` 协议
+   * 在处理请求时先查这里，命中就交给插件，否则走平台开放的静态资源。
+   */
+  readonly pluginRoutes: PluginRouteRegistry
   /** P6 产品入口：Skill 只读目录与按需正文加载。 */
   readonly skills: RuntimeSkillService
   /** P6 产品入口：预设只生成可审计的会话快照，不直接越权改变运行时。 */
@@ -320,7 +325,11 @@ export interface RuntimePresetService {
   snapshot(input: { readonly sessionId: string; readonly ids: readonly string[] }): Promise<PresetSnapshot>
 }
 
-type MountedAgentRuntime = Omit<AgentRuntime, 'composition'>
+/*
+ * `mountDesktopSpine` 不认识 pluginRoutes（它属于插件生命周期那一层），
+ * 所以从它返回的类型里去掉——由 createAgentRuntime 在最终 return 时补上。
+ */
+type MountedAgentRuntime = Omit<AgentRuntime, 'composition' | 'pluginRoutes'>
 interface ExtensionFacade { readonly plugins: PluginRuntimeService; readonly skills: RuntimeSkillService; readonly presets: RuntimePresetService }
 
 /**
@@ -370,11 +379,20 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
    * 两处共享同一实例，第三方插件因此与内置能力走同一个 composeRuntimeProfile。
    */
   const pluginRegistry = new LocalPluginRegistry({ home: services.home, coreVersion: '0.1.0' })
+  /*
+   * 插件 HTTP 路由表（docs/30 §9.7）：平台只开放**入口**
+   * （`lcode-plugin://<id>/<path>`），视频/流式/鉴权等资源由插件自己伺服的
+   * 路由提供——与 DSH 的 `ctx.webServer` 同一取舍，平台不必为每种资源
+   * 类型维护白名单。
+   */
+  const pluginRoutes = createPluginRouteRegistry()
   const pluginLifecycle = new PluginLifecycleManager({
     context: services.ctx,
     // 延迟解析：顶层创建时 tooling 还没挂，tools/systemPrompt 尚不在 ctx
     tools: () => services.ctx.get('tools'),
     systemPrompt: () => services.ctx.get('systemPrompt'),
+    // 插件自建 HTTP 路由（docs/30 §9.7）：平台只给入口，资源由插件伺服
+    routes: pluginRoutes,
     /*
      * 插件宿主**在进程内加载**（docs/30 §9.6，对齐 DSH）。
      *
@@ -536,6 +554,7 @@ export async function createAgentRuntime(options: AgentRuntimeOptions = {}): Pro
   return {
     ...mounted,
     composition: composition.snapshot,
+    pluginRoutes,
     dispose: async () => {
       clearInterval(grantGcTimer)
       await composition.dispose()
@@ -1556,12 +1575,18 @@ const BASE_SYSTEM_PROMPT = [
   '## 怎么干活',
   '',
   '- 需要看代码就用 read / glob / grep 去**真的读**，不要凭印象猜文件内容。',
+  '- **先定位，再精读**：不知道代码在哪时先试 `code_search`（语义召回，一次拿到相关片段）。',
+  '  反复换词 grep 又搜不到是最耗步数的做法；`grep` 适合已知确切标识符/查引用，不适合探索。',
+  '- **同一个文件不要反复整读**。已经读过的内容就在上下文里；需要另外几行用 offset/limit 精确取。',
+  '  实测长任务里大量步数消耗在"同一个文件读了三四遍"上，那不会带来新信息。',
   '- 改代码用 edit（精确替换）或 write（整文件覆盖）。edit 要求 old 在文件里唯一出现，',
   '  不唯一时会报错并告诉你出现几次 —— 那是让你补充上下文，不是让你换一种改法。',
   '- 需要跑命令/测试用 shell。**退出码非 0 不代表工具坏了**，那是命令的结果',
   '  （比如 grep 没匹配到会返回 1），请读 stdout/stderr 判断发生了什么。',
   '- 工具失败会以结构化错误返回给你，**带错误码**。看错误码判断原因并自己修正，',
   '  不要重复同一个失败的调用。',
+  '- **能一次做完的别拆成多次**：读一个文件能拿到的信息就别分三步读；',
+  '  确定要改多处时，先把改动想清楚再动手，而不是改一处看一次。',
   '',
   '## 用户插话与打断',
   '',

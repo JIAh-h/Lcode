@@ -26,7 +26,13 @@ export const pluginUtilityRunnerPath = fileURLToPath(new URL('./utility-runner.m
  * 与 DSH 的 Cordis 插件同一取舍——沙箱只约束模型执行的命令，不约束插件加载。
  */
 export { createInProcessPluginHost } from './in-process.ts'
-export type { InProcessPluginHost, InProcessHostOptions } from './in-process.ts'
+export type { InProcessPluginHost, InProcessHostOptions, RouteRequest, RouteResponse } from './in-process.ts'
+/*
+ * 插件 HTTP 路由表（docs/30 §9.7）：平台只开放入口，
+ * 视频/流式/鉴权等资源由插件注册的路由自行伺服（同 DSH 的 ctx.webServer）。
+ */
+export { createPluginRouteRegistry } from './routes.ts'
+export type { PluginRouteHandler, PluginRouteRegistry } from './routes.ts'
 
 const DEFAULT_TIMEOUT_MS = 10_000
 const MAX_MESSAGE_BYTES = 1_048_576

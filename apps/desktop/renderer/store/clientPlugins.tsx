@@ -68,7 +68,14 @@ export interface ClientApi {
   setCssVars(vars: Readonly<Record<string, string>>): void
   /** 清掉设过的变量（回到主题原样） */
   clearCssVars(): void
-  /** 设置全局背景图（皮肤）。传 `null` 清除。 */
+  /**
+   * 设置全局背景媒体：**图片或视频**。传 `null` 清除。
+   *
+   * 视频走 `<video>` 元素（静音循环自动播放），图片走 CSS background。
+   * 支持本地文件：`file:///C:/.../bg.mp4` 可以，因为皮肤文件在用户本机。
+   */
+  setBackgroundMedia(input: BackgroundMediaInput | null): void
+  /** 旧接口：只设图片背景（保留兼容；新插件请用 `setBackgroundMedia`） */
   setBackgroundImage(input: { readonly url: string; readonly size?: string; readonly opacity?: number } | null): void
   /** 创建节点描述；插件不直接产出 React 元素 */
   h(tag: string, content?: string | NodeResult, props?: Readonly<Record<string, string>>): NodeResult
@@ -119,10 +126,56 @@ export function clearCssVars(): void {
 }
 
 let backgroundNode: HTMLDivElement | undefined
+let backgroundVideo: HTMLVideoElement | undefined
 
-export function applyBackgroundImage(
-  input: { readonly url: string; readonly size?: string; readonly opacity?: number } | null,
-): void {
+/** 背景媒体：图片走 CSS，视频走 `<video>`（CSS 的 background 只吃静态图） */
+export interface BackgroundMediaInput {
+  readonly url: string
+  /** 不传时按扩展名推断 */
+  readonly kind?: 'image' | 'video' | undefined
+  readonly size?: string | undefined
+  readonly opacity?: number | undefined
+  /** 视频专用：静音循环自动播放（默认全开，皮肤需要它） */
+  readonly muted?: boolean | undefined
+  readonly loop?: boolean | undefined
+  readonly autoplay?: boolean | undefined
+}
+
+/**
+ * 放行的背景媒体来源。
+ *
+ * `lcode-plugin://` 是**首选**：它把读文件的权限收在"插件自己的目录 + 媒体扩展名"
+ * 里（见主进程的协议处理）。`file://` 也放行，因为用户可能想在设计稿里引用
+ * 已有位置的素材；但注意它只能用于**用户自己指定**的路径，插件不应拿它去探测文件。
+ */
+const MEDIA_URL_ALLOWED = /^(https:\/\/|data:(image|video)\/|blob:|file:\/\/|lcode-plugin:\/\/)/
+
+/** 从扩展名推断媒体类型；判不出来按图片处理 */
+function kindOf(input: BackgroundMediaInput): 'image' | 'video' {
+  if (input.kind !== undefined) return input.kind
+  return /\.(mp4|webm|ogv|mov|m4v)(\?|#|$)/i.test(input.url) ? 'video' : 'image'
+}
+
+/**
+ * 设置全局背景媒体（图片**或视频**）。
+ *
+ * ## 为什么要有这条通道
+ *
+ * 原先只有 `setBackgroundImage`：只接受 https / data:image，且用 CSS
+ * `background-image` 实现——**视频根本没法用**（CSS 背景只吃静态图）。
+ * 实测用户想用 mp4 做皮肤时，模型只能回答"改 Lcode 源码"，那是产品能力缺失，
+ * 不该让用户去改 AI 的源码。
+ *
+ * ## 安全边界
+ *
+ * 放行 `https:` / `data:image|video` / `blob:` / `file://`。
+ * `file://` 是**必要的**：皮肤文件就在用户本机，不放行就无法本地换肤。
+ * 仍拒绝 `javascript:` 等协议；元素设 `pointer-events:none`，不会成为点击劫持载体。
+ *
+ * 非法 URL **抛错**而不是静默 return——静默丢弃会让插件以为成功、
+ * 用户看到"什么都没变"，极难排查（旧实现正是如此）。
+ */
+export function applyBackgroundMedia(input: BackgroundMediaInput | null): void {
   if (typeof document === 'undefined') return
   if (backgroundNode === undefined) {
     const node = document.createElement('div')
@@ -138,22 +191,66 @@ export function applyBackgroundImage(
       'pointer-events:none',
       'background-position:center',
       'background-repeat:no-repeat',
+      'display:flex',
+      'align-items:center',
+      'justify-content:center',
+      'overflow:hidden',
     ].join(';')
     document.body.prepend(node)
     backgroundNode = node
   }
+  // 切换媒体时先清掉上一种，避免图片和视频叠在一起
+  const clearBoth = (): void => {
+    backgroundNode!.style.backgroundImage = ''
+    backgroundVideo?.remove()
+    backgroundVideo = undefined
+  }
   if (input === null) {
-    backgroundNode.style.backgroundImage = ''
+    clearBoth()
     return
   }
-  /*
-   * 只接受 https 与 data:image：`file:` 会让插件读到本机任意图片路径
-   * （等于把它变成文件探测器），`javascript:` 更不可能放行。
-   */
-  if (!/^(https:\/\/|data:image\/)/.test(input.url)) return
-  backgroundNode.style.backgroundImage = `url("${input.url.replaceAll('"', '%22')}")`
+  if (!MEDIA_URL_ALLOWED.test(input.url)) {
+    throw new Error(
+      `不支持的背景地址：${input.url.slice(0, 80)}。` +
+        '推荐用 lcode-plugin://<插件id>/<包内路径>（读插件自己目录里的素材）；' +
+        '也接受 https:// 、data:image/* 、data:video/* 、blob: 与 file:// 本地文件。',
+    )
+  }
+  const escaped = input.url.replaceAll('"', '%22')
+  const opacity = String(Math.min(Math.max(input.opacity ?? 1, 0), 1))
+  clearBoth()
+  backgroundNode.style.opacity = opacity
+  if (kindOf(input) === 'video') {
+    const video = document.createElement('video')
+    video.src = input.url
+    video.muted = input.muted ?? true
+    video.loop = input.loop ?? true
+    video.autoplay = input.autoplay ?? true
+    video.playsInline = true
+    video.setAttribute('aria-hidden', 'true')
+    video.style.cssText = [`object-fit:${input.size ?? 'cover'}`, 'width:100%', 'height:100%', 'pointer-events:none'].join(';')
+    // 自动播放被策略拦下时不抛：静默失败好过打断激活，但留一条可查日志
+    void video.play().catch(() => {
+      console.warn('[client-plugin] 背景视频自动播放被拦截（通常是浏览器自动播放策略）')
+    })
+    backgroundNode.appendChild(video)
+    backgroundVideo = video
+    return
+  }
+  backgroundNode.style.backgroundImage = `url("${escaped}")`
   backgroundNode.style.backgroundSize = input.size ?? 'cover'
-  backgroundNode.style.opacity = String(Math.min(Math.max(input.opacity ?? 1, 0), 1))
+}
+
+/**
+ * 兼容旧接口：只设图片背景。
+ *
+ * 保留是为了不破坏已在用 `setBackgroundImage` 的插件；
+ * 新插件应当用 `setBackgroundMedia`（支持视频）。
+ */
+export function applyBackgroundImage(
+  input: { readonly url: string; readonly size?: string; readonly opacity?: number } | null,
+): void {
+  applyBackgroundMedia(input === null ? null : { ...input, kind: 'image' })
 }
 
 /* ─────────── 加载 ─────────── */
@@ -304,7 +401,7 @@ export function PluginSlot({ plugins, slot }: { plugins: readonly ClientPlugin[]
   /* 卸载时回滚全局样式，避免"关了插件但颜色还在" */
   useEffect(() => () => {
     clearCssVars()
-    applyBackgroundImage(null)
+    applyBackgroundMedia(null)
   }, [])
 
   const owners = useMemo(() => plugins.filter((plugin) => plugin.slots.includes(slot)), [plugins, slot])
@@ -319,6 +416,9 @@ export function PluginSlot({ plugins, slot }: { plugins: readonly ClientPlugin[]
       },
       clearCssVars: () => {
         clearCssVars()
+      },
+      setBackgroundMedia: (input) => {
+        applyBackgroundMedia(input)
       },
       setBackgroundImage: (input) => {
         applyBackgroundImage(input)

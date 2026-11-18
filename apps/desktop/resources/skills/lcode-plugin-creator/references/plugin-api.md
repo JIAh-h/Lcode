@@ -39,8 +39,19 @@ interface PluginActivationContext {
   ): Promise<void>
 
   registerPromptSection(id: string, content: string, order?: number): Promise<void>
+
+  /** 注册一条 HTTP 路由：`lcode-plugin://<id>/<path>` 下由你伺服 */
+  registerRoute(
+    path: string,
+    handler: (request: { method: string; url: string; headers: Record<string, string> })
+      => { status: number; body: string | null; headers?: Record<string, string> }
+      | Promise<{ status: number; body: string | null; headers?: Record<string, string> }>,
+  ): Promise<void>
 }
 ```
+
+`registerRoute` needs the path declared in `contributes.routes` first. Use it when the built-in
+asset route cannot express what you need (see `references/client.md` → "register your own").
 
 ### `capabilities`
 

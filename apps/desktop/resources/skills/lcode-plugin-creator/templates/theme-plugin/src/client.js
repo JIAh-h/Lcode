@@ -30,6 +30,30 @@ export function render({ api }) {
     '--accent': cfg.accent ?? '#7c9cff',
   })
 
+  /*
+   * 背景媒体：图片或视频都走同一个接口，类型按扩展名推断。
+   *
+   * `lcode-plugin://<插件id>/<包内路径>` 是引用**插件自己目录**里素材的正确方式：
+   * 宿主只伺服该插件目录、且只放行媒体类型（图片/视频/字体），
+   * 所以不需要把几 MB 的视频塞进 data: URL。
+   *
+   * 非法地址会**抛错**（不是静默忽略），这里 catch 掉并退回到纯配色皮肤——
+   * 让皮肤"少一个背景但仍可用"，而不是整个插件加载失败。
+   */
+  if (typeof cfg.background === 'string' && cfg.background !== '') {
+    try {
+      api.setBackgroundMedia({
+        url: cfg.background,
+        ...(typeof cfg.backgroundOpacity === 'number' ? { opacity: cfg.backgroundOpacity } : {}),
+      })
+    } catch (error) {
+      console.warn('[theme-plugin] 背景媒体设置失败，已退回纯配色：', error)
+    }
+  } else {
+    // 没配背景就明确清掉，避免切换配置后残留上一次的媒体
+    api.setBackgroundMedia(null)
+  }
+
   // 没有可见节点，返回 null
   return null
 }
