@@ -3223,7 +3223,7 @@ function PluginSection() {
         </div>
         <div className="sub">{t('第三方插件在独立受控进程中运行，只有声明的工具、提示段和事件订阅可以注册。')}</div>
         {plugins.length > 0 ? (
-          <div className="modelList ext-list">
+          <div className="modelList ext-list bplug-scroll">
             {plugins.map((plugin) => {
               const key = `${plugin.id}@${plugin.version}`
               const tools = plugin.contributes.tools ?? []

@@ -820,8 +820,43 @@ body.noside .side { display: none; }
 .ext-empty-actions { display: flex; justify-content: center; gap: 8px; margin-top: 12px; }
 .ext-empty .btn { padding: 6px 14px; font-size: 12px; }
 /* 内置插件总览：两列卡片，只读；停用项带灰标签，展开显示运行细节 */
-.bplug-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 12px var(--s5) var(--s5); }
-.bplug { display: flex; flex-direction: column; gap: 5px; padding: 10px 12px 9px; border: 1px solid var(--border-subtle); border-radius: var(--r3); background: var(--bg-canvas); min-width: 0; }
+/*
+ * 插件卡片网格：**固定五行高 + 内部滚动**。
+ *
+ * 插件多起来时这一块会把整页撑得很长（内置能力有二十多项），用户要滚很久才能
+ * 看到下面的第三方插件区。固定成五行高度后，页面总长稳定，细节靠内部滚动看。
+ *
+ * 高度用 `calc` 由卡片自身尺寸推导，而不是写死像素：卡片高度 = padding(10+9)
+ * + 标题行 + 描述两行 + id 行，字号或行高一改就自动跟上，不会露出半行。
+ */
+/* 单张卡片高度（含边框）：head 20 + gap 5 + desc 34 + gap 5 + id 18 + padding 19 + border 2 */
+:root { --bplug-card-h: 103px; --bplug-gap: 10px; }
+.bplug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--bplug-gap);
+  margin: 12px var(--s5) var(--s5);
+  /* 五行：5 张卡片 + 4 个间距 */
+  max-height: calc(5 * var(--bplug-card-h) + 4 * var(--bplug-gap));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 滚动时给右侧留一点余量，避免滚动条压住卡片边框 */
+  padding-right: 2px;
+}
+/* 第三方插件列表：同样固定五行高（行高约 44px） */
+.bplug-scroll {
+  max-height: calc(5 * 44px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+/* 卡片等高：网格按五行算高度，卡片一高一矮会让"五行"对不上实际显示 */
+/*
+ * 卡片等高（网格按五行算高度，一高一矮会让"五行"对不上实际显示）。
+ *
+ * 但**展开详情的卡片要能撑开**：`.bplug-detail` 有实际内容，定高会把它裁掉。
+ * 用 `height: auto` + `min-height` 而不是 `height`，未展开时仍对齐。
+ */
+.bplug { display: flex; flex-direction: column; gap: 5px; padding: 10px 12px 9px; border: 1px solid var(--border-subtle); border-radius: var(--r3); background: var(--bg-canvas); min-width: 0; min-height: var(--bplug-card-h); box-sizing: border-box; }
 .bplug-head { display: flex; align-items: center; gap: 6px; padding: 0; border: none; background: transparent; text-align: left; cursor: pointer; min-width: 0; }
 .bplug-name { font-size: 13px; font-weight: 500; color: var(--text-primary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bplug-tag { flex: none; padding: 1px 6px; border-radius: 4px; background: var(--bg-inset); color: var(--text-muted); font-size: 10.5px; }

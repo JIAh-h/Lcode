@@ -3,7 +3,13 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import rcedit from 'rcedit'
+/*
+ * `rcedit` v5 是**命名导出**（`export const rcedit = ...`），没有 default。
+ * 之前写成 `import rcedit from 'rcedit'` 会在模块加载期就抛
+ * "does not provide an export named 'default'"——整个打包脚本直接退出，
+ * 于是 Lcode.exe 的图标与版本信息一直停留在 Electron 默认值（实测如此）。
+ */
+import { rcedit } from 'rcedit'
 
 /**
  * 生成 Windows portable staging 包（MVP 发布闭环）。

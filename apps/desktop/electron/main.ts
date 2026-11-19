@@ -47,6 +47,20 @@ const DEV_URL = process.env.VITE_DEV_SERVER_URL ?? "http://localhost:5173";
 app.commandLine.appendSwitch("disable-gpu");
 app.disableHardwareAcceleration();
 
+/*
+ * **任务栏图标归组**（Windows）。
+ *
+ * 任务栏显示的图标由 AppUserModelID 决定，**不是** `BrowserWindow.icon`——
+ * 后者只影响窗口标题栏与 alt-tab。没设这个 ID 时，Windows 把进程归到
+ * `electron.exe` 名下，于是任务栏显示 Electron 的默认图标（实测如此）。
+ *
+ * 注意生效条件：ID 必须与**快捷方式**上记录的 AppUserModelID 一致。
+ * 打包后由安装器写入快捷方式（见 electron-builder 的 win.appId），开发态
+ * 没有安装的快捷方式，所以开发时仍会看到 Electron 图标——这是 Windows 的
+ * 机制，不是代码没生效。
+ */
+app.setAppUserModelId("dev.lcode.desktop");
+
 // 移除 Electron 默认原生菜单（File/Edit/View/Window/Help）——应用内自绘「文件/编辑/视图/帮助」菜单栏
 Menu.setApplicationMenu(null);
 
