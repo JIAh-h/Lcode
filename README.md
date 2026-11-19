@@ -102,6 +102,16 @@ pnpm dev:desktop        # 启动桌面端（Vite + Electron，热更新）
 pnpm package:desktop    # 产物在 out/lcode-win32-x64/
 ```
 
+打包 Windows 安装器（NSIS，可选安装路径 / 快捷方式 / 卸载项）：
+
+```bash
+pnpm package:setup      # 产物为 out/Lcode Setup <version>.exe
+```
+
+两条发布路径共用同一份 staging（`out/lcode-win32-x64/`）：portable 脚本负责收集 Electron
+runtime、原生 SQLite 绑定与沙箱 helper，`electron-builder.config.cjs` 再把它封成安装器。
+数据目录固定在 `~/.lcode`（`LCODE_HOME` 可覆盖），与安装路径无关，所以**升级或重装不会丢配置**。
+
 CLI 可以独立使用（复用同一内核与数据）：
 
 ```bash
@@ -118,6 +128,7 @@ pnpm --filter @lcode/cli start -- sessions list
 | `pnpm dev:desktop` | 开发态桌面端（Vite + Electron） |
 | `pnpm start:desktop` | 以构建产物启动桌面端 |
 | `pnpm package:desktop` | 打包 Windows portable |
+| `pnpm package:setup` | 打包 Windows 安装器（NSIS） |
 | `pnpm dev:cli` | CLI 开发入口 |
 | `pnpm typecheck` | 三层类型检查（host / client / electron） |
 | `pnpm test` | 单元 / 集成测试（Vitest） |

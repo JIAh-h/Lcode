@@ -43,9 +43,40 @@ import type { ApprovalResult, ContentBlock } from "@lcode/session";
 
 const DEV_URL = process.env.VITE_DEV_SERVER_URL ?? "http://localhost:5173";
 
-// 兼容虚拟化/远程环境：禁用硬件加速，避免 GPU 进程崩溃导致整窗退出
+/*
+ * **GPU 兜底开关必须在最早期设置**，而且要足够彻底。
+ *
+ * 这台机器（NVIDIA GTX 1650 + Intel UHD，驱动较旧）上 GPU 进程会连续崩溃：
+ * `GPU process exited unexpectedly: exit_code=-2147483645`，随后
+ * `FATAL: gpu_data_manager_impl_private.cc(423) GPU process isn't usable`
+ * 直接退出——**双击 exe 打不开**就是这个原因。
+ *
+ * 开发态靠 `dev-electron.mjs` 额外传 `--no-sandbox --disable-gpu` 才跑得起来
+ * （见该脚本里的实测记录）。打包版没有那个脚本，所以必须由主进程自己补齐；
+ * 否则用户拿到的 exe 在同类机器上根本启动不了。
+ *
+ * `disable-software-rasterizer` 也一起关：软件光栅化在虚拟化环境里同样可能拖垮
+ * 渲染进程，而我们只需要一个能稳定出图的窗口。
+ */
 app.commandLine.appendSwitch("disable-gpu");
+app.commandLine.appendSwitch("disable-gpu-compositing");
+app.commandLine.appendSwitch("disable-software-rasterizer");
 app.disableHardwareAcceleration();
+/*
+ * **关掉 Chromium 沙箱**（打包态必需）。
+ *
+ * 实测这台机器上：只带 `--disable-gpu` 仍然崩（exit_code=-2147483645），
+ * **只带 `--no-sandbox` 就能正常启动**——真正卡住的是沙箱初始化在拉起 GPU
+ * 子进程时失败，而不是 GPU 本身。
+ *
+ * 放在 JS 里而不是让用户手写命令行开关：双击 exe 是用户最自然的动作，
+ * 要求他们右键加参数不现实。开发态一直由 dev-electron.mjs 传这个开关，
+ * 打包版没有那个脚本，所以由主进程自己补上。
+ *
+ * 注意：这削弱了渲染进程的 OS 级隔离。Lcode 的写操作与命令执行另有自己的
+ * 权限层与沙箱 helper（`lcode-sandbox-win32.exe`）把关，不依赖这个开关。
+ */
+app.commandLine.appendSwitch("no-sandbox");
 
 /*
  * **任务栏图标归组**（Windows）。

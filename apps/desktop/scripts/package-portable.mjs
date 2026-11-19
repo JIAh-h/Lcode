@@ -71,14 +71,46 @@ await mkdir(join(appRoot, 'native'), { recursive: true })
 await cp(sandboxNative, join(appRoot, 'native', 'lcode-sandbox-win32.exe'), { dereference: true })
 await writeFile(
   join(appRoot, 'package.json'),
-  JSON.stringify({ name: 'lcode-desktop', version: '0.1.0', main: 'dist/main.js' }, null, 2) + '\n',
+  JSON.stringify(
+    {
+      name: 'lcode-desktop',
+      version: '0.1.0',
+      main: 'dist/main.js',
+      /*
+       * 下面三项不是运行时需要，而是 electron-builder 生成安装器时读的：
+       * 缺 description/author 会给警告，缺 electron 版本则直接报
+       * "Cannot compute electron version"。写在 staging 里让两条发布路径共用。
+       */
+      description: 'Lcode - local-first AI coding workbench',
+      author: { name: 'Lcode' },
+      devDependencies: { electron: JSON.parse(await readFile(join(desktopRoot, 'node_modules', 'electron', 'package.json'), 'utf8')).version },
+    },
+    null,
+    2,
+  ) + '\n',
   'utf8',
 )
 
 // 主进程 bundle 对 better-sqlite3 保持 external；把 JS 包复制到 app 目录，
 // native.ts 则通过下面的最小包根定位 Electron ABI 的显式 binding。
 await mkdir(join(appRoot, 'node_modules'), { recursive: true })
-await cp(sqlitePackage, join(appRoot, 'node_modules', 'better-sqlite3'), { recursive: true, dereference: true })
+/*
+ * **只拷运行时需要的部分**。
+ *
+ * `better-sqlite3` 整目录 69.8MB，其中 99% 是编译中间产物：
+ * `build/` 58MB（ABI 127 的二进制——我们实际加载的是
+ * `@lcode/session-persistence-sqlite/native/electron-130/` 那份 ABI 130）、
+ * `deps/` 9.7MB（SQLite 源码）、`bin/` 1.8MB（预编译下载器）、`src/` C++ 源码。
+ *
+ * 运行时真正用到的只有 `lib/*.js`（23KB）。实测精简后启动、建库、建会话全部正常
+ * （341MB → 273MB，安装器约 99MB → 32MB）。
+ */
+const sqliteRuntimeOnly = join(appRoot, 'node_modules', 'better-sqlite3')
+await mkdir(sqliteRuntimeOnly, { recursive: true })
+await cp(join(sqlitePackage, 'lib'), join(sqliteRuntimeOnly, 'lib'), { recursive: true, dereference: true })
+for (const file of ['package.json', 'LICENSE']) {
+  await cp(join(sqlitePackage, file), join(sqliteRuntimeOnly, file), { dereference: true })
+}
 const sqliteBundleRoot = join(appRoot, 'node_modules', '@lcode', 'session-persistence-sqlite')
 await mkdir(sqliteBundleRoot, { recursive: true })
 await cp(sqliteNative, join(sqliteBundleRoot, 'native'), { recursive: true, dereference: true })
@@ -109,6 +141,7 @@ const manifest = {
   sandboxHelper: 'resources/app/native/lcode-sandbox-win32.exe',
 }
 await writeFile(join(outRoot, 'lcode-manifest.json'), JSON.stringify(manifest, null, 2) + '\n', 'utf8')
+
 
 console.log(`portable 包已生成：${outRoot}`)
 console.log(`  分发压缩包：${archivePath}`)

@@ -406,6 +406,19 @@ export class InstalledPluginLifecycleService {
     await this.installations.setEnabled({ ...input, enabled: false })
   }
 
+  /**
+   * **只回收运行中的资源，不改落库的启用意图**。
+   *
+   * `deactivate()` 把 `enabled` 置 false——那是"用户主动停用"。但进程退出时
+   * 我们是"不得不停止运行"，不是"用户不想用它了"。两者必须分开：
+   * 否则每次关窗都会清掉用户对插件的启用选择（打包版关掉再打开就变回未启用）。
+   *
+   * 与 `deactivate` 的唯一差别就是最后那步 `setEnabled(false)`。
+   */
+  async shutdown(input: { readonly id: string; readonly version: string }): Promise<void> {
+    await this.lifecycle.deactivateByKey(`${input.id}@${input.version}`)
+  }
+
   async uninstall(input: { readonly id: string; readonly version: string }): Promise<void> {
     await this.deactivate(input)
     await this.installations.uninstall(input)

@@ -453,11 +453,30 @@ export function WorkspacePage() {
   const [reviewPlanSeq, setReviewPlanSeq] = useState<number | null>(null)
   const dismissedPlanSeq = useRef<number | null>(null)
   const [agentPreset, setAgentPreset] = useState<AgentPresetId | null>(null)
+  /*
+   * 顶部模式标签显示**这个会话创建时用的预设**，不是设置的全局默认值。
+   *
+   * `session/preset` 在创建会话时就写进日志了（`{preset, source}`，source 区分
+   * "用户选的"还是"按默认值来的"），注释还写明它是为了重放时能解释当时的工具集。
+   * 之前这里直接调 `getAgentPreset()` 读全局设置，于是用创造模式建的会话
+   * 也显示"标准模式"——与它实际在跑的工具集不符（实测踩过）。
+   *
+   * 优先用日志里的事实；只有老会话（迁移前没有这条事件）才回落到全局默认。
+   */
   useEffect(() => {
+    let found: AgentPresetId | null = null
+    for (const event of events) {
+      if (event.type !== 'session/preset') continue
+      found = event.data.preset as AgentPresetId
+    }
+    if (found !== null) {
+      setAgentPreset(found)
+      return
+    }
     void getAgentPreset()
       .then((state) => setAgentPreset(state?.preset ?? null))
       .catch(() => setAgentPreset(null))
-  }, [sessionId])
+  }, [sessionId, events])
   /* Router 会话：把设置里的编排模型读出来，让输入区显示"实际在用的模型" */
   useEffect(() => {
     if (meta?.role !== 'router') {

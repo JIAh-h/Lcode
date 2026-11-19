@@ -886,10 +886,17 @@ function createPluginBundleEntries(plugins: {
          */
         try {
           await plugins.lifecycleService.activate({ id: plugin.id, version: plugin.version })
+          /*
+           * **退出时不要写回"已停用"**。
+           *
+           * `deactivate()` 会调 `setEnabled(false)`——那是"用户主动停用"的语义。
+           * 但这里是被 `composeRuntimeProfile` 逆序 dispose 触发的（关窗、重启），
+           * 若跟着写 false，**每次退出都会清掉用户的启用选择**：打包版关掉再
+           * 打开，插件就变回未启用（实测踩过）。退出只该回收资源，不该动
+           * 持久化意图。
+           */
           return () => {
-            // composeRuntimeProfile 逆序 dispose 时会调用；deactivate 内部幂等
-            void plugins.lifecycleService.deactivate({ id: plugin.id, version: plugin.version }).catch(() => undefined)
-          }
+            void plugins.lifecycleService.shutdown({ id: plugin.id, version: plugin.version }).catch(() => undefined)          }
         } catch (error) {
           console.warn(`[lcode] 插件 ${key} 启动失败（不影响其余能力）：`, error)
           return () => undefined
